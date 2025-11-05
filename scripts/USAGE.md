@@ -1,0 +1,210 @@
+# Scripts Usage Guide
+
+This document explains how to run developer scripts that require environment variables.
+
+## Problem
+
+Many scripts in this project import modules that read environment variables at load time (e.g., `lib/supabase.ts`). Running these scripts without environment variables set causes runtime errors.
+
+## Solutions
+
+We provide **two recommended methods** to run scripts that require environment variables:
+
+### Method 1: Source Environment First (Manual)
+
+Source the `.env.local` file before running the script:
+
+```bash
+source .env.local && npx tsx scripts/quick-kb-test.ts --query "password reset"
+```
+
+**Pros:**
+- Simple and explicit
+- Works with any script runner
+
+**Cons:**
+- Must remember to source `.env.local` each time
+- Requires manual step
+
+### Method 2: Use env-bootstrap (Automatic)
+
+Use the `env-bootstrap.mjs` helper to automatically load `.env.local`:
+
+```bash
+node scripts/env-bootstrap.mjs scripts/quick-kb-test.ts --query "password reset"
+```
+
+**Pros:**
+- Automatically loads `.env.local`
+- Single command
+- No need to remember sourcing
+
+**Cons:**
+- Slightly longer command
+
+## Required Environment Variables
+
+All scripts expect these environment variables to be set in `.env.local`:
+
+- **NEXT_PUBLIC_SUPABASE_URL** - Your Supabase project URL
+- **SUPABASE_SERVICE_ROLE_KEY** - Supabase service role key for server operations
+- **ADMIN_KEY** - Admin key for configuration updates (optional for some scripts)
+
+### Example `.env.local` file:
+
+```bash
+NEXT_PUBLIC_SUPABASE_URL=https://xxx.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJxxx...
+SUPABASE_SERVICE_ROLE_KEY=eyJxxx...
+ADMIN_KEY=your-secret-admin-key
+LLM_API_KEY=sk-your-openai-api-key
+```
+
+## Script Examples
+
+### Quick KB Test
+
+Test the KB adapter search functionality:
+
+```bash
+# Method 1: Manual sourcing
+source .env.local && npx tsx scripts/quick-kb-test.ts --query "password reset"
+
+# Method 2: Auto-bootstrap
+node scripts/env-bootstrap.mjs scripts/quick-kb-test.ts --query "password reset"
+
+# With options
+node scripts/env-bootstrap.mjs scripts/quick-kb-test.ts --tenant demo --query "billing" --max 5
+```
+
+### Configuration Tests
+
+Run configuration system tests:
+
+```bash
+# Method 1: Manual sourcing
+source .env.local && npx tsx tests/config.test.ts
+
+# Method 2: Auto-bootstrap
+node scripts/env-bootstrap.mjs tests/config.test.ts
+```
+
+### Seed Scripts
+
+Seed default configurations:
+
+```bash
+# Bash scripts can source directly
+source .env.local && bash scripts/seed-default-config.sh
+
+# Or pass env via command
+ADMIN_KEY=test123 bash scripts/seed-default-config.sh
+```
+
+## Troubleshooting
+
+### Error: "Missing NEXT_PUBLIC_SUPABASE_URL in environment"
+
+**Cause:** Environment variables not loaded.
+
+**Solution:** Use one of the two methods above to run your script.
+
+### Error: ".env.local file not found"
+
+**Cause:** The `.env.local` file doesn't exist in the project root.
+
+**Solution:** Create a `.env.local` file in `/Users/kirti.krishnan/Desktop/Projects/RTAA/rtaa/` with the required variables listed above.
+
+### Error: "Missing required environment variables: SUPABASE_SERVICE_ROLE_KEY"
+
+**Cause:** The `.env.local` file exists but is missing required variables.
+
+**Solution:** Add the missing variables to your `.env.local` file.
+
+## Handling TLS errors in dev
+
+If scripts hit TLS errors when talking to Supabase or any HTTPS service, **do not** disable TLS verification globally (for example by forcing Node to skip certificate checks). That invites man-in-the-middle attacks.
+
+Use the diagnostics helper instead:
+
+```bash
+node scripts/check-certs.js https://your.supabase.co
+```
+
+The checker prints the certificate subject, issuer, validity window, fingerprint, and whether Node trusts the chain. When validation fails it suggests concrete remediation instead of bypassing security.
+
+Recommended fixes:
+
+- macOS:
+  - `security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain <ca-cert.crt>`
+  - Or import the CA via Keychain Access and set it to “Always Trust”.
+- Linux (Debian/Ubuntu):
+  - `sudo cp <ca-cert.crt> /usr/local/share/ca-certificates/`
+  - `sudo update-ca-certificates`
+- Containers (Docker/dev):
+  - Mount the host CA bundle or install the CA in the image and refresh trust (see Docker docs for custom CAs).
+
+For short-lived local testing with self-signed certs, opt in explicitly:
+
+```bash
+ALLOW_INSECURE_TLS=true
+```
+
+Add it to `.env.local`, restart your dev server, and remove it as soon as you’re done. The application logs a loud warning while this flag is active. **Never** enable it in CI or production.
+
+## How env-bootstrap Works
+
+The `scripts/env-bootstrap.mjs` file:
+
+1. Reads `.env.local` from the project root
+2. Parses key-value pairs (simple `KEY=VALUE` format)
+3. Merges them with existing `process.env`
+4. Spawns `npx tsx` with the merged environment
+5. Runs your script with all environment variables available
+
+## CI/CD Environments
+
+In CI/CD environments (GitHub Actions, etc.), environment variables are typically set via the platform. The bootstrap script merges `.env.local` values with existing environment variables, so CI variables take precedence if already set.
+
+## Adding Environment Checks to New Scripts
+
+If you create a new script that requires environment variables, add this guard at the top:
+
+```typescript
+#!/usr/bin/env tsx
+/**
+ * Your Script
+ *
+ * Usage:
+ *   source .env.local && npx tsx scripts/your-script.ts
+ *   node scripts/env-bootstrap.mjs scripts/your-script.ts
+ */
+
+// Environment check
+const REQUIRED_ENV_VARS = ['NEXT_PUBLIC_SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY'];
+const missingVars = REQUIRED_ENV_VARS.filter(key => !process.env[key]);
+
+if (missingVars.length > 0) {
+  console.error('❌ Error: Missing required environment variables:');
+  missingVars.forEach(key => console.error(`   - ${key}`));
+  console.error('\n💡 Run this script using one of these methods:\n');
+  console.error('   1. source .env.local && npx tsx scripts/your-script.ts');
+  console.error('   2. node scripts/env-bootstrap.mjs scripts/your-script.ts\n');
+  process.exit(1);
+}
+
+// Your imports and script code here...
+```
+
+## Best Practices
+
+1. **Always use Method 2 (env-bootstrap)** for new developers or documentation
+2. **Use Method 1 (manual sourcing)** for quick local testing when you prefer
+3. **Add environment checks** to all new scripts that import project modules
+4. **Keep `.env.local` out of git** (already in `.gitignore`)
+5. **Document required variables** in script headers and this file
+
+---
+
+**Last Updated:** 2025-11-05
+**Maintainer:** RTAA Team

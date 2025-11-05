@@ -1,0 +1,289 @@
+From 52f20847d1112973c3732cbe84b9f078ab755f02 Mon Sep 17 00:00:00 2001
+From: krishankirti <kirti.krishan@exotel.com>
+Date: Wed, 5 Nov 2025 11:32:59 +0530
+Subject: [PATCH 1/4] chore(security): remove NODE_TLS_REJECT_UNAUTHORIZED
+ misuse and add safe opt-in for dev TLS
+
+---
+ .github/workflows/ci.yml | 119 +++++++++++++++++++++++++++++++++++++++
+ lib/supabase.ts          |  92 +++++++++++++++++++++---------
+ tsconfig.json            |   1 +
+ types/global.d.ts        |  13 +++++
+ 4 files changed, 198 insertions(+), 27 deletions(-)
+ create mode 100644 .github/workflows/ci.yml
+ create mode 100644 types/global.d.ts
+
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+new file mode 100644
+index 0000000..6885516
+--- /dev/null
++++ b/.github/workflows/ci.yml
+@@ -0,0 +1,119 @@
++name: CI
++
++# Trigger on push and pull requests to main, develop, and feature branches
++on:
++  push:
++    branches:
++      - main
++      - develop
++      - 'feature/**'
++  pull_request:
++    branches:
++      - main
++      - develop
++      - 'feature/**'
++
++jobs:
++  lint-and-test:
++    name: Lint and Test
++    runs-on: ubuntu-latest
++
++    # Environment variables from GitHub Secrets
++    # Required secrets must be set in repository settings:
++    # Settings > Secrets and variables > Actions > New repository secret
++    env:
++      NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
++      NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
++      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
++      ADMIN_KEY: ${{ secrets.ADMIN_KEY }}
++      LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
++
++    steps:
++      # 1. Checkout repository
++      - name: Checkout code
++        uses: actions/checkout@v4
++
++      # 2. Setup Node.js using .nvmrc
++      - name: Setup Node.js
++        uses: actions/setup-node@v4
++        with:
++          node-version-file: '.nvmrc'
++          cache: 'npm'
++
++      # 3. Print Node version for debugging
++      - name: Print Node version
++        run: |
++          echo "Node version: $(node --version)"
++          echo "NPM version: $(npm --version)"
++
++      - name: Ensure secure TLS not enabled
++        run: |
++          if [ "${{ env.ALLOW_INSECURE_TLS }}" = "true" ]; then
++            echo "ERROR: ALLOW_INSECURE_TLS must not be set in CI (dangerous)."
++            exit 1
++          fi
++
++      # 4. Validate required secrets are present
++      - name: Validate required secrets
++        run: |
++          echo "🔍 Validating required environment variables..."
++          MISSING_SECRETS=()
++
++          if [ -z "$NEXT_PUBLIC_SUPABASE_URL" ]; then
++            MISSING_SECRETS+=("NEXT_PUBLIC_SUPABASE_URL")
++          fi
++
++          if [ -z "$SUPABASE_SERVICE_ROLE_KEY" ]; then
++            MISSING_SECRETS+=("SUPABASE_SERVICE_ROLE_KEY")
++          fi
++
++          if [ -z "$ADMIN_KEY" ]; then
++            MISSING_SECRETS+=("ADMIN_KEY")
++          fi
++
++          if [ ${#MISSING_SECRETS[@]} -gt 0 ]; then
++            echo "❌ Error: Missing required secrets in GitHub repository settings:"
++            for secret in "${MISSING_SECRETS[@]}"; do
++              echo "   - $secret"
++            done
++            echo ""
++            echo "💡 To fix this:"
++            echo "   1. Go to: Settings > Secrets and variables > Actions"
++            echo "   2. Click 'New repository secret'"
++            echo "   3. Add the missing secrets listed above"
++            echo ""
++            echo "📖 See CI.md for detailed instructions"
++            exit 1
++          fi
++
++          echo "✅ All required secrets are present"
++
++      # 5. Install dependencies
++      - name: Install dependencies
++        run: npm ci
++
++      # 6. Run build (to catch TypeScript errors)
++      - name: Build project
++        run: npm run build
++        continue-on-error: false
++
++      # 7. Run configuration tests
++      - name: Run configuration tests
++        run: |
++          echo "🧪 Running configuration tests..."
++          npx tsx tests/config.test.ts
++        continue-on-error: false
++
++      # 8. Run quick KB test (smoke test)
++      - name: Run KB adapter smoke test
++        run: |
++          echo "🔍 Running KB adapter smoke test..."
++          node scripts/env-bootstrap.mjs scripts/quick-kb-test.ts --query "test" --max 3
++        continue-on-error: false
++
++      # 9. Report success
++      - name: Report success
++        if: success()
++        run: |
++          echo "✅ All tests passed!"
++          echo "🎉 CI pipeline completed successfully"
+diff --git a/lib/supabase.ts b/lib/supabase.ts
+index a451572..15ded9d 100644
+--- a/lib/supabase.ts
++++ b/lib/supabase.ts
+@@ -1,45 +1,83 @@
+ import { createClient } from '@supabase/supabase-js';
+ 
+-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+-const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
++const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
++const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+ 
+-if (!supabaseUrl) {
++if (!SUPABASE_URL) {
+   throw new Error('Missing NEXT_PUBLIC_SUPABASE_URL in environment');
+ }
+-if (!supabaseServiceRoleKey) {
++if (!SUPABASE_SERVICE_ROLE_KEY) {
+   throw new Error('Missing SUPABASE_SERVICE_ROLE_KEY in environment');
+ }
+ 
+-// Custom fetch with better error handling for Node.js and corporate proxies
++/**
++ * Custom fetch with opt-in insecure TLS support for local development
++ *
++ * SECURITY WARNING: By default, this function validates TLS certificates.
++ * Only use ALLOW_INSECURE_TLS=true for ephemeral local testing with self-signed certificates.
++ *
++ * To fix TLS errors properly:
++ * 1. Run `node scripts/check-certs.js <your-supabase-url>` to diagnose
++ * 2. Add your CA certificate to system trust store (recommended)
++ * 3. See scripts/USAGE.md for detailed instructions
++ *
++ * DO NOT use insecure TLS in production or CI environments.
++ */
+ const customFetch: typeof fetch = async (input, init) => {
+   try {
+-    // For development: bypass SSL verification for corporate proxies
+-    // In Node.js 20+, we need to handle self-signed certificates
+-    const https = await import('https');
+-    const agent = new https.Agent({
+-      rejectUnauthorized: false, // Accept self-signed certificates
+-    });
+-
+-    const response = await fetch(input, {
+-      ...init,
+-      // @ts-ignore - agent is valid for Node.js fetch
+-      agent,
+-      // @ts-ignore - keepalive may not be in types but is valid
+-      keepalive: false,
+-    });
+-    return response;
+-  } catch (error) {
+-    console.error('Supabase fetch error:', error);
+-    throw error;
++    const allowInsecure = process.env.ALLOW_INSECURE_TLS === 'true';
++
++    if (allowInsecure && !globalThis.__INSECURE_TLS_WARNING_SHOWN) {
++      console.warn('');
++      console.warn('⚠️  WARNING: INSECURE TLS MODE ENABLED ⚠️');
++      console.warn('⚠️  ALLOW_INSECURE_TLS=true bypasses certificate validation.');
++      console.warn('⚠️  This should ONLY be used for local development with self-signed certs.');
++      console.warn('⚠️  Remove ALLOW_INSECURE_TLS from .env.local before sharing code or deploying.');
++      console.warn('');
++      globalThis.__INSECURE_TLS_WARNING_SHOWN = true;
++    }
++
++    if (allowInsecure) {
++      const https = await import('https');
++      const agent = new https.Agent({ rejectUnauthorized: !allowInsecure });
++      const insecureInit = { ...(init ?? {}), agent, keepalive: false } as RequestInit;
++      return await fetch(input, insecureInit);
++    }
++
++    return await fetch(input, init);
++  } catch (err: any) {
++    const message = err?.message || '';
++    const code = err?.cause?.code;
++
++    if (
++      code === 'SELF_SIGNED_CERT_IN_CHAIN' ||
++      code === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE' ||
++      code === 'DEPTH_ZERO_SELF_SIGNED_CERT' ||
++      message.includes('self signed') ||
++      message.includes('certificate') ||
++      message.includes('SSL') ||
++      message.includes('TLS')
++    ) {
++      console.error('');
++      console.error('❌ TLS Certificate Error when connecting to:', input);
++      console.error('');
++      console.error('🔍 Diagnose with: node scripts/check-certs.js', typeof input === 'string' ? input : SUPABASE_URL);
++      console.error('');
++      console.error('✅ Recommended fixes:');
++      console.error('  1) Add CA cert to system trust store (macOS Keychain, Linux ca-certificates).');
++      console.error('  2) Use properly signed certificates for the service.');
++      console.error('  3) For local dev only (ephemeral): add ALLOW_INSECURE_TLS=true to .env.local (NOT for CI).');
++      console.error('');
++    }
++
++    throw err;
+   }
+ };
+ 
+-export const supabase = createClient(supabaseUrl, supabaseServiceRoleKey, {
++export const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+   auth: { persistSession: false },
+   global: {
+     headers: { 'x-rt-agent-assist': 'rtaa-demo' },
+-    fetch: customFetch,
++    fetch: customFetch as any,
+   },
+ });
+-
+-
+diff --git a/tsconfig.json b/tsconfig.json
+index fb06881..fbcaf04 100644
+--- a/tsconfig.json
++++ b/tsconfig.json
+@@ -37,6 +37,7 @@
+     "next-env.d.ts",
+     "**/*.ts",
+     "**/*.tsx",
++    "types/**/*.d.ts",
+     ".next/types/**/*.ts",
+     ".next/dev/types/**/*.ts"
+   ],
+diff --git a/types/global.d.ts b/types/global.d.ts
+new file mode 100644
+index 0000000..587f3f0
+--- /dev/null
++++ b/types/global.d.ts
+@@ -0,0 +1,13 @@
++/**
++ * Global type declarations for RTAA
++ */
++
++declare global {
++  /**
++   * Flag to track if insecure TLS warning has been shown
++   * Used by lib/supabase.ts to show warning only once
++   */
++  var __INSECURE_TLS_WARNING_SHOWN: boolean | undefined;
++}
++
++export {};
+-- 
+2.50.1 (Apple Git-155)
+

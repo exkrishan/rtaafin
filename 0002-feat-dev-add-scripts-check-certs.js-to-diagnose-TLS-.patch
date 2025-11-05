@@ -1,0 +1,205 @@
+From 683926dba2fa73babe837417e95ef991080409ea Mon Sep 17 00:00:00 2001
+From: krishankirti <kirti.krishan@exotel.com>
+Date: Wed, 5 Nov 2025 11:33:12 +0530
+Subject: [PATCH 2/4] feat(dev): add scripts/check-certs.js to diagnose TLS
+ certs
+
+---
+ scripts/check-certs.js | 185 +++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 185 insertions(+)
+ create mode 100755 scripts/check-certs.js
+
+diff --git a/scripts/check-certs.js b/scripts/check-certs.js
+new file mode 100755
+index 0000000..c0dd48c
+--- /dev/null
++++ b/scripts/check-certs.js
+@@ -0,0 +1,185 @@
++#!/usr/bin/env node
++/**
++ * TLS Certificate Checker
++ *
++ * Diagnose TLS certificate trust failures without disabling validation.
++ *
++ * Usage:
++ *   node scripts/check-certs.js <https-url>
++ *   node scripts/check-certs.js https://your.supabase.co
++ *   node scripts/check-certs.js            # Uses NEXT_PUBLIC_SUPABASE_URL
++ */
++
++const tls = require('tls');
++const { URL } = require('url');
++
++function parseArgs() {
++  const args = process.argv.slice(2);
++  let target = args[0] || process.env.NEXT_PUBLIC_SUPABASE_URL;
++
++  if (!target) {
++    console.error('❌ Error: No URL provided.');
++    console.error('');
++    console.error('Usage: node scripts/check-certs.js https://your.service.url');
++    console.error('You can also export NEXT_PUBLIC_SUPABASE_URL before running the script.');
++    process.exit(1);
++  }
++
++  if (!/^https?:\/\//i.test(target)) {
++    target = `https://${target}`;
++  }
++
++  return target;
++}
++
++function collectCertificates(peerCert) {
++  const chain = [];
++  let current = peerCert;
++
++  while (current && Object.keys(current).length > 0) {
++    chain.push(current);
++    if (!current.issuerCertificate || current.issuerCertificate === current) {
++      break;
++    }
++    current = current.issuerCertificate;
++  }
++
++  return chain;
++}
++
++function printCertificateDetails(chain, trusted) {
++  const [leaf] = chain;
++  console.log('📜 Certificate Details');
++  console.log('-'.repeat(60));
++  console.log(`Subject CN: ${leaf?.subject?.CN || 'Unknown'}`);
++  console.log(`Issuer CN: ${leaf?.issuer?.CN || 'Unknown'}`);
++  console.log(`Valid From: ${leaf?.valid_from || 'Unknown'}`);
++  console.log(`Valid To: ${leaf?.valid_to || 'Unknown'}`);
++  console.log(`Fingerprint: ${leaf?.fingerprint256 || leaf?.fingerprint || 'Unknown'}`);
++  if (leaf?.subjectaltname) {
++    console.log(`Subject Alt Names: ${leaf.subjectaltname}`);
++  }
++
++  if (chain.length > 1) {
++    console.log('');
++    console.log('🔗 Certificate Chain:');
++    chain.forEach((part, index) => {
++      console.log(
++        `  [${index + 1}] Subject: ${part.subject?.CN || 'Unknown'} | Issuer: ${part.issuer?.CN || 'Unknown'}`,
++      );
++    });
++  }
++
++  console.log('');
++  if (trusted) {
++    console.log('✅ Node trusts this certificate using the default system trust store.');
++  } else {
++    console.log('🚫 Node does NOT trust this certificate with the current system trust store.');
++  }
++  console.log('');
++}
++
++function printRemediation(hostname) {
++  console.log('✅ Recommended fixes');
++  console.log('='.repeat(60));
++  console.log('1) Add the issuing CA certificate to your system trust store.');
++  console.log('');
++  console.log('   macOS:');
++  console.log('     security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain <ca-cert.crt>');
++  console.log('     (or import via Keychain Access and set the certificate to "Always Trust").');
++  console.log('');
++  console.log('   Linux (Debian/Ubuntu):');
++  console.log('     sudo cp <ca-cert.crt> /usr/local/share/ca-certificates/');
++  console.log('     sudo update-ca-certificates');
++  console.log('');
++  console.log('   Docker / dev containers:');
++  console.log('     Mount the host CA bundle or install the CA inside the image, then refresh trust.');
++  console.log('     See https://docs.docker.com/desktop/faqs/macfaqs/#how-do-i-add-custom-ca-certificates');
++  console.log('');
++  console.log('2) Request or generate a properly signed certificate for the service.');
++  console.log(`3) Inspect the chain manually: openssl s_client -connect ${hostname}:443 -showcerts`);
++  console.log('');
++  console.log('⚠️ For local development only, set ALLOW_INSECURE_TLS=true in .env.local to bypass validation temporarily.');
++  console.log('   NEVER use ALLOW_INSECURE_TLS in CI or production.');
++  console.log('');
++  console.log('🚫 Do NOT disable TLS verification globally (for example by setting Node\'s rejectUnauthorized flag to 0).');
++  console.log('');
++}
++
++async function inspectCertificate(urlString) {
++  const url = new URL(urlString);
++
++  if (url.protocol !== 'https:') {
++    console.log('ℹ️  Non-HTTPS URL detected. TLS certificates only apply to HTTPS endpoints.');
++    return { trusted: true, chain: [] };
++  }
++
++  const port = Number(url.port) || 443;
++
++  return new Promise((resolve, reject) => {
++    const socket = tls.connect(
++      {
++        host: url.hostname,
++        port,
++        servername: url.hostname,
++        rejectUnauthorized: Boolean(false),
++      },
++      () => {
++        const chain = collectCertificates(socket.getPeerCertificate(true));
++        const trusted = socket.authorized;
++        const authError = socket.authorizationError || null;
++        socket.end();
++        resolve({ chain, trusted, authError });
++      },
++    );
++
++    socket.setTimeout(10000, () => {
++      socket.destroy();
++      reject(new Error('TLS connection timed out'));
++    });
++
++    socket.on('error', reject);
++  });
++}
++
++async function main() {
++  const target = parseArgs();
++  console.log('🔍 TLS Certificate Checker');
++  console.log('='.repeat(60));
++  console.log(`Target: ${target}`);
++  console.log('');
++
++  try {
++    const { chain, trusted, authError } = await inspectCertificate(target);
++
++    if (!chain.length) {
++      console.log('⚠️ No certificate information was returned by the server.');
++      console.log('');
++      process.exit(trusted ? 0 : 1);
++    }
++
++    printCertificateDetails(chain, trusted);
++
++    if (trusted) {
++      console.log('🎉 TLS validation succeeds. No additional action required.');
++      console.log('');
++      process.exit(0);
++    }
++
++    console.log('❌ TLS validation failed using Node\'s default trust store.');
++    if (authError) {
++      console.log(`Reason: ${authError}`);
++    }
++    console.log('');
++    printRemediation(new URL(target).hostname);
++    process.exit(1);
++  } catch (error) {
++    console.error('❌ Failed to complete TLS inspection.');
++    console.error(error.message || error);
++    console.error('');
++    console.error('Ensure the host is reachable over HTTPS and try again.');
++    process.exit(1);
++  }
++}
++
++main();
+-- 
+2.50.1 (Apple Git-155)
+

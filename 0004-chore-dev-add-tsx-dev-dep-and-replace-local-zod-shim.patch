@@ -1,0 +1,1008 @@
+From ba0349928a4cf6c34ecf2c4c697525ae3927ac98 Mon Sep 17 00:00:00 2001
+From: krishankirti <kirti.krishan@exotel.com>
+Date: Wed, 5 Nov 2025 12:35:42 +0530
+Subject: [PATCH 4/4] chore(dev): add tsx dev dep and replace local zod shim
+ with real 'zod' package
+
+---
+ lib/summary.ts        | 654 ++++++++++++++++++++++++++++++++++++++++++
+ package-lock.json     |  14 +
+ package.json          |  10 +-
+ tests/summary.test.ts | 245 ++++++++++++++++
+ 4 files changed, 920 insertions(+), 3 deletions(-)
+ create mode 100644 lib/summary.ts
+ create mode 100644 tests/summary.test.ts
+
+diff --git a/lib/summary.ts b/lib/summary.ts
+new file mode 100644
+index 0000000..f78917a
+--- /dev/null
++++ b/lib/summary.ts
+@@ -0,0 +1,654 @@
++import { supabase } from '@/lib/supabase';
++import { getEffectiveConfig } from '@/lib/config';
++import { emitTelemetry } from '@/lib/telemetry';
++import { z, infer as zInfer } from 'zod';
++
++type RawDisposition = {
++  label?: string;
++  score?: number;
++  confidence?: number;
++};
++
++export interface SummaryResponse {
++  issue: string;
++  resolution: string;
++  next_steps: string;
++  dispositions: Array<{ label: string; score: number }>;
++  confidence: number;
++  raw?: any;
++}
++
++export interface MappedDisposition {
++  originalLabel: string;
++  score: number;
++  mappedCode: string;
++  mappedTitle: string;
++  matchType: 'code' | 'title' | 'tag' | 'fallback';
++  taxonomyTags: string[];
++  confidence: number;
++}
++
++export interface GenerateCallSummaryResult {
++  ok: boolean;
++  summary?: SummaryResponse;
++  mappedDispositions?: MappedDisposition[];
++  usedFallback: boolean;
++  error?: string;
++}
++
++interface TaxonomyRow {
++  code: string;
++  title: string;
++  tags?: string[] | null;
++}
++
++interface TranscriptData {
++  combined: string;
++  chunks: string[];
++}
++
++const LLM_RESPONSE_SCHEMA = z.object({
++  issue: z.string(),
++  resolution: z.string().optional(),
++  next_steps: z.string().optional(),
++  dispositions: z
++    .array(
++      z.object({
++        label: z.string(),
++        score: z.number().optional(),
++      })
++    )
++    .optional(),
++  confidence: z.number().optional(),
++});
++
++type LlmStructuredSummary = zInfer<typeof LLM_RESPONSE_SCHEMA>;
++
++const summaryCache = new Map<
++  string,
++  { value: GenerateCallSummaryResult; expiry: number }
++>();
++const SUMMARY_CACHE_TTL_MS = 5000;
++const RAW_OUTPUT_LIMIT = 16000;
++
++class TimeoutError extends Error {
++  code = 'TIMEOUT';
++  constructor(message: string) {
++    super(message);
++  }
++}
++
++const sleep = (ms: number): Promise<void> =>
++  new Promise((resolve) => setTimeout(resolve, ms));
++
++const truncate = (value: string, max: number): string =>
++  value.length > max ? `${value.slice(0, max)}…` : value;
++
++function getCachedSummary(key: string): GenerateCallSummaryResult | null {
++  const cached = summaryCache.get(key);
++  if (!cached) return null;
++
++  if (Date.now() > cached.expiry) {
++    summaryCache.delete(key);
++    return null;
++  }
++
++  return cached.value;
++}
++
++function setCachedSummary(key: string, value: GenerateCallSummaryResult): void {
++  summaryCache.set(key, {
++    value,
++    expiry: Date.now() + SUMMARY_CACHE_TTL_MS,
++  });
++}
++
++export function resetSummaryCache(): void {
++  summaryCache.clear();
++}
++
++async function fetchTranscript(callId: string): Promise<TranscriptData> {
++  const { data, error } = await supabase
++    .from('ingest_events')
++    .select('text')
++    .eq('call_id', callId)
++    .order('seq', { ascending: true });
++
++  if (error) {
++    throw new Error(`Failed to load transcript: ${error.message}`);
++  }
++
++  const chunks =
++    data
++      ?.map((row) => (row?.text ?? '').trim())
++      .filter((text) => Boolean(text)) ?? [];
++
++  if (chunks.length === 0) {
++    throw new Error('No transcript events found for call');
++  }
++
++  return {
++    combined: chunks.join('\n'),
++    chunks,
++  };
++}
++
++function buildPrompt(transcript: string): string {
++  return [
++    'You are an assistant that summarizes a customer support call into structured JSON with fields:',
++    'issue (string), resolution (string), next_steps (string), dispositions (array of {label, score between 0 and 1}), confidence (0-1).',
++    'Return ONLY valid JSON. Do not include markdown, prose, or explanations.',
++    '',
++    'Transcript:',
++    '"""',
++    transcript.trim(),
++    '"""',
++  ].join('\n');
++}
++
++async function callLLM(prompt: string, timeoutMs: number): Promise<string> {
++  const llmUrl = process.env.LLM_API_URL;
++  if (!llmUrl) {
++    throw new Error('LLM_API_URL is not configured');
++  }
++
++  const controller = new AbortController();
++  const timeoutHandle = setTimeout(() => controller.abort(), timeoutMs);
++
++  try {
++    const response = await fetch(llmUrl, {
++      method: 'POST',
++      headers: {
++        'Content-Type': 'application/json',
++      },
++      body: JSON.stringify({
++        prompt,
++        maxTokens: 400,
++      }),
++      signal: controller.signal,
++    });
++
++    const raw = await response.text();
++
++    if (!response.ok) {
++      throw new Error(
++        `LLM request failed: ${response.status} ${response.statusText} ${raw}`
++      );
++    }
++
++    return raw;
++  } catch (error: any) {
++    if (error?.name === 'AbortError') {
++      throw new TimeoutError(`LLM request timed out after ${timeoutMs}ms`);
++    }
++    throw error;
++  } finally {
++    clearTimeout(timeoutHandle);
++  }
++}
++
++function parseLLMResponse(raw: string): any {
++  try {
++    return JSON.parse(raw);
++  } catch (_) {
++    // Try to detect JSON wrapper structures or embedded JSON
++  }
++
++  try {
++    const wrapper = JSON.parse(raw);
++    if (typeof wrapper === 'string') {
++      return JSON.parse(wrapper);
++    }
++
++    const content =
++      typeof wrapper?.output === 'string'
++        ? wrapper.output
++        : typeof wrapper?.content === 'string'
++        ? wrapper.content
++        : Array.isArray(wrapper?.choices) &&
++          typeof wrapper.choices[0]?.message?.content === 'string'
++        ? wrapper.choices[0].message.content
++        : null;
++
++    if (content) {
++      return JSON.parse(content);
++    }
++  } catch (_) {
++    // ignore
++  }
++
++  const jsonMatch = raw.match(/\{[\s\S]*\}/);
++  if (jsonMatch) {
++    try {
++      return JSON.parse(jsonMatch[0]);
++    } catch (_) {
++      // ignore
++    }
++  }
++
++  throw new Error('Unable to parse LLM response as JSON');
++}
++
++function convertToSummaryPayload(payload: LlmStructuredSummary): SummaryResponse {
++  const dispositionsList: RawDisposition[] = Array.isArray(payload.dispositions)
++    ? payload.dispositions
++    : [];
++
++  const normalizedDispositions = dispositionsList
++    .map((item) => ({
++      label: String(item.label ?? '').trim().toLowerCase(),
++      score: Number.isFinite(Number(item.score))
++        ? Number(item.score)
++        : Number(item.confidence ?? 0),
++    }))
++    .filter((item) => item.label);
++
++  return {
++    issue: payload.issue.trim() || 'Summary unavailable',
++    resolution:
++      String(payload.resolution ?? '').trim() || 'Resolution not captured.',
++    next_steps:
++      String(payload.next_steps ?? '').trim() || 'No next steps recorded.',
++    dispositions:
++      normalizedDispositions.length > 0
++        ? normalizedDispositions.map((item) => ({
++            label: item.label,
++            score: Math.max(0, Math.min(1, item.score ?? 0)),
++          }))
++        : [
++            {
++              label: 'general_inquiry',
++              score: 0.1,
++            },
++          ],
++    confidence: Math.max(
++      0,
++      Math.min(1, Number(payload.confidence ?? 0) || 0)
++    ),
++    raw: payload,
++  };
++}
++
++async function loadDispositionTaxonomy(): Promise<TaxonomyRow[]> {
++  const { data, error } = await supabase
++    .from('disposition_taxonomy')
++    .select('code,title,tags');
++
++  if (error) {
++    throw new Error(`Failed to load disposition taxonomy: ${error.message}`);
++  }
++
++  return data || [];
++}
++
++function mapDispositionsToTaxonomy(
++  dispositions: SummaryResponse['dispositions'],
++  taxonomy: TaxonomyRow[]
++): { mapped: MappedDisposition[]; usedFallback: boolean } {
++  const mapped: MappedDisposition[] = [];
++  let usedFallback = false;
++
++  const fallbackOrder = ['OTHER', 'GENERAL_INQUIRY'];
++  const fallbackEntry =
++    taxonomy.find((item) =>
++      fallbackOrder.includes((item.code || '').toUpperCase())
++    ) || null;
++
++  for (const disposition of dispositions) {
++    const originalLabel = disposition.label || '';
++    const normalized = originalLabel.trim().toLowerCase();
++    const normalizedScore = Number.isFinite(disposition.score)
++      ? disposition.score
++      : 0;
++
++    let matched: TaxonomyRow | null =
++      taxonomy.find(
++        (item) => (item.code || '').toLowerCase() === normalized
++      ) || null;
++    let matchType: MappedDisposition['matchType'] = 'code';
++
++    if (!matched) {
++      matched =
++        taxonomy.find(
++          (item) => (item.title || '').toLowerCase() === normalized
++        ) || null;
++      if (matched) {
++        matchType = 'title';
++      }
++    }
++
++    if (!matched) {
++      const tagMatch = taxonomy.find((item) => {
++        if (!Array.isArray(item.tags)) return false;
++        return item.tags.some(
++          (tag) => typeof tag === 'string' && tag.toLowerCase() === normalized
++        );
++      });
++
++      if (tagMatch) {
++        matched = tagMatch;
++        matchType = 'tag';
++      }
++    }
++
++    if (!matched && fallbackEntry) {
++      matched = fallbackEntry;
++      matchType = 'fallback';
++      usedFallback = true;
++    } else if (!matched) {
++      usedFallback = true;
++      matched = {
++        code: 'GENERAL_INQUIRY',
++        title: 'General Inquiry',
++        tags: [],
++      };
++      matchType = 'fallback';
++    }
++
++    mapped.push({
++      originalLabel,
++      score: Math.max(0, Math.min(1, normalizedScore)),
++      mappedCode: matched.code,
++      mappedTitle: matched.title,
++      matchType,
++      taxonomyTags: Array.isArray(matched.tags) ? matched.tags : [],
++      confidence:
++        matchType === 'fallback'
++          ? Math.min(normalizedScore || 0.2, 0.3)
++          : normalizedScore || 0.5,
++    });
++  }
++
++  return { mapped, usedFallback };
++}
++
++async function persistAutoNote(params: {
++  callId: string;
++  tenantId?: string;
++  summary: SummaryResponse;
++  mappedDispositions: MappedDisposition[];
++  rawLLMOutput: string;
++  model?: string;
++  promptVersion?: string;
++}) {
++  const {
++    callId,
++    tenantId,
++    summary,
++    mappedDispositions,
++    rawLLMOutput,
++    model,
++    promptVersion,
++  } = params;
++
++  const payload = {
++    call_id: callId,
++    tenant_id: tenantId || null,
++    issue: summary.issue,
++    resolution: summary.resolution,
++    next_steps: summary.next_steps,
++    dispositions: mappedDispositions.map((item) => ({
++      code: item.mappedCode,
++      title: item.mappedTitle,
++      score: item.score,
++      matchType: item.matchType,
++      confidence: item.confidence,
++    })),
++    confidence: summary.confidence,
++    raw_llm_output: truncate(rawLLMOutput, RAW_OUTPUT_LIMIT),
++    model: model || null,
++    prompt_version: promptVersion || null,
++    note: JSON.stringify(
++      {
++        issue: summary.issue,
++        resolution: summary.resolution,
++        next_steps: summary.next_steps,
++        dispositions: summary.dispositions,
++        confidence: summary.confidence,
++      },
++      null,
++      2
++    ),
++  };
++
++  try {
++    const { error } = await supabase
++      .from('auto_notes')
++      .upsert(payload, { onConflict: 'call_id' })
++      .select('id')
++      .single();
++
++    if (error) {
++      console.error('[summary] Failed to upsert auto_notes entry', error);
++    }
++  } catch (err) {
++    console.error('[summary] Unexpected error while saving auto_notes', err);
++  }
++}
++
++function buildFallbackSummary(
++  chunks: string[],
++  options?: { resolution?: string; nextSteps?: string }
++): SummaryResponse {
++  const issueSnippet = chunks.slice(0, 2).join(' ').trim();
++
++  return {
++    issue: issueSnippet || 'Summary unavailable',
++    resolution: options?.resolution ?? 'LLM request failed.',
++    next_steps: options?.nextSteps ?? 'Please retry summary generation later.',
++    dispositions: [
++      {
++        label: 'general_inquiry',
++        score: 0.1,
++      },
++    ],
++    confidence: 0,
++  };
++}
++
++export async function generateCallSummary(
++  callId: string,
++  tenantId?: string
++): Promise<GenerateCallSummaryResult> {
++  const cacheKey = `${tenantId || 'default'}|${callId}`;
++  const cached = getCachedSummary(cacheKey);
++  if (cached) {
++    return cached;
++  }
++
++  let transcriptData: TranscriptData;
++  try {
++    transcriptData = await fetchTranscript(callId);
++  } catch (error: any) {
++    const message = error?.message ?? 'Failed to load transcript';
++    await emitTelemetry('summary_llm_error', {
++      tenant_id: tenantId,
++      call_id: callId,
++      reason: 'transcript_fetch',
++      error: message,
++    });
++
++    const fallbackSummary = buildFallbackSummary([], {
++      resolution: 'Transcript could not be loaded.',
++      nextSteps: 'Please retry after transcript ingestion completes.',
++    });
++
++    const taxonomy = await loadDispositionTaxonomy().catch(() => []);
++    const { mapped } = mapDispositionsToTaxonomy(
++      fallbackSummary.dispositions,
++      taxonomy
++    );
++
++    const result: GenerateCallSummaryResult = {
++      ok: false,
++      usedFallback: true,
++      summary: fallbackSummary,
++      mappedDispositions: mapped,
++      error: message,
++    };
++    setCachedSummary(cacheKey, result);
++    return result;
++  }
++
++  let baseTimeout = 2500;
++  let autoNotesModel: string | undefined;
++  let autoNotesPrompt: string | undefined;
++
++  try {
++    const config = await getEffectiveConfig({ tenantId });
++    if (config?.kb?.timeoutMs) {
++      const parsedTimeout = Number(config.kb.timeoutMs);
++      if (!Number.isNaN(parsedTimeout) && parsedTimeout > 0) {
++        baseTimeout = parsedTimeout;
++      }
++    }
++    autoNotesModel = config?.autoNotes?.model;
++    autoNotesPrompt = config?.autoNotes?.promptVersion;
++  } catch (err) {
++    console.warn('[summary] Failed to load tenant config, using defaults', err);
++  }
++
++  const prompt = buildPrompt(transcriptData.combined);
++
++  let rawLLMOutput = '';
++  let parsedPayload: any = null;
++  let lastError: Error | null = null;
++  let usedFallback = false;
++
++  const attemptTimeouts = [baseTimeout, 4000];
++
++  for (let attempt = 0; attempt < attemptTimeouts.length; attempt++) {
++    const timeoutMs = attemptTimeouts[attempt];
++    try {
++      console.info('[summary] Requesting LLM summary', {
++        callId,
++        tenantId,
++        attempt: attempt + 1,
++        timeoutMs,
++      });
++
++      rawLLMOutput = await callLLM(prompt, timeoutMs);
++      parsedPayload = parseLLMResponse(rawLLMOutput);
++      break;
++    } catch (error: any) {
++      lastError = error instanceof Error ? error : new Error(String(error));
++      const reason = error instanceof TimeoutError ? 'timeout' : 'llm_request';
++      await emitTelemetry('summary_llm_error', {
++        tenant_id: tenantId,
++        call_id: callId,
++        reason,
++        attempt: attempt + 1,
++        timeout_ms: timeoutMs,
++        error: lastError.message,
++      });
++
++      if (reason === 'timeout' && attempt === 0) {
++        await sleep(200);
++        continue;
++      }
++
++      break;
++    }
++  }
++
++  if (!parsedPayload) {
++    const fallbackSummary = buildFallbackSummary(transcriptData.chunks);
++    const taxonomy = await loadDispositionTaxonomy().catch(() => []);
++    const { mapped } = mapDispositionsToTaxonomy(
++      fallbackSummary.dispositions,
++      taxonomy
++    );
++
++    await persistAutoNote({
++      callId,
++      tenantId,
++      summary: fallbackSummary,
++      mappedDispositions: mapped,
++      rawLLMOutput: rawLLMOutput || lastError?.message || 'LLM failure',
++      model: autoNotesModel,
++      promptVersion: autoNotesPrompt,
++    });
++
++    const result: GenerateCallSummaryResult = {
++      ok: false,
++      summary: fallbackSummary,
++      mappedDispositions: mapped,
++      usedFallback: true,
++      error: lastError?.message ?? 'LLM request failed',
++    };
++
++    setCachedSummary(cacheKey, result);
++    return result;
++  }
++
++  const validation = LLM_RESPONSE_SCHEMA.safeParse(parsedPayload);
++  let summaryPayload: SummaryResponse;
++
++  if (!validation.success) {
++    usedFallback = true;
++    await emitTelemetry('summary_llm_error', {
++      tenant_id: tenantId,
++      call_id: callId,
++      reason: 'malformed_output',
++      error: validation.error.message,
++    });
++
++    summaryPayload = buildFallbackSummary(transcriptData.chunks, {
++      resolution: 'See raw output',
++      nextSteps: 'Review raw model output for details.',
++    });
++  } else {
++    summaryPayload = convertToSummaryPayload(validation.data);
++  }
++
++  const taxonomy = await loadDispositionTaxonomy().catch((error) => {
++    console.error('[summary] Failed to load disposition taxonomy', error);
++    return [];
++  });
++
++  const { mapped, usedFallback: mappingFallback } = mapDispositionsToTaxonomy(
++    summaryPayload.dispositions,
++    taxonomy
++  );
++  usedFallback = usedFallback || mappingFallback;
++
++  await persistAutoNote({
++    callId,
++    tenantId,
++    summary: summaryPayload,
++    mappedDispositions: mapped,
++    rawLLMOutput: rawLLMOutput || JSON.stringify(parsedPayload),
++    model: autoNotesModel,
++    promptVersion: autoNotesPrompt,
++  });
++
++  if (!validation.success) {
++    const result: GenerateCallSummaryResult = {
++      ok: false,
++      summary: summaryPayload,
++      mappedDispositions: mapped,
++      usedFallback: true,
++      error: 'LLM returned malformed output',
++    };
++    setCachedSummary(cacheKey, result);
++    return result;
++  }
++
++  await emitTelemetry('summary_generated', {
++    tenant_id: tenantId,
++    call_id: callId,
++    dispositions: mapped.length,
++    usedFallback,
++    confidence: summaryPayload.confidence,
++  });
++
++  const result: GenerateCallSummaryResult = {
++    ok: true,
++    summary: summaryPayload,
++    mappedDispositions: mapped,
++    usedFallback,
++  };
++
++  setCachedSummary(cacheKey, result);
++  return result;
++}
+diff --git a/package-lock.json b/package-lock.json
+index 5e40358..27b2e3e 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -9,7 +9,9 @@
+       "version": "0.1.0",
+       "dependencies": {
+         "@supabase/supabase-js": "latest",
++        "@types/lodash": "^4.17.20",
+         "dotenv": "latest",
++        "lodash": "^4.17.21",
+         "next": "latest",
+         "react": "latest",
+         "react-dom": "latest"
+@@ -1305,6 +1307,12 @@
+       "dev": true,
+       "license": "MIT"
+     },
++    "node_modules/@types/lodash": {
++      "version": "4.17.20",
++      "resolved": "https://registry.npmjs.org/@types/lodash/-/lodash-4.17.20.tgz",
++      "integrity": "sha512-H3MHACvFUEiujabxhaI/ImO6gUrd8oOurg7LQtS7mbwIXA/cUqWrvBsaeJ23aZEPk1TAYkurjfMbSELfoCXlGA==",
++      "license": "MIT"
++    },
+     "node_modules/@types/node": {
+       "version": "24.10.0",
+       "resolved": "https://registry.npmjs.org/@types/node/-/node-24.10.0.tgz",
+@@ -4524,6 +4532,12 @@
+         "url": "https://github.com/sponsors/sindresorhus"
+       }
+     },
++    "node_modules/lodash": {
++      "version": "4.17.21",
++      "resolved": "https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz",
++      "integrity": "sha512-v2kDEe57lecTulaDIuNTPy3Ry4gLGJ6Z1O3vE1krgXZNrsQ+LFTGHVxVjcXPs17LhbZVGedAJv8XZ1tvj5FvSg==",
++      "license": "MIT"
++    },
+     "node_modules/lodash.merge": {
+       "version": "4.6.2",
+       "resolved": "https://registry.npmjs.org/lodash.merge/-/lodash.merge-4.6.2.tgz",
+diff --git a/package.json b/package.json
+index 731470f..9cf5037 100644
+--- a/package.json
++++ b/package.json
+@@ -3,20 +3,23 @@
+   "version": "0.1.0",
+   "private": true,
+   "scripts": {
+-    "dev": "NODE_TLS_REJECT_UNAUTHORIZED=0 next dev",
++    "dev": "next dev",
+     "build": "next build",
+     "start": "next start",
+-  "lint": "echo \"lint skipped (temporary Phase 0 bypass)\"; exit 0",
++    "lint": "echo \"lint skipped (temporary Phase 0 bypass)\"; exit 0",
+     "format": "prettier --write \"**/*.{ts,tsx,js,json,md}\"",
+     "prepare": "husky install",
+     "demo:dev": "NEXT_PUBLIC_SUPABASE_URL=http://localhost:54321 NEXT_PUBLIC_SUPABASE_ANON_KEY=dev npm run dev"
+   },
+   "dependencies": {
+     "@supabase/supabase-js": "latest",
++    "@types/lodash": "^4.17.20",
+     "dotenv": "latest",
++    "lodash": "^4.17.21",
+     "next": "latest",
+     "react": "latest",
+-    "react-dom": "latest"
++    "react-dom": "latest",
++    "zod": "latest"
+   },
+   "devDependencies": {
+     "@types/node": "latest",
+@@ -27,6 +30,7 @@
+     "husky": "latest",
+     "lint-staged": "latest",
+     "prettier": "latest",
++    "tsx": "latest",
+     "typescript": "latest"
+   },
+   "lint-staged": {
+diff --git a/tests/summary.test.ts b/tests/summary.test.ts
+new file mode 100644
+index 0000000..4db46c2
+--- /dev/null
++++ b/tests/summary.test.ts
+@@ -0,0 +1,245 @@
++#!/usr/bin/env tsx
++/**
++ * Summary Generation Smoke Test / Unit Harness
++ *
++ * Usage:
++ *   # Mocked unit test harness (no Supabase required)
++ *   npx tsx tests/summary.test.ts --mock
++ *
++ *   # Live integration test (requires Supabase + LLM endpoint)
++ *   source .env.local && npx tsx tests/summary.test.ts <callId> [tenantId]
++ */
++
++import fs from 'fs';
++import path from 'path';
++import http from 'http';
++import dotenv from 'dotenv';
++
++const args = process.argv.slice(2);
++
++if (args[0] === '--mock') {
++  runMockedTests()
++    .then(() => {
++      console.log('✅ Mocked summary tests passed.');
++      process.exit(0);
++    })
++    .catch((err) => {
++      console.error('❌ Mocked summary tests failed:', err);
++      process.exit(1);
++    });
++} else {
++  runLiveTest(args).catch((err) => {
++    console.error('❌ Fatal error while generating summary:', err?.message ?? err);
++    process.exit(1);
++  });
++}
++
++async function runLiveTest(argv: string[]) {
++  const envLocalPath = path.resolve(process.cwd(), '.env.local');
++  if (fs.existsSync(envLocalPath)) {
++    dotenv.config({ path: envLocalPath });
++  } else {
++    dotenv.config();
++  }
++
++  const REQUIRED_ENV_VARS = ['NEXT_PUBLIC_SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY'];
++  const missingEnv = REQUIRED_ENV_VARS.filter((key) => !process.env[key]);
++
++  if (missingEnv.length > 0) {
++    console.error('❌ Missing environment variables:');
++    missingEnv.forEach((key) => console.error(`   - ${key}`));
++    console.error('\nLoad .env.local before running this test.');
++    process.exit(1);
++  }
++
++  const callId = argv[0];
++  const tenantId = argv[1];
++
++  if (!callId) {
++    console.error('❌ Usage: npx tsx tests/summary.test.ts <callId> [tenantId]');
++    process.exit(1);
++  }
++
++  const { generateCallSummary } = await import('../lib/summary');
++
++  const result = await generateCallSummary(callId, tenantId);
++  console.log(JSON.stringify(result, null, 2));
++
++  if (!result.ok) {
++    console.error('⚠️  Summary generation completed with errors.');
++    process.exit(1);
++  }
++
++  console.log('✅ Summary generated successfully.');
++}
++
++type MockStore = {
++  transcripts: Record<string, string[]>;
++  taxonomy: Array<{ code: string; title: string; tags?: string[] }>;
++  autoNotes: any[];
++  metrics: any[];
++};
++
++function createMockSupabase(store: MockStore, supabaseClient: any): () => void {
++  const originalFrom = supabaseClient.from?.bind(supabaseClient);
++  supabaseClient.from = (table: string) => {
++    switch (table) {
++      case 'ingest_events':
++        return {
++          select: () => ({
++            eq: (_col: string, callId: string) => ({
++              order: () =>
++                Promise.resolve({
++                  data: (store.transcripts[callId] || []).map((text, index) => ({
++                    text,
++                    seq: index + 1,
++                  })),
++                  error: null,
++                }),
++            }),
++          }),
++        };
++      case 'disposition_taxonomy':
++        return {
++          select: () =>
++            Promise.resolve({
++              data: store.taxonomy,
++              error: null,
++            }),
++        };
++      case 'auto_notes':
++        return {
++          upsert: (payload: any) => ({
++            select: () => ({
++              single: async () => {
++                const row = Array.isArray(payload) ? payload[0] : payload;
++                store.autoNotes.push(row);
++                return {
++                  data: { id: `${row.call_id}-note` },
++                  error: null,
++                };
++              },
++            }),
++          }),
++        };
++      case 'rtaa_metrics':
++        return {
++          insert: async (payload: any) => {
++            store.metrics.push(payload);
++            return { data: null, error: null };
++          },
++        };
++      default:
++        if (typeof originalFrom === 'function') {
++          return originalFrom(table);
++        }
++        throw new Error(`Mock Supabase: unhandled table ${table}`);
++    }
++  };
++
++  return () => {
++    if (originalFrom) {
++      supabaseClient.from = originalFrom;
++    }
++  };
++}
++
++async function runMockedTests() {
++  process.env.NEXT_PUBLIC_SUPABASE_URL =
++    process.env.NEXT_PUBLIC_SUPABASE_URL || 'http://mock.supabase.local';
++  process.env.SUPABASE_SERVICE_ROLE_KEY =
++    process.env.SUPABASE_SERVICE_ROLE_KEY || 'mock-service-role-key';
++
++  const summaryModule = await import('../lib/summary');
++  const { generateCallSummary, resetSummaryCache } = summaryModule;
++  const { supabase } = await import('../lib/supabase');
++
++  const store: MockStore = {
++    transcripts: {
++      'call-valid': [
++        'Customer: I have an issue with my order.',
++        'Agent: Happy to help, let me check that for you.',
++        'Customer: Thank you!',
++      ],
++      'call-invalid': [
++        'Customer: Something weird happened.',
++        'Agent: I will escalate this for further review.',
++      ],
++    },
++    taxonomy: [
++      { code: 'RESOLVED', title: 'Resolved', tags: ['resolved'] },
++      { code: 'GENERAL_INQUIRY', title: 'General Inquiry', tags: ['general', 'inquiry'] },
++      { code: 'OTHER', title: 'Other', tags: ['other'] },
++    ],
++    autoNotes: [],
++    metrics: [],
++  };
++
++  const restoreSupabase = createMockSupabase(store, supabase);
++  const server = http.createServer((req, res) => {
++    if (req.url === '/valid' && req.method === 'POST') {
++      res.writeHead(200, { 'Content-Type': 'application/json' });
++      res.end(
++        JSON.stringify({
++          issue: 'Customer reported an order issue.',
++          resolution: 'Agent identified the order and processed a refund.',
++          next_steps: 'Inform customer via email once refund completes.',
++          dispositions: [
++            { label: 'resolved', score: 0.92 },
++            { label: 'general_inquiry', score: 0.4 },
++          ],
++          confidence: 0.87,
++        })
++      );
++      return;
++    }
++
++    if (req.url === '/invalid' && req.method === 'POST') {
++      res.writeHead(200, { 'Content-Type': 'application/json' });
++      res.end(JSON.stringify({ issue: 123, dispositions: 'bad-data' }));
++      return;
++    }
++
++    res.writeHead(404);
++    res.end('Not Found');
++  });
++
++  await new Promise<void>((resolve) => server.listen(4321, '127.0.0.1', resolve));
++
++  const originalLLM = process.env.LLM_API_URL;
++  try {
++    process.env.LLM_API_URL = 'http://127.0.0.1:4321/valid';
++    resetSummaryCache();
++    const successResult = await generateCallSummary('call-valid', 'tenant-mock');
++    if (!successResult.ok) {
++      throw new Error('Expected successful summary generation for valid mock response.');
++    }
++    if (!successResult.summary || successResult.usedFallback) {
++      throw new Error('Valid summary should not use fallback.');
++    }
++    if (!(successResult.mappedDispositions || []).length) {
++      throw new Error('Expected mapped dispositions for valid response.');
++    }
++
++    process.env.LLM_API_URL = 'http://127.0.0.1:4321/invalid';
++    resetSummaryCache();
++    const malformedResult = await generateCallSummary('call-invalid', 'tenant-mock');
++    if (malformedResult.ok) {
++      throw new Error('Malformed payload should not produce ok=true.');
++    }
++    if (!malformedResult.usedFallback) {
++      throw new Error('Malformed payload should trigger fallback.');
++    }
++    if (!malformedResult.summary?.resolution.includes('See raw output')) {
++      throw new Error('Fallback summary should prompt to review raw output.');
++    }
++
++    if (store.autoNotes.length < 2) {
++      throw new Error('Auto-notes upsert should run for both scenarios.');
++    }
++  } finally {
++    process.env.LLM_API_URL = originalLLM;
++    server.close();
++    restoreSupabase();
++  }
++}
+-- 
+2.50.1 (Apple Git-155)
+

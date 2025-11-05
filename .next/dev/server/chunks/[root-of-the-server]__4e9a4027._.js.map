@@ -1,0 +1,6 @@
+{
+  "version": 3,
+  "sources": [],
+  "sections": [
+    {"offset": {"line": 46, "column": 0}, "map": {"version":3,"sources":["file:///Users/kirti.krishnan/Desktop/Projects/RTAA/rtaa/app/api/debug/env/route.ts"],"sourcesContent":["import { NextResponse } from \"next/server\";\n\nexport async function GET() {\n  try {\n    const url = process.env.NEXT_PUBLIC_SUPABASE_URL || null;\n    const hasServiceKey = !!process.env.SUPABASE_SERVICE_ROLE_KEY;\n\n    let host = null;\n    try {\n      if (url) {\n        const u = new URL(url);\n        host = u.host;\n      }\n    } catch {\n      host = \"invalid-url\";\n    }\n\n    return NextResponse.json({\n      ok: true,\n      envLoaded: !!url,\n      supabaseHost: host,\n      hasServiceKey,\n    });\n  } catch (err: any) {\n    return NextResponse.json({ ok: false, error: String(err) }, { status: 500 });\n  }\n}\n"],"names":[],"mappings":";;;;AAAA;;AAEO,eAAe;IACpB,IAAI;QACF,MAAM,MAAM,gFAAwC;QACpD,MAAM,gBAAgB,CAAC,CAAC,QAAQ,GAAG,CAAC,yBAAyB;QAE7D,IAAI,OAAO;QACX,IAAI;YACF,wCAAS;gBACP,MAAM,IAAI,IAAI,IAAI;gBAClB,OAAO,EAAE,IAAI;YACf;QACF,EAAE,OAAM;YACN,OAAO;QACT;QAEA,OAAO,gJAAY,CAAC,IAAI,CAAC;YACvB,IAAI;YACJ,WAAW,CAAC,CAAC;YACb,cAAc;YACd;QACF;IACF,EAAE,OAAO,KAAU;QACjB,OAAO,gJAAY,CAAC,IAAI,CAAC;YAAE,IAAI;YAAO,OAAO,OAAO;QAAK,GAAG;YAAE,QAAQ;QAAI;IAC5E;AACF","debugId":null}}]
+}

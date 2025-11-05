@@ -1,0 +1,6 @@
+{
+  "version": 3,
+  "sources": [],
+  "sections": [
+    {"offset": {"line": 1, "column": 0}, "map": {"version":3,"sources":["file:///Users/kirti.krishnan/Desktop/Projects/RTAA/rtaa/app/globals.css"],"sourcesContent":["@tailwind base;\n@tailwind components;\n@tailwind utilities;\n\n:root {\n  --background: #ffffff;\n  --foreground: #171717;\n}\n\n@media (prefers-color-scheme: dark) {\n  :root {\n    --background: #0a0a0a;\n    --foreground: #ededed;\n  }\n}\n\nbody {\n  color: var(--foreground);\n  background: var(--background);\n  font-family: Arial, Helvetica, sans-serif;\n}\n\n@layer utilities {\n  .text-balance {\n    text-wrap: balance;\n  }\n}\n"],"names":[],"mappings":"AAAA;;AACA;;AACA;;AAEA;;;;;AAKA;EACE;;;;;;AAMF;;;;;;AAMA;EACE","debugId":null}}]
+}
