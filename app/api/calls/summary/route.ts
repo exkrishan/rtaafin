@@ -8,6 +8,15 @@
 
 import { NextResponse } from 'next/server';
 import { generateCallSummary } from '@/lib/summary';
+import { emitTelemetry } from '@/lib/telemetry';
+
+async function safeTelemetry(event: string, payload: Record<string, any>): Promise<void> {
+  try {
+    await emitTelemetry(event, payload);
+  } catch (err) {
+    console.error(`[api][calls][summary] Telemetry failure for ${event}`, err);
+  }
+}
 
 export async function POST(req: Request) {
   try {
@@ -15,6 +24,7 @@ export async function POST(req: Request) {
     const callId = String(body?.callId || '').trim();
     const tenantId =
       typeof body?.tenantId === 'string' ? body.tenantId.trim() || undefined : undefined;
+    const source = typeof body?.source === 'string' ? body.source : undefined;
 
     if (!callId) {
       return NextResponse.json(
@@ -26,9 +36,27 @@ export async function POST(req: Request) {
       );
     }
 
+    if (source === 'auto-disposition-modal') {
+      await safeTelemetry('disposition_retry', {
+        call_id: callId,
+        tenant_id: tenantId,
+        source,
+      });
+    }
+
     const result = await generateCallSummary(callId, tenantId);
 
     if (!result.ok) {
+      if (source === 'auto-disposition-modal') {
+        await safeTelemetry('disposition_retry_result', {
+          call_id: callId,
+          tenant_id: tenantId,
+          source,
+          success: false,
+          error: result.error ?? 'summary_failed',
+        });
+      }
+
       return NextResponse.json(
         {
           ok: false,
@@ -40,6 +68,16 @@ export async function POST(req: Request) {
         },
         { status: 500 }
       );
+    }
+
+    if (source === 'auto-disposition-modal') {
+      await safeTelemetry('disposition_retry_result', {
+        call_id: callId,
+        tenant_id: tenantId,
+        source,
+        success: true,
+        usedFallback: result.usedFallback,
+      });
     }
 
     return NextResponse.json({
