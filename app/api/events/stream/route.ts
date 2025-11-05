@@ -29,7 +29,9 @@ export async function GET(req: Request) {
     userAgent: req.headers.get('user-agent')?.substring(0, 50),
   });
 
-  // Create a TransformStream to handle SSE
+  // Create a ReadableStream to handle SSE
+  let closeHandler: (() => void) | null = null;
+  
   const stream = new ReadableStream({
     start(controller) {
       // Create a mock response object that writes to the controller
@@ -38,9 +40,13 @@ export async function GET(req: Request) {
         flushHeaders: () => {},
         write: (chunk: string) => {
           try {
-            controller.enqueue(new TextEncoder().encode(chunk));
+            const encoded = typeof chunk === 'string' 
+              ? new TextEncoder().encode(chunk)
+              : chunk;
+            controller.enqueue(encoded);
           } catch (err) {
-            console.error('[sse-endpoint] Write error', err);
+            // Stream might be closed, ignore
+            console.warn('[sse-endpoint] Write error (stream may be closed)', err);
           }
         },
         end: () => {
@@ -57,8 +63,9 @@ export async function GET(req: Request) {
         on: (event: string, handler: any) => {
           if (event === 'close') {
             // Store cleanup handler to call when stream is cancelled
-            return handler;
+            closeHandler = handler;
           }
+          return mockReq; // Return self for chaining
         },
       };
 
@@ -72,6 +79,14 @@ export async function GET(req: Request) {
     },
     cancel() {
       console.info('[sse-endpoint] Stream cancelled', { callId: callId || 'global' });
+      // Call cleanup handler if it exists
+      if (closeHandler) {
+        try {
+          closeHandler();
+        } catch (err) {
+          console.warn('[sse-endpoint] Error in close handler', err);
+        }
+      }
     },
   });
 

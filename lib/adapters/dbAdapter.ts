@@ -38,11 +38,34 @@ const dbAdapter: KBAdapter = {
         .select('id, title, snippet, url, tags')
         .limit(maxResults);
 
-      // Full-text search across title and snippet
-      // Use OR conditions for flexible matching
-      queryBuilder = queryBuilder.or(
-        `title.ilike.%${query}%,snippet.ilike.%${query}%,tags.cs.{${query}}`
-      );
+      // Normalize query: replace underscores with spaces for better matching
+      // e.g., "credit_card_fraud" -> "credit card fraud"
+      const normalizedQuery = query.replace(/_/g, ' ').trim();
+      
+      // Split query into words for better matching
+      const words = normalizedQuery.split(/\s+/).filter(w => w.length > 2);
+      
+      // Build OR conditions for each word
+      // Match if any word appears in title, snippet, or tags
+      const orConditions: string[] = [];
+      
+      // Full phrase match
+      orConditions.push(`title.ilike.%${normalizedQuery}%`);
+      orConditions.push(`snippet.ilike.%${normalizedQuery}%`);
+      
+      // Individual word matches
+      words.forEach(word => {
+        orConditions.push(`title.ilike.%${word}%`);
+        orConditions.push(`snippet.ilike.%${word}%`);
+      });
+      
+      // Tags exact match (for array contains)
+      orConditions.push(`tags.cs.{${normalizedQuery}}`);
+      words.forEach(word => {
+        orConditions.push(`tags.cs.{${word}}`);
+      });
+      
+      queryBuilder = queryBuilder.or(orConditions.join(','));
 
       const { data, error } = await queryBuilder;
 
@@ -54,17 +77,61 @@ const dbAdapter: KBAdapter = {
         return [];
       }
 
-      // Normalize results to KBArticle format
-      const articles: KBArticle[] = (data || []).map((row) => ({
-        id: row.id,
-        title: row.title,
-        snippet: row.snippet,
-        url: row.url || undefined,
-        tags: row.tags || [],
-        source: 'db',
-        confidence: 1.0, // DB results assumed high quality
-        raw: row,
-      }));
+      // Normalize results to KBArticle format with relevance scoring
+      const normalizedQueryLower = normalizedQuery.toLowerCase();
+      const queryWords = normalizedQueryLower.split(/\s+/).filter(w => w.length > 2);
+      
+      const articles: KBArticle[] = (data || []).map((row) => {
+        // Calculate relevance score based on match quality
+        let score = 0.5; // Base score
+        
+        const titleLower = (row.title || '').toLowerCase();
+        const snippetLower = (row.snippet || '').toLowerCase();
+        const tagsLower = (row.tags || []).join(' ').toLowerCase();
+        
+        // Full phrase match in title = highest score
+        if (titleLower.includes(normalizedQueryLower)) {
+          score = 0.95;
+        }
+        // Full phrase match in snippet = high score
+        else if (snippetLower.includes(normalizedQueryLower)) {
+          score = 0.85;
+        }
+        // All words match in title = very high score
+        else if (queryWords.every(word => titleLower.includes(word))) {
+          score = 0.9;
+        }
+        // All words match in snippet = high score
+        else if (queryWords.every(word => snippetLower.includes(word) || titleLower.includes(word))) {
+          score = 0.8;
+        }
+        // Some words match = medium score
+        else {
+          const matchedWords = queryWords.filter(word => 
+            titleLower.includes(word) || snippetLower.includes(word) || tagsLower.includes(word)
+          ).length;
+          score = 0.5 + (matchedWords / queryWords.length) * 0.3; // 0.5-0.8 range
+        }
+        
+        // Boost if tags match
+        if (row.tags && Array.isArray(row.tags)) {
+          const tagMatch = row.tags.some(tag => 
+            normalizedQueryLower.includes(tag.toLowerCase()) || tag.toLowerCase().includes(normalizedQueryLower)
+          );
+          if (tagMatch) score = Math.min(1.0, score + 0.1);
+        }
+        
+        return {
+          id: row.id,
+          title: row.title,
+          snippet: row.snippet,
+          url: row.url || undefined,
+          tags: row.tags || [],
+          source: 'db',
+          confidence: Math.round(score * 100) / 100, // Round to 2 decimals
+          raw: row,
+        };
+      }).sort((a, b) => (b.confidence || 0) - (a.confidence || 0)); // Sort by confidence descending
 
       console.info('[kb-adapter][db] Search completed', {
         latency: `${latencyMs}ms`,

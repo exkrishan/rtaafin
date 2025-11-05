@@ -4,9 +4,11 @@
  */
 
 import { NextResponse } from 'next/server';
+import { broadcastEvent } from '@/lib/realtime';
 
 interface EndCallRequest {
   callId: string;
+  tenantId?: string;
 }
 
 export async function POST(req: Request) {
@@ -21,6 +23,18 @@ export async function POST(req: Request) {
     }
 
     console.info('[call-end] Finalizing call', { callId: body.callId });
+
+    // Broadcast call_end event to SSE clients
+    try {
+      broadcastEvent({
+        type: 'call_end',
+        callId: body.callId,
+      });
+      console.info('[call-end] Broadcast call_end event', { callId: body.callId });
+    } catch (broadcastErr) {
+      console.error('[call-end] Failed to broadcast call_end:', broadcastErr);
+      // Continue anyway
+    }
 
     // TODO: Phase 2 - Implement call finalization logic:
     // - Mark call as complete in database

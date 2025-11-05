@@ -111,10 +111,24 @@ export function registerSseClient(req: any, res: any, callId: string | null = nu
 function sendEvent(res: any, event: RealtimeEvent): void {
   try {
     // Format: event: <type>\ndata: <json>\n\n
-    res.write(`event: ${event.type}\n`);
-    res.write(`data: ${JSON.stringify(event)}\n\n`);
-  } catch (err) {
-    console.error('[realtime] Failed to send event', err);
+    const eventStr = `event: ${event.type}\n`;
+    const dataStr = `data: ${JSON.stringify(event)}\n\n`;
+    
+    // Write both parts
+    if (typeof res.write === 'function') {
+      res.write(eventStr);
+      res.write(dataStr);
+      
+      // Try to flush if available (Node.js streams)
+      if (typeof res.flush === 'function') {
+        res.flush();
+      }
+    } else {
+      console.error('[realtime] res.write is not a function', typeof res);
+    }
+  } catch (err: any) {
+    console.error('[realtime] Failed to send event', err?.message || err);
+    // Don't throw - just log the error
   }
 }
 
