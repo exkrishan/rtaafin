@@ -83,10 +83,13 @@ export function registerSseClient(req: any, res: any, callId: string | null = nu
 
   // Cleanup on disconnect
   req.on('close', () => {
+    const client = clients.get(clientId);
+    const durationMs = client?.createdAt ? Date.now() - client.createdAt.getTime() : 0;
+
     console.info('[realtime] SSE client disconnected', {
       clientId,
       callId: callId || 'global',
-      duration: `${Date.now() - clients.get(clientId)?.createdAt.getTime() || 0}ms`,
+      duration: `${durationMs}ms`,
     });
     clients.delete(clientId);
 
