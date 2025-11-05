@@ -1,9 +1,0 @@
-{
-  "/api/calls/end/route": "app/api/calls/end/route.js",
-  "/api/calls/ingest-transcript/route": "app/api/calls/ingest-transcript/route.js",
-  "/api/calls/intent/route": "app/api/calls/intent/route.js",
-  "/api/events/stream/route": "app/api/events/stream/route.js",
-  "/api/ingest/check/route": "app/api/ingest/check/route.js",
-  "/api/kb/search/route": "app/api/kb/search/route.js",
-  "/dashboard/page": "app/dashboard/page.js"
-}
