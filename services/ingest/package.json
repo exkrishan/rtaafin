@@ -5,7 +5,7 @@
   "main": "dist/server.js",
   "scripts": {
     "dev": "ts-node src/server.ts",
-    "prebuild": "rm -rf ./lib || true && cp -R ../../lib ./lib || true",
+    "prebuild": "if [ ! -d ./lib/pubsub ]; then rm -rf ./lib && mkdir -p ./lib && (cp -R ../../lib/pubsub ./lib/pubsub 2>/dev/null || echo 'Note: lib/pubsub not found at ../../lib/pubsub - ensure it is copied by Dockerfile or build context'); fi",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server.js",
     "test": "jest",
