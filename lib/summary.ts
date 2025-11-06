@@ -884,7 +884,7 @@ async function persistAutoNote(params: {
   };
 
   try {
-    const { error } = await supabase
+    const { error } = await (supabase as any)
       .from('auto_notes')
       .upsert(payload, { onConflict: 'call_id' })
       .select('id')
