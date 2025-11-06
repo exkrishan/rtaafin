@@ -710,7 +710,7 @@ async function loadDispositionTaxonomy(): Promise<TaxonomyRow[]> {
   }
 
   // Transform to match TaxonomyRow interface for backward compatibility
-  return (data || []).map((row) => ({
+  return ((data || []) as any[]).map((row: any) => ({
     parent_id: Number(row.parent_id) || undefined,
     parent_code: String(row.parent_code || ''),
     parent_label: String(row.parent_label || ''),

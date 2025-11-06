@@ -115,8 +115,8 @@ const dbAdapter: KBAdapter = {
         
         // Boost if tags match
         if (row.tags && Array.isArray(row.tags)) {
-          const tagMatch = row.tags.some(tag => 
-            normalizedQueryLower.includes(tag.toLowerCase()) || tag.toLowerCase().includes(normalizedQueryLower)
+          const tagMatch = row.tags.some((tag: any) => 
+            normalizedQueryLower.includes(String(tag).toLowerCase()) || String(tag).toLowerCase().includes(normalizedQueryLower)
           );
           if (tagMatch) score = Math.min(1.0, score + 0.1);
         }
