@@ -1,14 +1,44 @@
 /**
  * Pub/Sub abstraction factory and main exports
+ * 
+ * NOTE: Adapters are loaded dynamically to avoid build-time dependency issues.
+ * This allows the module to be used even when optional dependencies (ioredis, kafkajs)
+ * are not installed.
  */
 
 import { PubSubAdapter, PubSubConfig } from './types';
-import { RedisStreamsAdapter } from './adapters/redisStreamsAdapter';
-import { KafkaAdapter } from './adapters/kafkaAdapter';
-import { InMemoryAdapter } from './adapters/inMemoryAdapter';
+// Dynamic imports to avoid build-time dependency resolution
+// These will be loaded only when needed at runtime
+let RedisStreamsAdapter: any = null;
+let KafkaAdapter: any = null;
+let InMemoryAdapter: any = null;
+
+// Lazy load adapters to avoid requiring optional dependencies at build time
+function getRedisStreamsAdapter() {
+  if (!RedisStreamsAdapter) {
+    RedisStreamsAdapter = require('./adapters/redisStreamsAdapter').RedisStreamsAdapter;
+  }
+  return RedisStreamsAdapter;
+}
+
+function getKafkaAdapter() {
+  if (!KafkaAdapter) {
+    KafkaAdapter = require('./adapters/kafkaAdapter').KafkaAdapter;
+  }
+  return KafkaAdapter;
+}
+
+function getInMemoryAdapter() {
+  if (!InMemoryAdapter) {
+    InMemoryAdapter = require('./adapters/inMemoryAdapter').InMemoryAdapter;
+  }
+  return InMemoryAdapter;
+}
 
 export * from './types';
 export * from './topics';
+
+// Export adapter classes (loaded dynamically)
 export { RedisStreamsAdapter } from './adapters/redisStreamsAdapter';
 export { KafkaAdapter } from './adapters/kafkaAdapter';
 export { InMemoryAdapter } from './adapters/inMemoryAdapter';
