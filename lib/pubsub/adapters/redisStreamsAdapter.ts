@@ -85,7 +85,7 @@ export class RedisStreamsAdapter implements PubSubAdapter {
       );
 
       return msgId as string;
-    } catch (error) {
+    } catch (error: unknown) {
       console.error('[RedisStreamsAdapter] Publish error:', error);
       throw error;
     }
@@ -135,17 +135,19 @@ export class RedisStreamsAdapter implements PubSubAdapter {
     try {
       // Try to create consumer group starting from 0 (beginning of stream)
       await this.redis.xgroup('CREATE', topic, groupName, '0', 'MKSTREAM');
-    } catch (error: any) {
+    } catch (error: unknown) {
       // BUSYGROUP means group already exists - that's fine
-      if (error.message && error.message.includes('BUSYGROUP')) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      if (errorMessage.includes('BUSYGROUP')) {
         // Group exists, continue
         return;
       }
       // Other errors might mean stream doesn't exist yet, try without MKSTREAM
       try {
         await this.redis.xgroup('CREATE', topic, groupName, '0');
-      } catch (err2: any) {
-        if (err2.message && err2.message.includes('BUSYGROUP')) {
+      } catch (err2: unknown) {
+        const err2Message = err2 instanceof Error ? err2.message : String(err2);
+        if (err2Message.includes('BUSYGROUP')) {
           // Group exists, continue
           return;
         }
@@ -228,7 +230,7 @@ export class RedisStreamsAdapter implements PubSubAdapter {
         subscription.consumerGroup,
         msgId
       );
-    } catch (error) {
+    } catch (error: unknown) {
       console.error('[RedisStreamsAdapter] ACK error:', error);
       throw error;
     }
