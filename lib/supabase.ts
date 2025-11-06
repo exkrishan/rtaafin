@@ -1,13 +1,21 @@
 import { createClient } from '@supabase/supabase-js';
 
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
-
-if (!SUPABASE_URL) {
-  throw new Error('Missing NEXT_PUBLIC_SUPABASE_URL in environment');
+// Lazy-load environment variables to avoid errors during build time
+// These will be checked when supabase client is actually created
+function getSupabaseUrl(): string {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
+  if (!url) {
+    throw new Error('Missing NEXT_PUBLIC_SUPABASE_URL in environment');
+  }
+  return url;
 }
-if (!SUPABASE_SERVICE_ROLE_KEY) {
-  throw new Error('Missing SUPABASE_SERVICE_ROLE_KEY in environment');
+
+function getSupabaseServiceRoleKey(): string {
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+  if (!key) {
+    throw new Error('Missing SUPABASE_SERVICE_ROLE_KEY in environment');
+  }
+  return key;
 }
 
 /**
@@ -29,9 +37,10 @@ const customFetch = async (input: RequestInfo | URL, init?: RequestInit): Promis
     const allowInsecure = process.env.ALLOW_INSECURE_TLS === 'true';
     const nodeEnv = process.env.NODE_ENV || '(not set)';
     const isProduction = nodeEnv === 'production';
+    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || '(not set)';
     
     console.log('[supabase] TLS Configuration:');
-    console.log('  SUPABASE_URL:', SUPABASE_URL);
+    console.log('  SUPABASE_URL:', supabaseUrl);
     console.log('  ALLOW_INSECURE_TLS:', allowInsecure);
     console.log('  NODE_ENV:', nodeEnv);
     console.log('  useInsecureTLS:', allowInsecure && !isProduction ? 'true (dev fallback)' : 'false');
