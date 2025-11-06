@@ -83,7 +83,8 @@ const customFetch = async (input: RequestInfo | URL, init?: RequestInit): Promis
         }
       } catch (undiciErr) {
         // If undici import fails, log and continue to fallback
-        console.warn('[supabase] Could not import undici, trying fallback:', undiciErr.message);
+        const errorMessage = undiciErr instanceof Error ? undiciErr.message : String(undiciErr);
+        console.warn('[supabase] Could not import undici, trying fallback:', errorMessage);
       }
       
       // Fallback: Try with https.Agent (works if underlying library supports it)
