@@ -23,7 +23,7 @@ if (!SUPABASE_SERVICE_ROLE_KEY) {
  * Proper Fix: Add Netskope CA to Node.js trust store (see remediation steps below).
  * Temporary Dev Fix: Use ALLOW_INSECURE_TLS=true in .env.local for local dev only.
  */
-const customFetch: typeof fetch = async (input, init) => {
+const customFetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
   // Log configuration at startup (once per process)
   if (!globalThis.__SUPABASE_TLS_CONFIG_LOGGED) {
     const allowInsecure = process.env.ALLOW_INSECURE_TLS === 'true';
@@ -75,9 +75,8 @@ const customFetch: typeof fetch = async (input, init) => {
               rejectUnauthorized: false
             }
           });
-          // Use undici's fetch if available, otherwise fall back to global fetch with dispatcher
-          const fetchFn = undici.fetch || fetch;
-          return await fetchFn(input, {
+          // Use standard fetch with undici dispatcher (ensures Response type compatibility)
+          return await fetch(input, {
             ...(init ?? {}),
             dispatcher
           } as any);
