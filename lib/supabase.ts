@@ -91,7 +91,7 @@ const customFetch = async (input: RequestInfo | URL, init?: RequestInit): Promis
       const https = await import('https');
       const agent = new https.Agent({ 
         rejectUnauthorized: false,
-        keepalive: false 
+        keepAlive: false 
       });
       
       return await fetch(input, {
