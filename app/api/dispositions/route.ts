@@ -45,7 +45,7 @@ export async function GET(req: Request) {
     // Try old schema query - wrap in try-catch to handle fetch exceptions
     let oldResult: any = null;
     try {
-      oldResult = await supabase
+      oldResult = await (supabase as any)
         .from('disposition_taxonomy')
         .select('code, title, tags')
         .order('title', { ascending: true });
@@ -67,10 +67,10 @@ export async function GET(req: Request) {
       
       let newResult: any = null;
       try {
-        newResult = await supabase
-          .from('disposition_taxonomy')
-          .select('parent_id, parent_code, parent_label, parent_category, sub_dispositions')
-          .order('parent_id', { ascending: true });
+          newResult = await (supabase as any)
+            .from('disposition_taxonomy')
+            .select('parent_id, parent_code, parent_label, parent_category, sub_dispositions')
+            .order('parent_id', { ascending: true });
       } catch (fetchErr: any) {
         console.warn('[api][dispositions] New schema fetch exception:', fetchErr.message);
         newResult = { error: { message: fetchErr.message }, data: null };
@@ -87,11 +87,11 @@ export async function GET(req: Request) {
         
         let masterResult: any = null;
         try {
-          masterResult = await supabase
-            .from('dispositions_master')
-            .select('id, code, label, category')
-            .is('parent_disposition_id', null)
-            .order('id', { ascending: true });
+            masterResult = await (supabase as any)
+              .from('dispositions_master')
+              .select('id, code, label, category')
+              .is('parent_disposition_id', null)
+              .order('id', { ascending: true });
         } catch (fetchErr: any) {
           console.error('[api][dispositions] Master table fetch exception:', fetchErr.message);
           return NextResponse.json(

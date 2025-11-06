@@ -35,7 +35,7 @@ export async function emit(eventName: string, payload: Record<string, any>): Pro
 
   // Try to write to Supabase metrics table (if exists)
   try {
-    const { error } = await supabase.from('rtaa_metrics').insert({
+    const { error } = await (supabase as any).from('rtaa_metrics').insert({
       event_name: event.event_name,
       tenant_id: event.tenant_id,
       provider: event.provider,
