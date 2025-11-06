@@ -149,10 +149,27 @@ const customFetch = async (input: RequestInfo | URL, init?: RequestInit): Promis
   }
 };
 
-export const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
-  auth: { persistSession: false },
-  global: {
-    headers: { 'x-rt-agent-assist': 'rtaa-demo' },
-    fetch: customFetch as any,
+// Lazy initialization: only create client when actually accessed
+// This prevents errors during build time when env vars might not be available
+let supabaseClient: ReturnType<typeof createClient> | null = null;
+
+function getSupabaseClient() {
+  if (!supabaseClient) {
+    supabaseClient = createClient(getSupabaseUrl(), getSupabaseServiceRoleKey(), {
+      auth: { persistSession: false },
+      global: {
+        headers: { 'x-rt-agent-assist': 'rtaa-demo' },
+        fetch: customFetch as any,
+      },
+    });
+  }
+  return supabaseClient;
+}
+
+// Export a getter function that creates the client on first access
+// This defers environment variable checks until runtime
+export const supabase = new Proxy({} as ReturnType<typeof createClient>, {
+  get(_target, prop) {
+    return getSupabaseClient()[prop as keyof ReturnType<typeof createClient>];
   },
 });
