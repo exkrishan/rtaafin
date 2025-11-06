@@ -17,7 +17,7 @@ interface RedisSubscription {
 }
 
 export class RedisStreamsAdapter implements PubSubAdapter {
-  private redis: Redis;
+  private redis: RedisInstance | null = null;
   private subscriptions: Map<string, RedisSubscription> = new Map();
   private consumerGroup: string;
   private consumerName: string;
