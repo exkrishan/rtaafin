@@ -3,19 +3,17 @@ FROM node:20-alpine
 WORKDIR /app
 
 # Copy package files
-COPY package*.json ./
-COPY tsconfig.json ./
+COPY services/ingest/package*.json ./
+COPY services/ingest/tsconfig.json ./
 
 # Install dependencies (including dev dependencies for build)
 RUN npm ci
 
-# Copy lib/pubsub - REQUIRED: Build context must be repo root (.)
-# If Render Root Directory is services/ingest, this will fail
-# Solution: Set Render Root Directory to . (repo root) and Dockerfile Path to services/ingest/Dockerfile
+# Copy lib/pubsub from repo root
 COPY lib/pubsub ./lib/pubsub
 
-# Copy source files
-COPY src ./src
+# Copy source files from services/ingest
+COPY services/ingest/src ./src
 
 # Build TypeScript
 # prebuild script will skip if lib/pubsub already exists
