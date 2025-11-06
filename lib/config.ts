@@ -27,6 +27,7 @@ export interface Config {
     enabled: boolean;
     model: string;
     promptVersion: string;
+    timeoutMs?: number;
   };
   disposition: {
     enabled: boolean;
