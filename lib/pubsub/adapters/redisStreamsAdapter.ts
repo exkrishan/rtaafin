@@ -3,8 +3,20 @@
  * Uses XADD for publishing and XREADGROUP for consuming with ack semantics
  */
 
-import Redis, { RedisOptions } from 'ioredis';
+// Dynamic import for optional ioredis dependency
+// This allows the module to be loaded even if ioredis is not installed
+let ioredis: any = null;
+try {
+  ioredis = require('ioredis');
+} catch (e) {
+  // ioredis is optional - adapter will throw if used without it
+}
+
 import { PubSubAdapter, MessageEnvelope, SubscriptionHandle } from '../types';
+
+// Type definitions (using any since ioredis may not be available)
+type RedisInstance = any;
+type RedisOptions = any;
 
 interface RedisSubscription {
   id: string;
@@ -12,7 +24,7 @@ interface RedisSubscription {
   consumerGroup: string;
   consumerName: string;
   handler: (msg: MessageEnvelope) => Promise<void>;
-  redis: Redis;
+  redis: RedisInstance;
   running: boolean;
 }
 
@@ -37,7 +49,11 @@ export class RedisStreamsAdapter implements PubSubAdapter {
       enableReadyCheck: true,
     };
 
-    this.redis = new Redis(url, this.defaultRedisOptions);
+    if (!ioredis) {
+      throw new Error('ioredis is not installed. Install it with: npm install ioredis');
+    }
+    
+    this.redis = new ioredis(url, this.defaultRedisOptions);
 
     this.redis.on('error', (err) => {
       console.error('[RedisStreamsAdapter] Redis error:', err);
@@ -49,6 +65,10 @@ export class RedisStreamsAdapter implements PubSubAdapter {
   }
 
   async publish(topic: string, message: any): Promise<string | void> {
+    if (!this.redis) {
+      throw new Error('Redis client not initialized. ioredis is required.');
+    }
+    
     try {
       const envelope: MessageEnvelope = {
         ...message,
@@ -80,8 +100,12 @@ export class RedisStreamsAdapter implements PubSubAdapter {
     // Create consumer group if it doesn't exist
     await this.ensureConsumerGroup(topic, this.consumerGroup);
 
+    if (!this.redis) {
+      throw new Error('Redis client not initialized. ioredis is required.');
+    }
+    
     // Create a dedicated Redis connection for this subscription
-    const subscriptionRedis = new Redis(this.redis.options);
+    const subscriptionRedis = new ioredis(this.redis.options);
 
     const subscription: RedisSubscription = {
       id,
