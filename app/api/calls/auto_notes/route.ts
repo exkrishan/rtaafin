@@ -34,7 +34,9 @@ export async function POST(req: Request) {
     const author = String(body?.author || 'agent-ui').trim();
     const notes = String(body?.notes || '').trim();
     const dispositions = Array.isArray(body?.dispositions) ? body.dispositions : [];
+    const dispositionId = typeof body?.dispositionId === 'number' ? body.dispositionId : null;
     const subDisposition = typeof body?.subDisposition === 'string' ? body.subDisposition.trim() : null;
+    const subDispositionId = typeof body?.subDispositionId === 'number' ? body.subDispositionId : null;
     const confidence = typeof body?.confidence === 'number' ? Math.max(0, Math.min(1, body.confidence)) : 0;
     const rawLlmOutput = body?.raw_llm_output ? truncate(String(body.raw_llm_output), RAW_OUTPUT_LIMIT) : null;
 
@@ -69,7 +71,9 @@ export async function POST(req: Request) {
       author,
       notes,
       dispositions: validatedDispositions,
+      disposition_id: dispositionId,
       sub_disposition: subDisposition || null,
+      sub_disposition_id: subDispositionId,
       confidence,
       raw_llm_output: rawLlmOutput,
       updated_at: new Date().toISOString(),

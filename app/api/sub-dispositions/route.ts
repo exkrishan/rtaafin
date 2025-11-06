@@ -1,109 +1,97 @@
 /**
  * GET /api/sub-dispositions
  *
- * Fetch sub-dispositions for a given disposition
+ * Fetch sub-dispositions for a given parent disposition from dispositions_master table
  *
  * Query params:
- * - dispositionCode: optional filter by disposition code
+ * - dispositionCode: filter by parent disposition code (required for hierarchical lookup)
+ * - dispositionId: filter by parent disposition ID (alternative to code)
  *
  * Returns:
  * {
  *   ok: true,
- *   subDispositions: [{ code: string, title: string }]
+ *   subDispositions: [{ id: number, code: string, label: string, category: string }]
  * }
  */
 
 import { NextResponse } from 'next/server';
-
-// Common sub-dispositions (can be moved to DB later)
-const SUB_DISPOSITIONS: Record<string, Array<{ code: string; title: string }>> = {
-  // Credit Card related
-  CREDIT_CARD: [
-    { code: 'fraud', title: 'Fraud' },
-    { code: 'block', title: 'Card Block' },
-    { code: 'replacement', title: 'Card Replacement' },
-    { code: 'limit_increase', title: 'Limit Increase' },
-    { code: 'payment_issue', title: 'Payment Issue' },
-    { code: 'statement', title: 'Statement Inquiry' },
-  ],
-  // Debit Card related
-  DEBIT_CARD: [
-    { code: 'fraud', title: 'Fraud' },
-    { code: 'block', title: 'Card Block' },
-    { code: 'replacement', title: 'Card Replacement' },
-    { code: 'pin_reset', title: 'PIN Reset' },
-    { code: 'transaction_dispute', title: 'Transaction Dispute' },
-  ],
-  // Account related
-  ACCOUNT_ISSUE: [
-    { code: 'balance_inquiry', title: 'Balance Inquiry' },
-    { code: 'statement', title: 'Statement Request' },
-    { code: 'transfer', title: 'Transfer Issue' },
-    { code: 'closure', title: 'Account Closure' },
-    { code: 'update_details', title: 'Update Account Details' },
-  ],
-  // Payment related
-  PAYMENT: [
-    { code: 'failed', title: 'Failed Payment' },
-    { code: 'refund', title: 'Refund Request' },
-    { code: 'dispute', title: 'Payment Dispute' },
-    { code: 'reversal', title: 'Payment Reversal' },
-  ],
-  // Escalated
-  ESCALATED: [
-    { code: 'supervisor', title: 'Escalated to Supervisor' },
-    { code: 'manager', title: 'Escalated to Manager' },
-    { code: 'specialist', title: 'Escalated to Specialist' },
-  ],
-  // Default/Other
-  OTHER: [
-    { code: 'general_inquiry', title: 'General Inquiry' },
-    { code: 'information', title: 'Information Request' },
-    { code: 'complaint', title: 'Complaint' },
-    { code: 'feedback', title: 'Feedback' },
-  ],
-};
+import { supabase } from '@/lib/supabase';
 
 export async function GET(req: Request) {
   try {
     const url = new URL(req.url);
     const dispositionCode = url.searchParams.get('dispositionCode');
+    const dispositionId = url.searchParams.get('dispositionId');
 
-    let subDispositions: Array<{ code: string; title: string }> = [];
+    let parentId: number | null = null;
 
+    // If dispositionCode is provided, find the parent disposition ID
     if (dispositionCode) {
-      // Get sub-dispositions for specific disposition
-      const upperCode = dispositionCode.toUpperCase();
-      
-      // Try exact match first
-      if (SUB_DISPOSITIONS[upperCode]) {
-        subDispositions = SUB_DISPOSITIONS[upperCode];
-      } else {
-        // Try partial match (e.g., CREDIT_CARD_FRAUD -> CREDIT_CARD)
-        const matchingKey = Object.keys(SUB_DISPOSITIONS).find(key => 
-          upperCode.includes(key) || key.includes(upperCode)
-        );
-        if (matchingKey) {
-          subDispositions = SUB_DISPOSITIONS[matchingKey];
-        }
+      const { data: parentData, error: parentError } = await supabase
+        .from('dispositions_master')
+        .select('id')
+        .eq('code', dispositionCode.trim())
+        .is('parent_disposition_id', null) // Only get parent dispositions
+        .single();
+
+      if (parentError) {
+        console.warn('[api][sub-dispositions] Parent lookup error:', parentError);
+        // If parent not found, return empty array
+        return NextResponse.json({
+          ok: true,
+          subDispositions: [],
+          count: 0,
+        });
       }
+
+      if (parentData) {
+        parentId = Number(parentData.id);
+      }
+    } else if (dispositionId) {
+      parentId = Number(dispositionId);
+    } else {
+      // No filter provided - return empty array
+      return NextResponse.json({
+        ok: true,
+        subDispositions: [],
+        count: 0,
+      });
     }
 
-    // If no specific match or no code provided, return all unique sub-dispositions
-    if (subDispositions.length === 0) {
-      const allSubDispositions = new Map<string, string>();
-      Object.values(SUB_DISPOSITIONS).forEach(list => {
-        list.forEach(item => {
-          if (!allSubDispositions.has(item.code)) {
-            allSubDispositions.set(item.code, item.title);
-          }
-        });
+    if (!parentId) {
+      return NextResponse.json({
+        ok: true,
+        subDispositions: [],
+        count: 0,
       });
-      subDispositions = Array.from(allSubDispositions.entries()).map(([code, title]) => ({
-        code,
-        title,
-      }));
     }
+
+    // Fetch all sub-dispositions (children) for this parent
+    const { data, error } = await supabase
+      .from('dispositions_master')
+      .select('id, code, label, category')
+      .eq('parent_disposition_id', parentId)
+      .order('id', { ascending: true });
+
+    if (error) {
+      console.error('[api][sub-dispositions] Database error:', error);
+      return NextResponse.json(
+        {
+          ok: false,
+          error: error.message || 'Failed to fetch sub-dispositions',
+        },
+        { status: 500 }
+      );
+    }
+
+    // Transform data to ensure consistent format
+    const subDispositions = (data || []).map((item) => ({
+      id: Number(item.id) || null,
+      code: String(item.code || '').trim(),
+      title: String(item.label || '').trim(), // For backward compatibility
+      label: String(item.label || '').trim(),
+      category: String(item.category || '').trim(),
+    }));
 
     return NextResponse.json({
       ok: true,

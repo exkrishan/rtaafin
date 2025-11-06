@@ -163,6 +163,9 @@ export default function TranscriptPanel({
           code: item.mappedCode || item.code || 'GENERAL_INQUIRY',
           title: item.mappedTitle || item.title || 'General Inquiry',
           score: typeof item.score === 'number' ? item.score : 0.5,
+          id: typeof item.mappedId === 'number' ? item.mappedId : undefined,
+          subDisposition: item.subDisposition || item.sub_disposition || undefined,
+          subDispositionId: typeof item.subDispositionId === 'number' ? item.subDispositionId : undefined,
         }));
 
       // Build notes from summary sections

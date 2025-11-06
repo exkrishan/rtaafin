@@ -23,10 +23,12 @@ export interface MappedDisposition {
   score: number;
   mappedCode: string;
   mappedTitle: string;
+  mappedId?: number | null; // ID from dispositions_master table
   matchType: 'code' | 'title' | 'tag' | 'fallback';
   taxonomyTags: string[];
   confidence: number;
-  subDisposition?: string; // Preserve sub-disposition from LLM
+  subDisposition?: string; // Preserve sub-disposition label from LLM
+  subDispositionId?: number | null; // ID from dispositions_master table
 }
 
 export interface GenerateCallSummaryResult {
@@ -38,9 +40,15 @@ export interface GenerateCallSummaryResult {
 }
 
 interface TaxonomyRow {
-  code: string;
-  title: string;
+  parent_id?: number;
+  parent_code?: string;
+  parent_label?: string;
+  parent_category?: string;
+  code?: string; // For backward compatibility
+  title?: string; // For backward compatibility
+  label?: string; // Alias for title
   tags?: string[] | null;
+  sub_dispositions?: Array<{ id: number; code: string; label: string }>;
 }
 
 interface TranscriptData {
@@ -691,15 +699,27 @@ function convertToSummaryPayload(payload: LlmStructuredSummary): SummaryResponse
 }
 
 async function loadDispositionTaxonomy(): Promise<TaxonomyRow[]> {
+  // Load from new hierarchical disposition_taxonomy view
   const { data, error } = await supabase
     .from('disposition_taxonomy')
-    .select('code,title,tags');
+    .select('parent_id, parent_code, parent_label, parent_category, sub_dispositions');
 
   if (error) {
     throw new Error(`Failed to load disposition taxonomy: ${error.message}`);
   }
 
-  return data || [];
+  // Transform to match TaxonomyRow interface for backward compatibility
+  return (data || []).map((row) => ({
+    parent_id: Number(row.parent_id) || undefined,
+    parent_code: String(row.parent_code || ''),
+    parent_label: String(row.parent_label || ''),
+    parent_category: String(row.parent_category || ''),
+    code: String(row.parent_code || ''), // For backward compatibility
+    title: String(row.parent_label || ''), // For backward compatibility
+    label: String(row.parent_label || ''),
+    tags: [], // Tags not in new schema, but kept for compatibility
+    sub_dispositions: Array.isArray(row.sub_dispositions) ? row.sub_dispositions : [],
+  }));
 }
 
 function mapDispositionsToTaxonomy(
@@ -759,27 +779,51 @@ function mapDispositionsToTaxonomy(
     } else if (!matched) {
       usedFallback = true;
       matched = {
+        parent_code: 'GENERAL_INQUIRY',
+        parent_label: 'General Inquiry',
         code: 'GENERAL_INQUIRY',
         title: 'General Inquiry',
         tags: [],
+        sub_dispositions: [],
       };
       matchType = 'fallback';
+    }
+
+    // Get ID from parent_code or code
+    const mappedId = matched.parent_id || null;
+    
+    // Try to find matching sub-disposition if subDisposition is provided
+    let subDispositionId: number | null = null;
+    const subDispositionLabel = 'subDisposition' in disposition && disposition.subDisposition
+      ? String(disposition.subDisposition).trim()
+      : undefined;
+    
+    if (subDispositionLabel && matched.sub_dispositions && Array.isArray(matched.sub_dispositions)) {
+      // Try to match sub-disposition by code or label
+      const subMatch = matched.sub_dispositions.find(
+        (sub: any) => 
+          sub.code?.toLowerCase() === subDispositionLabel.toLowerCase() ||
+          sub.label?.toLowerCase() === subDispositionLabel.toLowerCase()
+      );
+      if (subMatch) {
+        subDispositionId = Number(subMatch.id) || null;
+      }
     }
 
     mapped.push({
       originalLabel,
       score: Math.max(0, Math.min(1, normalizedScore)),
-      mappedCode: matched.code,
-      mappedTitle: matched.title,
+      mappedCode: matched.code || matched.parent_code || '',
+      mappedTitle: matched.title || matched.parent_label || '',
+      mappedId,
       matchType,
       taxonomyTags: Array.isArray(matched.tags) ? matched.tags : [],
       confidence:
         matchType === 'fallback'
           ? Math.min(normalizedScore || 0.2, 0.3)
           : normalizedScore || 0.5,
-      subDisposition: 'subDisposition' in disposition && disposition.subDisposition
-        ? String(disposition.subDisposition).trim()
-        : undefined,
+      subDisposition: subDispositionLabel,
+      subDispositionId,
     });
   }
 
@@ -818,6 +862,9 @@ async function persistAutoNote(params: {
       matchType: item.matchType,
       confidence: item.confidence,
     })),
+    disposition_id: mappedDispositions.length > 0 ? mappedDispositions[0].mappedId || null : null,
+    sub_disposition: mappedDispositions.length > 0 ? mappedDispositions[0].subDisposition || null : null,
+    sub_disposition_id: mappedDispositions.length > 0 ? mappedDispositions[0].subDispositionId || null : null,
     confidence: summary.confidence,
     raw_llm_output: truncate(rawLLMOutput, RAW_OUTPUT_LIMIT),
     model: model || null,
@@ -914,13 +961,22 @@ export async function generateCallSummary(
     return result;
   }
 
-  let baseTimeout = 2500;
+  // Default timeout: 30 seconds for summary generation (LLM calls can be slow)
+  // This is longer than intent detection because summaries require more processing
+  let baseTimeout = 30000; // 30 seconds
   let autoNotesModel: string | undefined;
   let autoNotesPrompt: string | undefined;
 
   try {
     const config = await getEffectiveConfig({ tenantId });
-    if (config?.kb?.timeoutMs) {
+    // Support configurable timeout from tenant config
+    if (config?.autoNotes?.timeoutMs) {
+      const parsedTimeout = Number(config.autoNotes.timeoutMs);
+      if (!Number.isNaN(parsedTimeout) && parsedTimeout > 0) {
+        baseTimeout = parsedTimeout;
+      }
+    } else if (config?.kb?.timeoutMs) {
+      // Fallback to kb timeout if autoNotes timeout not set
       const parsedTimeout = Number(config.kb.timeoutMs);
       if (!Number.isNaN(parsedTimeout) && parsedTimeout > 0) {
         baseTimeout = parsedTimeout;
@@ -939,7 +995,9 @@ export async function generateCallSummary(
   let lastError: Error | null = null;
   let usedFallback = false;
 
-  const attemptTimeouts = [baseTimeout, 4000];
+  // Use progressive timeouts: 30s first attempt, 45s second attempt
+  // Summary generation can take longer than intent detection
+  const attemptTimeouts = [baseTimeout, baseTimeout * 1.5];
 
   for (let attempt = 0; attempt < attemptTimeouts.length; attempt++) {
     const timeoutMs = attemptTimeouts[attempt];

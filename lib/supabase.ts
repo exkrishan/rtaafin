@@ -11,62 +11,128 @@ if (!SUPABASE_SERVICE_ROLE_KEY) {
 }
 
 /**
- * Custom fetch with opt-in insecure TLS support for local development
- *
- * SECURITY WARNING: By default, this function validates TLS certificates.
- * Only use ALLOW_INSECURE_TLS=true for ephemeral local testing with self-signed certificates.
- *
- * To fix TLS errors properly:
- * 1. Run `node scripts/check-certs.js <your-supabase-url>` to diagnose
- * 2. Add your CA certificate to system trust store (recommended)
- * 3. See scripts/USAGE.md for detailed instructions
- *
- * DO NOT use insecure TLS in production or CI environments.
+ * Custom fetch with TLS certificate validation handling
+ * 
+ * SECURITY: This function validates TLS certificates by default.
+ * Dev-only insecure TLS is gated by NODE_ENV !== 'production' AND explicit opt-in.
+ * 
+ * Root Cause (2025-11-06): Corporate intercepting proxy (Netskope) MITM's connections
+ * to djuxbmchatnamqbkfjyi.supabase.co with self-signed CA chain. Node.js trust store
+ * doesn't include the Netskope CA, causing SELF_SIGNED_CERT_IN_CHAIN errors.
+ * 
+ * Proper Fix: Add Netskope CA to Node.js trust store (see remediation steps below).
+ * Temporary Dev Fix: Use ALLOW_INSECURE_TLS=true in .env.local for local dev only.
  */
 const customFetch: typeof fetch = async (input, init) => {
-  try {
+  // Log configuration at startup (once per process)
+  if (!globalThis.__SUPABASE_TLS_CONFIG_LOGGED) {
     const allowInsecure = process.env.ALLOW_INSECURE_TLS === 'true';
-
-    if (allowInsecure && !globalThis.__INSECURE_TLS_WARNING_SHOWN) {
+    const nodeEnv = process.env.NODE_ENV || '(not set)';
+    const isProduction = nodeEnv === 'production';
+    
+    console.log('[supabase] TLS Configuration:');
+    console.log('  SUPABASE_URL:', SUPABASE_URL);
+    console.log('  ALLOW_INSECURE_TLS:', allowInsecure);
+    console.log('  NODE_ENV:', nodeEnv);
+    console.log('  useInsecureTLS:', allowInsecure && !isProduction ? 'true (dev fallback)' : 'false');
+    
+    if (allowInsecure && !isProduction) {
       console.warn('');
       console.warn('⚠️  WARNING: INSECURE TLS MODE ENABLED ⚠️');
-      console.warn('⚠️  ALLOW_INSECURE_TLS=true bypasses certificate validation.');
-      console.warn('⚠️  This should ONLY be used for local development with self-signed certs.');
-      console.warn('⚠️  Remove ALLOW_INSECURE_TLS from .env.local before sharing code or deploying.');
+      console.warn('⚠️  Certificate validation is DISABLED for Supabase connections.');
+      console.warn('⚠️  This is ONLY for local development with corporate proxy/MITM.');
+      console.warn('⚠️  NEVER use in production or CI environments.');
       console.warn('');
-      globalThis.__INSECURE_TLS_WARNING_SHOWN = true;
     }
+    
+    globalThis.__SUPABASE_TLS_CONFIG_LOGGED = true;
+  }
 
-    if (allowInsecure) {
+  const allowInsecure = process.env.ALLOW_INSECURE_TLS === 'true';
+  const isProduction = process.env.NODE_ENV === 'production';
+  
+  // Get URL string for detection
+  const urlString = typeof input === 'string' ? input : (input instanceof Request ? input.url : String(input));
+  const isSupabaseUrl = urlString.includes('supabase.co');
+  
+  // Use insecure TLS ONLY if:
+  // 1. Explicitly allowed via ALLOW_INSECURE_TLS=true
+  // 2. NOT in production
+  // 3. Connecting to Supabase
+  const useInsecureTLS = allowInsecure && !isProduction && isSupabaseUrl;
+  
+  try {
+    if (useInsecureTLS) {
+      // Node.js built-in fetch (undici-based) requires a custom dispatcher
+      // to disable certificate validation per-request.
+      // Use undici's Agent with connect.rejectUnauthorized: false
+      try {
+        // Try to use undici (Node.js 20 has it built-in, but may need explicit import)
+        const undici = await import('undici');
+        if (undici && undici.Agent) {
+          const dispatcher = new undici.Agent({
+            connect: {
+              rejectUnauthorized: false
+            }
+          });
+          // Use undici's fetch if available, otherwise fall back to global fetch with dispatcher
+          const fetchFn = undici.fetch || fetch;
+          return await fetchFn(input, {
+            ...(init ?? {}),
+            dispatcher
+          } as any);
+        }
+      } catch (undiciErr) {
+        // If undici import fails, log and continue to fallback
+        console.warn('[supabase] Could not import undici, trying fallback:', undiciErr.message);
+      }
+      
+      // Fallback: Try with https.Agent (works if underlying library supports it)
       const https = await import('https');
-      const agent = new https.Agent({ rejectUnauthorized: !allowInsecure });
-      const insecureInit = { ...(init ?? {}), agent, keepalive: false } as RequestInit;
-      return await fetch(input, insecureInit);
+      const agent = new https.Agent({ 
+        rejectUnauthorized: false,
+        keepalive: false 
+      });
+      
+      return await fetch(input, {
+        ...(init ?? {}),
+        agent
+      } as any);
     }
 
+    // Default: use standard fetch with certificate validation
     return await fetch(input, init);
   } catch (err: any) {
-    const message = err?.message || '';
-    const code = err?.cause?.code;
+    const message = String(err?.message || err?.toString() || '');
+    const code = err?.cause?.code || err?.code;
+    const errString = String(err);
 
-    if (
+    // Detect TLS/certificate errors
+    const isTlsError = 
       code === 'SELF_SIGNED_CERT_IN_CHAIN' ||
       code === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE' ||
       code === 'DEPTH_ZERO_SELF_SIGNED_CERT' ||
       message.includes('self signed') ||
       message.includes('certificate') ||
       message.includes('SSL') ||
-      message.includes('TLS')
-    ) {
+      message.includes('TLS') ||
+      message.includes('fetch failed') ||
+      errString.includes('fetch failed');
+
+    if (isTlsError && !isProduction && isSupabaseUrl) {
       console.error('');
-      console.error('❌ TLS Certificate Error when connecting to:', input);
+      console.error('❌ TLS Certificate Validation Failed');
+      console.error('   URL:', urlString);
+      console.error('   Error:', code || message);
       console.error('');
-      console.error('🔍 Diagnose with: node scripts/check-certs.js', typeof input === 'string' ? input : SUPABASE_URL);
+      console.error('🔍 Root Cause: Corporate proxy (Netskope) intercepting connection');
+      console.error('   The certificate chain includes a self-signed Netskope CA that');
+      console.error('   is not in Node.js trust store.');
       console.error('');
-      console.error('✅ Recommended fixes:');
-      console.error('  1) Add CA cert to system trust store (macOS Keychain, Linux ca-certificates).');
-      console.error('  2) Use properly signed certificates for the service.');
-      console.error('  3) For local dev only (ephemeral): add ALLOW_INSECURE_TLS=true to .env.local (NOT for CI).');
+      console.error('✅ Quick Dev Fix: Add to .env.local:');
+      console.error('   ALLOW_INSECURE_TLS=true');
+      console.error('');
+      console.error('✅ Proper Fix: Add Netskope CA to Node.js trust store (see docs)');
       console.error('');
     }
 

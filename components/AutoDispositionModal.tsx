@@ -3,10 +3,25 @@
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { showToast } from './ToastContainer';
 
+// Type definitions for hierarchical disposition structure
+export type DispositionOption = {
+  id?: number | null;
+  code: string;
+  title: string;
+  label?: string; // Alias for title
+  category?: string;
+  score?: number;
+  subDisposition?: string; // For suggestions
+  sub_dispositions?: Array<{ id: number; code: string; label: string }>; // From API
+};
+
 export type Suggestion = {
   code: string;
   title: string;
   score?: number;
+  id?: number;
+  subDisposition?: string;
+  subDispositionId?: number;
 };
 
 export interface AutoDispositionModalProps {
@@ -28,11 +43,15 @@ export default function AutoDispositionModal({
 }: AutoDispositionModalProps) {
   const [allDispositions, setAllDispositions] = useState<DispositionOption[]>([]);
   const [subDispositions, setSubDispositions] = useState<DispositionOption[]>([]);
+  const [selectedDispositionId, setSelectedDispositionId] = useState<number | null>(null);
   const [selectedDisposition, setSelectedDisposition] = useState<string>(
     suggested[0]?.code || ''
   );
-  const [subDisposition, setSubDisposition] = useState<string>(
+  const [selectedSubDisposition, setSelectedSubDisposition] = useState<string>(
     suggested[0]?.subDisposition || ''
+  );
+  const [selectedSubDispositionId, setSelectedSubDispositionId] = useState<number | null>(
+    suggested[0]?.subDispositionId || null
   );
   const [notes, setNotes] = useState<string>(autoNotes);
   const [loading, setLoading] = useState<'save' | 'retry' | 'fetching' | null>(null);
@@ -110,10 +129,14 @@ export default function AutoDispositionModal({
 
       if (bestSuggestion) {
         setSelectedDisposition(bestSuggestion.code);
-        setSubDisposition(bestSuggestion.subDisposition || '');
+        setSelectedSubDisposition(bestSuggestion.subDisposition || '');
+        setSelectedDispositionId(bestSuggestion.id || null);
+        setSelectedSubDispositionId(bestSuggestion.subDispositionId || null);
       } else {
         setSelectedDisposition('');
-        setSubDisposition('');
+        setSelectedSubDisposition('');
+        setSelectedDispositionId(null);
+        setSelectedSubDispositionId(null);
       }
 
       setNotes(autoNotes);
@@ -211,7 +234,9 @@ export default function AutoDispositionModal({
                 : 0,
             },
           ],
-          subDisposition: subDisposition || undefined,
+          dispositionId: selectedDispositionId,
+          subDisposition: selectedSubDisposition || undefined,
+          subDispositionId: selectedSubDispositionId,
           confidence: averageScore,
         }),
         signal: controller.signal,
@@ -280,7 +305,9 @@ export default function AutoDispositionModal({
         code: item.mappedCode || item.code || 'GENERAL_INQUIRY',
         title: item.mappedTitle || item.title || 'General Inquiry',
         score: typeof item.score === 'number' ? item.score : 0,
+        id: typeof item.mappedId === 'number' ? item.mappedId : undefined,
         subDisposition: item.subDisposition || item.sub_disposition || undefined,
+        subDispositionId: typeof item.subDispositionId === 'number' ? item.subDispositionId : undefined,
       }));
 
       const summary = payload.summary || {};
@@ -304,7 +331,9 @@ export default function AutoDispositionModal({
           return currentScore > bestScore ? current : best;
         });
         setSelectedDisposition(bestSuggestion.code);
-        setSubDisposition(bestSuggestion.subDisposition || '');
+        setSelectedSubDisposition(bestSuggestion.subDisposition || '');
+        setSelectedDispositionId(bestSuggestion.id || null);
+        setSelectedSubDispositionId(bestSuggestion.subDispositionId || null);
       }
     } catch (err: any) {
       clearTimeout(timeoutId);
@@ -403,9 +432,14 @@ export default function AutoDispositionModal({
               id="disposition-select"
               value={selectedDisposition}
               onChange={(e) => {
-                setSelectedDisposition(e.target.value);
+                const newCode = e.target.value;
+                setSelectedDisposition(newCode);
+                // Find the selected disposition to get its ID
+                const selected = allDispositions.find(d => d.code === newCode);
+                setSelectedDispositionId(selected?.id || null);
                 // Clear sub-disposition when disposition changes
-                setSubDisposition('');
+                setSelectedSubDisposition('');
+                setSelectedSubDispositionId(null);
               }}
               disabled={isLoading}
               className="w-full rounded-md border border-border-soft p-2 text-sm text-gray-900 bg-panel-bg focus:outline-none focus:ring-2 focus:ring-brand/20 focus:border-brand disabled:cursor-not-allowed disabled:bg-gray-50"
@@ -444,8 +478,14 @@ export default function AutoDispositionModal({
             </label>
             <select
               id="sub-disposition-select"
-              value={subDisposition}
-              onChange={(e) => setSubDisposition(e.target.value)}
+              value={selectedSubDisposition}
+              onChange={(e) => {
+                const newCode = e.target.value;
+                setSelectedSubDisposition(newCode);
+                // Find the selected sub-disposition to get its ID
+                const selected = subDispositions.find(sd => sd.code === newCode);
+                setSelectedSubDispositionId(selected?.id || null);
+              }}
               disabled={isLoading || !selectedDisposition || subDispositions.length === 0}
               className="w-full rounded-md border border-border-soft p-2 text-sm text-gray-900 bg-panel-bg focus:outline-none focus:ring-2 focus:ring-brand/20 focus:border-brand disabled:cursor-not-allowed disabled:bg-gray-50"
               aria-label="Select sub-disposition"
@@ -465,7 +505,7 @@ export default function AutoDispositionModal({
             </select>
             {currentSuggestions.length > 0 && 
              currentSuggestions.some(s => s.code === selectedDisposition && s.subDisposition) &&
-             subDisposition && (
+             selectedSubDisposition && (
               <p className="mt-1 text-xs text-text-muted">
                 ✓ Auto-selected based on transcript analysis
               </p>

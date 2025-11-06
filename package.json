@@ -34,7 +34,8 @@
     "prettier": "latest",
     "tailwindcss": "^3.4.18",
     "tsx": "latest",
-    "typescript": "latest"
+    "typescript": "latest",
+    "undici": "^7.16.0"
   },
   "lint-staged": {
     "*.{js,jsx,ts,tsx,json,md}": [
