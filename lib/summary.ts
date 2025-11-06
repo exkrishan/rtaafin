@@ -121,7 +121,7 @@ export function resetSummaryCache(): void {
 async function fetchTranscript(callId: string): Promise<TranscriptData> {
   try {
     // First, try to select all columns to see what's available
-    const { data, error } = await supabase
+    const { data, error } = await (supabase as any)
       .from('ingest_events')
       .select('*')
       .eq('call_id', callId)
