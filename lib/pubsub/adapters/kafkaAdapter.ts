@@ -12,23 +12,25 @@ try {
   // kafkajs is optional - adapter will throw if used without it
 }
 
-type Kafka = any;
-type Producer = any;
-type Consumer = any;
-type EachMessagePayload = any;
 import { PubSubAdapter, MessageEnvelope, SubscriptionHandle } from '../types';
+
+// Type definitions (using any since kafkajs may not be available)
+type KafkaInstance = any;
+type ProducerInstance = any;
+type ConsumerInstance = any;
+type EachMessagePayload = any;
 
 interface KafkaSubscription {
   id: string;
   topic: string;
-  consumer: Consumer;
+  consumer: ConsumerInstance;
   handler: (msg: MessageEnvelope) => Promise<void>;
   running: boolean;
 }
 
 export class KafkaAdapter implements PubSubAdapter {
-  private kafka: Kafka;
-  private producer: Producer;
+  private kafka: KafkaInstance | null = null;
+  private producer: ProducerInstance | null = null;
   private subscriptions: Map<string, KafkaSubscription> = new Map();
   private clientId: string;
   private consumerGroup: string;
@@ -58,6 +60,10 @@ export class KafkaAdapter implements PubSubAdapter {
   }
 
   async publish(topic: string, message: any): Promise<string | void> {
+    if (!this.kafka) {
+      throw new Error('Kafka client not initialized. kafkajs is required.');
+    }
+    
     try {
       // Ensure producer is connected
       if (!this.producer) {
