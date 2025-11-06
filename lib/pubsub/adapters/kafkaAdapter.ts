@@ -3,7 +3,19 @@
  * Uses kafkajs with consumer groups and commit handling
  */
 
-import { Kafka, Producer, Consumer, EachMessagePayload } from 'kafkajs';
+// Dynamic import for optional kafkajs dependency
+// This allows the module to be loaded even if kafkajs is not installed
+let kafkajs: any = null;
+try {
+  kafkajs = require('kafkajs');
+} catch (e) {
+  // kafkajs is optional - adapter will throw if used without it
+}
+
+type Kafka = any;
+type Producer = any;
+type Consumer = any;
+type EachMessagePayload = any;
 import { PubSubAdapter, MessageEnvelope, SubscriptionHandle } from '../types';
 
 interface KafkaSubscription {
