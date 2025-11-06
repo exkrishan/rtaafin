@@ -129,7 +129,7 @@ export class KafkaAdapter implements PubSubAdapter {
 
     // Start consuming messages
     await consumer.run({
-      eachMessage: async (payload: EachMessagePayload) => {
+      eachMessage: async (payload: any) => {
         if (!subscription.running) {
           return;
         }

@@ -12,7 +12,7 @@ async function fixSchema() {
   // First, check what columns exist
   console.log('Step 1: Checking current table structure...');
   try {
-    const { data, error } = await supabase
+    const { data, error } = await (supabase as any)
       .from('ingest_events')
       .select('*')
       .limit(1);
@@ -77,7 +77,7 @@ CREATE INDEX IF NOT EXISTS idx_ingest_events_created_at ON ingest_events(created
         text: 'test',
       };
       
-      const { error: insertError } = await supabase
+      const { error: insertError } = await (supabase as any)
         .from('ingest_events')
         .insert(testData);
       
@@ -93,7 +93,7 @@ CREATE INDEX IF NOT EXISTS idx_ingest_events_created_at ON ingest_events(created
       }
       
       // Clean up
-      await supabase
+      await (supabase as any)
         .from('ingest_events')
         .delete()
         .eq('call_id', 'schema-test');

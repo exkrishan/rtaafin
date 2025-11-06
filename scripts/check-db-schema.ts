@@ -12,7 +12,7 @@ async function checkSchema() {
   // Check ingest_events table
   console.log('Checking ingest_events table...');
   try {
-    const { data, error } = await supabase
+    const { data, error } = await (supabase as any)
       .from('ingest_events')
       .select('*')
       .limit(1);
@@ -43,7 +43,7 @@ async function checkSchema() {
     } else {
       console.log('✅ Table exists (empty)');
       // Try to insert a test row to check schema
-      const { error: testError } = await supabase
+      const { error: testError } = await (supabase as any)
         .from('ingest_events')
         .insert({
           call_id: 'schema-test',
@@ -59,7 +59,7 @@ async function checkSchema() {
       }
       
       // Clean up test row
-      await supabase
+      await (supabase as any)
         .from('ingest_events')
         .delete()
         .eq('call_id', 'schema-test');
