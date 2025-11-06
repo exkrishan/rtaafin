@@ -12,7 +12,7 @@
     "moduleResolution": "node",
     "types": ["node", "jest"]
   },
-  "include": ["src/**/*", "../../lib/pubsub/**/*"],
-  "exclude": ["node_modules", "dist", "tests", "../../lib/pubsub/tests"]
+  "include": ["src/**/*", "lib/pubsub/**/*"],
+  "exclude": ["node_modules", "dist", "tests", "lib/pubsub/tests"]
 }
 

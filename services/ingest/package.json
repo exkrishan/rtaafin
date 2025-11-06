@@ -5,6 +5,7 @@
   "main": "dist/server.js",
   "scripts": {
     "dev": "ts-node src/server.ts",
+    "prebuild": "rm -rf ./lib || true && cp -R ../../lib ./lib || true",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server.js",
     "test": "jest",

@@ -1,6 +1,7 @@
 node_modules/
 dist/
 coverage/
+lib/
 *.log
 .env
 .env.local
