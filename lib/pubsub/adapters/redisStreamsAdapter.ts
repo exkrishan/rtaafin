@@ -41,7 +41,7 @@ export class RedisStreamsAdapter implements PubSubAdapter {
     this.consumerName = config?.consumerName || process.env.REDIS_CONSUMER_NAME || `consumer-${process.pid}`;
 
     this.defaultRedisOptions = {
-      retryStrategy: (times) => {
+      retryStrategy: (times: number) => {
         const delay = Math.min(times * 50, 2000);
         return delay;
       },
