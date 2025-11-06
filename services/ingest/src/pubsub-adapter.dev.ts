@@ -3,8 +3,9 @@
  * Uses the pluggable pub/sub abstraction from lib/pubsub
  */
 
-import { createPubSubAdapterFromEnv, PubSubAdapter as CorePubSubAdapter } from '../../../lib/pubsub';
-import { audioTopic } from '../../../lib/pubsub/topics';
+// Use local lib (copied by prebuild script) - path works for both dev and build
+import { createPubSubAdapterFromEnv, PubSubAdapter as CorePubSubAdapter } from '../lib/pubsub';
+import { audioTopic } from '../lib/pubsub/topics';
 import { AudioFrame } from './types';
 
 // Wrapper to match ingestion service interface
