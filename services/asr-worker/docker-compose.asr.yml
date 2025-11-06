@@ -1,0 +1,42 @@
+version: '3.8'
+
+services:
+  asr-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "${PORT:-3001}:3001"
+    environment:
+      - PORT=3001
+      - ASR_PROVIDER=${ASR_PROVIDER:-mock}
+      - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
+      - PUBSUB_ADAPTER=${PUBSUB_ADAPTER:-redis_streams}
+      - REDIS_URL=redis://redis:6379
+      - REDIS_CONSUMER_GROUP=asr-worker
+      - REDIS_CONSUMER_NAME=asr-worker-1
+      - BUFFER_WINDOW_MS=300
+    depends_on:
+      - redis
+    restart: unless-stopped
+    networks:
+      - asr-network
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    restart: unless-stopped
+    networks:
+      - asr-network
+
+volumes:
+  redis-data:
+
+networks:
+  asr-network:
+    driver: bridge
+

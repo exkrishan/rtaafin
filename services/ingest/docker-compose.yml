@@ -1,0 +1,40 @@
+version: '3.8'
+
+services:
+  ingest:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "${PORT:-8443}:8443"
+    environment:
+      - PORT=8443
+      - JWT_PUBLIC_KEY=${JWT_PUBLIC_KEY}
+      - REDIS_URL=redis://redis:6379
+      - REDIS_CHANNEL=audio:frames
+      - BUFFER_DURATION_MS=3000
+      - ACK_INTERVAL=10
+    depends_on:
+      - redis
+    restart: unless-stopped
+    networks:
+      - ingest-network
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    restart: unless-stopped
+    networks:
+      - ingest-network
+
+volumes:
+  redis-data:
+
+networks:
+  ingest-network:
+    driver: bridge
+
