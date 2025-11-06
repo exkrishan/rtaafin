@@ -5,7 +5,6 @@
   "main": "dist/server.js",
   "scripts": {
     "dev": "ts-node src/server.ts",
-    "prebuild": "if [ ! -d ./lib/pubsub ]; then rm -rf ./lib && mkdir -p ./lib && (cp -R ../../lib/pubsub ./lib/pubsub 2>/dev/null || echo 'Note: lib/pubsub not found at ../../lib/pubsub - ensure it is copied by Dockerfile or build context'); fi",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server.js",
     "test": "jest",
@@ -16,6 +15,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@rtaa/pubsub": "*",
     "ws": "^8.16.0",
     "jsonwebtoken": "^9.0.2",
     "ioredis": "^5.3.2",

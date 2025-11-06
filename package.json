@@ -2,6 +2,10 @@
   "name": "rtaa",
   "version": "0.1.0",
   "private": true,
+  "workspaces": [
+    "services/*",
+    "lib/*"
+  ],
   "scripts": {
     "dev": "next dev",
     "build": "next build",

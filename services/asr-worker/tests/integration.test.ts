@@ -3,8 +3,8 @@
  * Uses in-memory pub/sub adapter to test end-to-end flow
  */
 
-import { createPubSubAdapter, InMemoryAdapter } from '../../../lib/pubsub';
-import { audioTopic, transcriptTopic } from '../../../lib/pubsub/topics';
+import { createPubSubAdapter, InMemoryAdapter } from '@rtaa/pubsub';
+import { audioTopic, transcriptTopic } from '@rtaa/pubsub/topics';
 import { createAsrProvider } from '../src/providers';
 import { AudioFrameMessage, TranscriptMessage } from '../src/types';
 

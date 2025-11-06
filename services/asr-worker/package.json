@@ -15,6 +15,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@rtaa/pubsub": "*",
     "@deepgram/sdk": "^3.4.0",
     "dotenv": "^16.3.1"
   },
