@@ -5,7 +5,6 @@
     "module": "commonjs",
     "lib": ["ES2020"],
     "outDir": "./dist",
-    "rootDir": "./src",
     "baseUrl": ".",
     "paths": {
       "@rtaa/pubsub": ["../../lib/pubsub/index.ts"],
