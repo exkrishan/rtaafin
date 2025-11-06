@@ -20,7 +20,8 @@ This guide provides the **stable, production-ready** deployment process for RTAA
 **Root Directory:** `/` (repo root)  
 **Build Command:** `npm ci && npm run build`  
 **Start Command:** `npm run start`  
-**Node Version:** 20.x
+**Node Version:** 20.x  
+**Health Check Path:** `/api/health` ⚠️ **REQUIRED**
 
 **Environment Variables:**
 ```
@@ -29,10 +30,18 @@ SUPABASE_SERVICE_ROLE_KEY=<your-service-role-key>
 LLM_API_KEY=<your-llm-api-key>
 ```
 
+**Important:** ⚠️ **Configure Health Check Path in Render**
+1. Go to your service settings in Render dashboard
+2. Under **"Health Check Path"**, set: `/api/health`
+3. Save and redeploy
+
+Without this, Render will timeout waiting for a health check response.
+
 **Notes:**
 - Uses root `package.json` and `tsconfig.json`
 - Excludes `services/**/*` and `lib/pubsub/**/*` from Next.js build
 - Workspace dependencies are automatically resolved
+- Health check endpoint at `/api/health` returns `200 OK`
 
 ---
 
