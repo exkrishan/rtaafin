@@ -33,7 +33,7 @@ export async function GET(req: Request) {
     console.info('[intent-api] Fetching latest intent for callId:', callId);
 
     // Get the most recent intent for this call
-    const { data, error } = await supabase
+    const { data, error } = await (supabase as any)
       .from('intents')
       .select('intent, confidence, created_at, seq')
       .eq('call_id', callId)
@@ -55,14 +55,14 @@ export async function GET(req: Request) {
       );
     }
 
-    const latest = data[0];
+    const latest = (data as any)?.[0];
 
     return NextResponse.json({
       ok: true,
-      intent: latest.intent,
-      confidence: latest.confidence,
-      seq: latest.seq,
-      created_at: latest.created_at,
+      intent: latest?.intent || 'unknown',
+      confidence: latest?.confidence || 0,
+      seq: latest?.seq || 0,
+      created_at: latest?.created_at || new Date().toISOString(),
     });
   } catch (err: any) {
     console.error('[intent-api] Error:', err);
@@ -97,7 +97,7 @@ export async function POST(req: Request) {
     });
 
     // Insert into Supabase
-    const { data, error } = await supabase
+    const { data, error } = await (supabase as any)
       .from('intents')
       .insert({
         call_id: body.callId,

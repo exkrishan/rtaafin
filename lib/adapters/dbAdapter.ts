@@ -67,7 +67,7 @@ const dbAdapter: KBAdapter = {
       
       queryBuilder = queryBuilder.or(orConditions.join(','));
 
-      const { data, error } = await queryBuilder;
+      const { data, error } = await (queryBuilder as any);
 
       const latencyMs = Date.now() - startTime;
 
@@ -81,7 +81,7 @@ const dbAdapter: KBAdapter = {
       const normalizedQueryLower = normalizedQuery.toLowerCase();
       const queryWords = normalizedQueryLower.split(/\s+/).filter(w => w.length > 2);
       
-      const articles: KBArticle[] = (data || []).map((row) => {
+      const articles: KBArticle[] = ((data || []) as any[]).map((row: any) => {
         // Calculate relevance score based on match quality
         let score = 0.5; // Base score
         
@@ -160,7 +160,7 @@ const dbAdapter: KBAdapter = {
     const startTime = Date.now();
 
     try {
-      const { data, error } = await supabase
+      const { data, error } = await (supabase as any)
         .from('kb_articles')
         .select('id, title, snippet, url, tags')
         .eq('id', id)

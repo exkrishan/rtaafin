@@ -85,7 +85,7 @@ export async function GET(req: Request) {
     }
 
     // Transform data to ensure consistent format
-    const subDispositions = (data || []).map((item) => ({
+    const subDispositions = ((data || []) as any[]).map((item: any) => ({
       id: Number(item.id) || null,
       code: String(item.code || '').trim(),
       title: String(item.label || '').trim(), // For backward compatibility

@@ -155,7 +155,7 @@ export async function POST(req: Request) {
 
     // Insert into Supabase ingest_events table
     try {
-      const { data, error } = await supabase.from('ingest_events').insert({
+      const { data, error } = await (supabase as any).from('ingest_events').insert({
         call_id: body.callId,
         seq: body.seq,
         ts: body.ts,
