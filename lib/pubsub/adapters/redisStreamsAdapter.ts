@@ -55,7 +55,7 @@ export class RedisStreamsAdapter implements PubSubAdapter {
     
     this.redis = new ioredis(url, this.defaultRedisOptions);
 
-    this.redis.on('error', (err) => {
+    this.redis.on('error', (err: Error) => {
       console.error('[RedisStreamsAdapter] Redis error:', err);
     });
 
@@ -189,15 +189,16 @@ export class RedisStreamsAdapter implements PubSubAdapter {
                     await handler(envelope);
                     // Note: ACK is handled separately via ack() method
                   }
-                } catch (error) {
+                } catch (error: unknown) {
                   console.error(`[RedisStreamsAdapter] Error processing message ${msgId}:`, error);
                   // Don't ack on error - message will be retried
                 }
               }
             }
           }
-        } catch (error: any) {
-          if (error.message && error.message.includes('Connection')) {
+        } catch (error: unknown) {
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          if (errorMessage.includes('Connection')) {
             // Connection error - wait and retry
             await new Promise((resolve) => setTimeout(resolve, 1000));
             continue;
@@ -209,7 +210,7 @@ export class RedisStreamsAdapter implements PubSubAdapter {
     };
 
     // Start consuming in background
-    consume().catch((error) => {
+    consume().catch((error: unknown) => {
       console.error('[RedisStreamsAdapter] Consumer loop error:', error);
     });
   }
