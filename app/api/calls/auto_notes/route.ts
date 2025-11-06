@@ -81,10 +81,10 @@ export async function POST(req: Request) {
 
     // Attempt upsert with ON CONFLICT on (tenant_id, call_id) or just call_id
     // Supabase will handle the conflict resolution based on the actual constraint
-    let upsertResult;
+    let upsertResult: any = null;
     try {
       // Try with tenant_id + call_id conflict first
-      const { data, error } = await supabase
+      const { data, error } = await (supabase as any)
         .from('auto_notes')
         .upsert(payload, {
           onConflict: 'call_id',
@@ -97,7 +97,7 @@ export async function POST(req: Request) {
       if (error) {
         // If that fails, try without specifying conflict (Supabase will use primary key or unique constraint)
         console.warn('[api][calls][auto_notes] First upsert attempt failed, retrying', error);
-        const { data: retryData, error: retryError } = await supabase
+        const { data: retryData, error: retryError } = await (supabase as any)
           .from('auto_notes')
           .upsert(payload)
           .select('id, call_id, updated_at')

@@ -1,0 +1,25 @@
+🚀 RTAA Quick Start
+===================
+
+1. Start All Services:
+   ./start-all-services.sh
+
+2. Verify Services:
+   curl http://localhost:8443/health
+   curl http://localhost:3001/health
+
+3. Test Complete Flow:
+   npx tsx scripts/test-transcript-flow.ts
+
+4. Stop All Services:
+   ./stop-all-services.sh
+
+Service URLs:
+- Next.js:     http://localhost:3000
+- Ingestion:   wss://localhost:8443/v1/ingest
+- ASR Worker:  http://localhost:3001/metrics
+
+View Logs:
+- tail -f /tmp/rtaa-nextjs.log
+- tail -f /tmp/rtaa-ingest.log
+- tail -f /tmp/rtaa-asr.log

@@ -22,6 +22,7 @@
     "zod": "latest"
   },
   "devDependencies": {
+    "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "latest",
     "@types/react": "latest",
     "@types/react-dom": "latest",
@@ -29,6 +30,7 @@
     "eslint": "latest",
     "eslint-config-next": "latest",
     "husky": "latest",
+    "jsonwebtoken": "^9.0.2",
     "lint-staged": "latest",
     "postcss": "^8.5.6",
     "prettier": "latest",

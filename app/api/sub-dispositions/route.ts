@@ -27,7 +27,7 @@ export async function GET(req: Request) {
 
     // If dispositionCode is provided, find the parent disposition ID
     if (dispositionCode) {
-      const { data: parentData, error: parentError } = await supabase
+      const { data: parentData, error: parentError } = await (supabase as any)
         .from('dispositions_master')
         .select('id')
         .eq('code', dispositionCode.trim())
@@ -66,12 +66,12 @@ export async function GET(req: Request) {
       });
     }
 
-    // Fetch all sub-dispositions (children) for this parent
-    const { data, error } = await supabase
-      .from('dispositions_master')
-      .select('id, code, label, category')
-      .eq('parent_disposition_id', parentId)
-      .order('id', { ascending: true });
+      // Fetch all sub-dispositions (children) for this parent
+      const { data, error } = await (supabase as any)
+        .from('dispositions_master')
+        .select('id, code, label, category')
+        .eq('parent_disposition_id', parentId)
+        .order('id', { ascending: true });
 
     if (error) {
       console.error('[api][sub-dispositions] Database error:', error);

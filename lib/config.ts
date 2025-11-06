@@ -210,7 +210,7 @@ export async function upsertConfig(
 
     if (existing) {
       // Update
-      const { data, error } = await supabase
+      const { data, error } = await (supabase as any)
         .from('configs')
         .update(payload)
         .eq('id', existing.id)
@@ -221,7 +221,7 @@ export async function upsertConfig(
       result = data;
     } else {
       // Insert
-      const { data, error } = await supabase
+      const { data, error } = await (supabase as any)
         .from('configs')
         .insert({ ...payload, created_at: now })
         .select()

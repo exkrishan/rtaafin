@@ -1,0 +1,72 @@
+/**
+ * Unit tests for topic naming helpers
+ */
+
+import { audioTopic, transcriptTopic, intentTopic, parseTopic } from '../topics';
+
+describe('Topic Helpers', () => {
+  describe('audioTopic', () => {
+    it('should return audio_stream when useStreams=true', () => {
+      expect(audioTopic({ useStreams: true })).toBe('audio_stream');
+    });
+
+    it('should return audio.{tenant_id} when tenantId provided', () => {
+      expect(audioTopic({ tenantId: 'tenant-123' })).toBe('audio.tenant-123');
+    });
+
+    it('should default to audio_stream', () => {
+      expect(audioTopic()).toBe('audio_stream');
+    });
+  });
+
+  describe('transcriptTopic', () => {
+    it('should return transcript.{interaction_id}', () => {
+      expect(transcriptTopic('int-123')).toBe('transcript.int-123');
+    });
+
+    it('should throw error if interaction_id is missing', () => {
+      expect(() => transcriptTopic('')).toThrow('interaction_id is required');
+    });
+  });
+
+  describe('intentTopic', () => {
+    it('should return intent.{interaction_id}', () => {
+      expect(intentTopic('int-456')).toBe('intent.int-456');
+    });
+
+    it('should throw error if interaction_id is missing', () => {
+      expect(() => intentTopic('')).toThrow('interaction_id is required');
+    });
+  });
+
+  describe('parseTopic', () => {
+    it('should parse audio.{tenant_id} topic', () => {
+      const parsed = parseTopic('audio.tenant-123');
+      expect(parsed.type).toBe('audio');
+      expect(parsed.tenantId).toBe('tenant-123');
+    });
+
+    it('should parse audio_stream topic', () => {
+      const parsed = parseTopic('audio_stream');
+      expect(parsed.type).toBe('audio');
+    });
+
+    it('should parse transcript topic', () => {
+      const parsed = parseTopic('transcript.int-123');
+      expect(parsed.type).toBe('transcript');
+      expect(parsed.interactionId).toBe('int-123');
+    });
+
+    it('should parse intent topic', () => {
+      const parsed = parseTopic('intent.int-456');
+      expect(parsed.type).toBe('intent');
+      expect(parsed.interactionId).toBe('int-456');
+    });
+
+    it('should return unknown for unrecognized topics', () => {
+      const parsed = parseTopic('unknown-topic');
+      expect(parsed.type).toBe('unknown');
+    });
+  });
+});
+

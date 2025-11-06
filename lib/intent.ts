@@ -45,17 +45,44 @@ export async function detectIntent(
 ${contextText}
 "${text}"
 
-IMPORTANT: 
-- "credit card" issues are DIFFERENT from "debit card" or "account" issues
-- "credit card" = credit_card, credit_card_fraud, credit_card_block, credit_card_replacement
-- "debit card" = debit_card, debit_card_fraud, debit_card_block
-- "account" issues = account_balance, account_inquiry, savings_account, salary_account (only if specifically mentioned)
-- "fraud" = fraudulent_transaction, unauthorized_charge, dispute_fraud
+CRITICAL RULES - READ CAREFULLY:
+1. If the text explicitly mentions "credit card" or "creditcard", use credit_card intents:
+   - credit_card_block (for blocking/lost/stolen credit cards)
+   - credit_card_fraud (for fraud/unauthorized charges on credit cards)
+   - credit_card_replacement (for replacing credit cards)
+   - credit_card (for general credit card issues)
+
+2. If the text explicitly mentions "debit card" or "debitcard", use debit_card intents:
+   - debit_card_block (for blocking debit cards)
+   - debit_card_fraud (for fraud on debit cards)
+   - debit_card (for general debit card issues)
+
+3. NEVER confuse credit card with debit card:
+   - "I need to block my credit card" → credit_card_block (NOT debit_card_block)
+   - "My credit card was stolen" → credit_card_block or credit_card_fraud (NOT debit_card)
+   - "My debit card is not working" → debit_card_block (NOT credit_card)
+
+4. Account issues (only if specifically about accounts, not cards):
+   - account_balance (checking balance)
+   - account_inquiry (general account questions)
+   - savings_account (only if "savings account" is mentioned)
+   - salary_account (only if "salary account" is mentioned)
+
+5. Fraud detection:
+   - If fraud + credit card → credit_card_fraud
+   - If fraud + debit card → debit_card_fraud
+   - If fraud + no card type → fraudulent_transaction
+
+EXAMPLES:
+- "I need to block my credit card" → {"intent": "credit_card_block", "confidence": 0.95}
+- "My credit card was stolen" → {"intent": "credit_card_block", "confidence": 0.9}
+- "My debit card is not working" → {"intent": "debit_card_block", "confidence": 0.9}
+- "I want to check my account balance" → {"intent": "account_balance", "confidence": 0.95}
 
 Respond ONLY with valid JSON in this exact format:
 {"intent": "intent_label", "confidence": 0.0}
 
-Use specific intents like: credit_card_fraud, credit_card_block, credit_card_replacement, debit_card_fraud, account_balance, payment_issue, etc.`;
+Use specific intents: credit_card_block, credit_card_fraud, credit_card_replacement, debit_card_block, debit_card_fraud, account_balance, etc.`;
 
     console.info('[intent] Starting detection', {
       textLength: text.length,

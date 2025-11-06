@@ -217,7 +217,7 @@ export async function POST(req: Request) {
 
       // Store intent in database
       try {
-        const { error: intentError } = await supabase.from('intents').insert({
+        const { error: intentError } = await (supabase as any).from('intents').insert({
           call_id: body.callId,
           seq: body.seq,
           intent,
