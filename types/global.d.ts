@@ -1,13 +1,15 @@
 /**
- * Global type declarations for RTAA
+ * Global type declarations
+ * Extends globalThis and other global types used across the application
  */
+
+export {};
 
 declare global {
   /**
-   * Flag to track if insecure TLS warning has been shown
-   * Used by lib/supabase.ts to show warning only once
+   * Flag to track if Supabase TLS configuration has been logged
+   * Used to prevent duplicate logging on startup
    */
-  var __INSECURE_TLS_WARNING_SHOWN: boolean | undefined;
+  // eslint-disable-next-line no-var
+  var __SUPABASE_TLS_CONFIG_LOGGED: boolean | undefined;
 }
-
-export {};

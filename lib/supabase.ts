@@ -1,11 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
 
-// Extend globalThis type to include our custom property
-declare global {
-  // eslint-disable-next-line no-var
-  var __SUPABASE_TLS_CONFIG_LOGGED: boolean | undefined;
-}
-
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
 
