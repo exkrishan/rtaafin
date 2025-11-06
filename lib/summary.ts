@@ -7,6 +7,7 @@ type RawDisposition = {
   label?: string;
   score?: number;
   confidence?: number;
+  subDisposition?: string | null;
 };
 
 export interface SummaryResponse {
