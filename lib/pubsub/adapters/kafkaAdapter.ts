@@ -35,12 +35,16 @@ export class KafkaAdapter implements PubSubAdapter {
   private brokers: string[];
 
   constructor(config?: { brokers?: string[]; clientId?: string; consumerGroup?: string }) {
+    if (!kafkajs) {
+      throw new Error('kafkajs is not installed. Install it with: npm install kafkajs');
+    }
+    
     this.brokers = config?.brokers || 
       (process.env.KAFKA_BROKERS ? process.env.KAFKA_BROKERS.split(',') : ['localhost:9092']);
     this.clientId = config?.clientId || process.env.KAFKA_CLIENT_ID || 'agent-assist-pubsub';
     this.consumerGroup = config?.consumerGroup || process.env.KAFKA_CONSUMER_GROUP || 'agent-assist';
 
-    this.kafka = new Kafka({
+    this.kafka = new kafkajs.Kafka({
       clientId: this.clientId,
       brokers: this.brokers,
       retry: {
@@ -94,6 +98,10 @@ export class KafkaAdapter implements PubSubAdapter {
   ): Promise<SubscriptionHandle> {
     const id = `sub-${Date.now()}-${Math.random()}`;
 
+    if (!this.kafka) {
+      throw new Error('Kafka client not initialized. kafkajs is required.');
+    }
+    
     const consumer = this.kafka.consumer({
       groupId: this.consumerGroup,
       sessionTimeout: 30000,
