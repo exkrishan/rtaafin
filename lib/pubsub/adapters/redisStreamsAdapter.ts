@@ -42,11 +42,16 @@ export class RedisStreamsAdapter implements PubSubAdapter {
 
     this.defaultRedisOptions = {
       retryStrategy: (times: number) => {
+        // Exponential backoff with max delay
         const delay = Math.min(times * 50, 2000);
         return delay;
       },
-      maxRetriesPerRequest: 3,
+      maxRetriesPerRequest: null, // Use retryStrategy instead
       enableReadyCheck: true,
+      // Connection pool settings to prevent max clients error
+      lazyConnect: false,
+      keepAlive: 30000, // Keep connections alive
+      connectTimeout: 10000,
     };
 
     if (!ioredis) {
@@ -104,8 +109,10 @@ export class RedisStreamsAdapter implements PubSubAdapter {
       throw new Error('Redis client not initialized. ioredis is required.');
     }
     
-    // Create a dedicated Redis connection for this subscription
-    const subscriptionRedis = new ioredis(this.redis.options);
+    // REUSE the main Redis connection instead of creating a new one
+    // This prevents hitting Redis Cloud's max client limit
+    // ioredis supports concurrent XREADGROUP calls on the same connection
+    const subscriptionRedis = this.redis;
 
     const subscription: RedisSubscription = {
       id,
@@ -200,9 +207,10 @@ export class RedisStreamsAdapter implements PubSubAdapter {
           }
         } catch (error: unknown) {
           const errorMessage = error instanceof Error ? error.message : String(error);
-          if (errorMessage.includes('Connection')) {
-            // Connection error - wait and retry
-            await new Promise((resolve) => setTimeout(resolve, 1000));
+          if (errorMessage.includes('Connection') || errorMessage.includes('max number of clients')) {
+            // Connection error or max clients - wait longer and retry
+            console.warn(`[RedisStreamsAdapter] Connection issue (${errorMessage}), retrying in 5s...`);
+            await new Promise((resolve) => setTimeout(resolve, 5000));
             continue;
           }
           console.error('[RedisStreamsAdapter] Consumer error:', error);
@@ -240,7 +248,8 @@ export class RedisStreamsAdapter implements PubSubAdapter {
     const subscription = this.subscriptions.get(id);
     if (subscription) {
       subscription.running = false;
-      await subscription.redis.quit();
+      // Don't quit the shared Redis connection - only stop the consumer loop
+      // The connection is shared and will be closed in close()
       this.subscriptions.delete(id);
     }
   }
