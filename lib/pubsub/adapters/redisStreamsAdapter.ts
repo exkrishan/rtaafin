@@ -99,8 +99,11 @@ export class RedisStreamsAdapter implements PubSubAdapter {
     const lastMaxClientsError = maxClientsErrorTime.get(url);
     if (lastMaxClientsError && (Date.now() - lastMaxClientsError) < MAX_CLIENTS_BACKOFF_MS) {
       const waitTime = Math.ceil((MAX_CLIENTS_BACKOFF_MS - (Date.now() - lastMaxClientsError)) / 1000);
-      console.warn(`[RedisStreamsAdapter] Max clients error recently occurred, waiting ${waitTime}s before retry: ${url}`);
-      throw new Error(`Redis max clients error - waiting ${waitTime}s before retry`);
+      console.warn(`[RedisStreamsAdapter] ⏸️  Max clients backoff active, waiting ${waitTime}s before retry: ${url}`);
+      // Don't throw - just set redis to null and let operations fail gracefully
+      // This prevents connection attempts during backoff
+      this.redis = null;
+      return; // Exit constructor early - connection will be created after backoff
     }
     
     // SINGLETON: Reuse existing connection for this URL if available
@@ -187,6 +190,29 @@ export class RedisStreamsAdapter implements PubSubAdapter {
   }
 
   async publish(topic: string, message: any): Promise<string | void> {
+    // Check if we're in backoff period
+    const lastMaxClientsError = maxClientsErrorTime.get(this.redisUrl);
+    if (lastMaxClientsError && (Date.now() - lastMaxClientsError) < MAX_CLIENTS_BACKOFF_MS) {
+      const waitTime = Math.ceil((MAX_CLIENTS_BACKOFF_MS - (Date.now() - lastMaxClientsError)) / 1000);
+      throw new Error(`Redis max clients backoff active - waiting ${waitTime}s before retry`);
+    }
+    
+    // Try to create connection if we don't have one (and not in backoff)
+    if (!this.redis) {
+      // Re-check backoff before creating connection
+      if (lastMaxClientsError && (Date.now() - lastMaxClientsError) < MAX_CLIENTS_BACKOFF_MS) {
+        const waitTime = Math.ceil((MAX_CLIENTS_BACKOFF_MS - (Date.now() - lastMaxClientsError)) / 1000);
+        throw new Error(`Redis max clients backoff active - waiting ${waitTime}s before retry`);
+      }
+      // Create connection now
+      if (connectionCache.has(this.redisUrl)) {
+        this.redis = connectionCache.get(this.redisUrl);
+        connectionRefCount.set(this.redisUrl, (connectionRefCount.get(this.redisUrl) || 0) + 1);
+      } else {
+        this.redis = this.createNewConnection(this.redisUrl);
+      }
+    }
+    
     if (!this.redis) {
       throw new Error('Redis client not initialized. ioredis is required.');
     }
@@ -217,7 +243,30 @@ export class RedisStreamsAdapter implements PubSubAdapter {
     topic: string,
     handler: (msg: MessageEnvelope) => Promise<void>
   ): Promise<SubscriptionHandle> {
+    // Check if we're in backoff period
+    const lastMaxClientsError = maxClientsErrorTime.get(this.redisUrl);
+    if (lastMaxClientsError && (Date.now() - lastMaxClientsError) < MAX_CLIENTS_BACKOFF_MS) {
+      const waitTime = Math.ceil((MAX_CLIENTS_BACKOFF_MS - (Date.now() - lastMaxClientsError)) / 1000);
+      throw new Error(`Redis max clients backoff active - waiting ${waitTime}s before retry`);
+    }
+    
     const id = `sub-${Date.now()}-${Math.random()}`;
+
+    // Try to create connection if we don't have one (and not in backoff)
+    if (!this.redis) {
+      // Re-check backoff before creating connection
+      if (lastMaxClientsError && (Date.now() - lastMaxClientsError) < MAX_CLIENTS_BACKOFF_MS) {
+        const waitTime = Math.ceil((MAX_CLIENTS_BACKOFF_MS - (Date.now() - lastMaxClientsError)) / 1000);
+        throw new Error(`Redis max clients backoff active - waiting ${waitTime}s before retry`);
+      }
+      // Create connection now
+      if (connectionCache.has(this.redisUrl)) {
+        this.redis = connectionCache.get(this.redisUrl);
+        connectionRefCount.set(this.redisUrl, (connectionRefCount.get(this.redisUrl) || 0) + 1);
+      } else {
+        this.redis = this.createNewConnection(this.redisUrl);
+      }
+    }
 
     // Create consumer group if it doesn't exist
     await this.ensureConsumerGroup(topic, this.consumerGroup);
@@ -333,14 +382,16 @@ export class RedisStreamsAdapter implements PubSubAdapter {
             break;
           }
           if (errorMessage.includes('Connection')) {
-            // Connection error - wait and retry (but not if max clients)
-            const lastMaxClientsError = maxClientsErrorTime.get(topic);
+            // Connection error - check if we're in max clients backoff
+            const lastMaxClientsError = maxClientsErrorTime.get(topic) || maxClientsErrorTime.get(this.redisUrl);
             if (lastMaxClientsError && (Date.now() - lastMaxClientsError) < MAX_CLIENTS_BACKOFF_MS) {
               // We're in backoff period, stop consumer
-              console.warn(`[RedisStreamsAdapter] In max clients backoff period, stopping consumer: ${topic}`);
+              const waitTime = Math.ceil((MAX_CLIENTS_BACKOFF_MS - (Date.now() - lastMaxClientsError)) / 1000);
+              console.warn(`[RedisStreamsAdapter] ⏸️  In max clients backoff (${waitTime}s remaining), stopping consumer: ${topic}`);
               subscription.running = false;
               break;
             }
+            // Regular connection error - wait and retry
             console.warn(`[RedisStreamsAdapter] Connection issue, retrying in 5s...`);
             await new Promise((resolve) => setTimeout(resolve, 5000));
             if (!subscription.running) {
