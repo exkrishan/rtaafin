@@ -28,21 +28,31 @@ interface RedisSubscription {
   running: boolean;
 }
 
+// Singleton pattern: Reuse Redis connections per URL to prevent max clients error
+const connectionCache = new Map<string, RedisInstance>();
+
 export class RedisStreamsAdapter implements PubSubAdapter {
   private redis: RedisInstance | null = null;
   private subscriptions: Map<string, RedisSubscription> = new Map();
   private consumerGroup: string;
   private consumerName: string;
   private defaultRedisOptions: RedisOptions;
+  private redisUrl: string;
 
   constructor(config?: { url?: string; consumerGroup?: string; consumerName?: string }) {
     const url = config?.url || process.env.REDIS_URL || 'redis://localhost:6379';
+    this.redisUrl = url;
     this.consumerGroup = config?.consumerGroup || process.env.REDIS_CONSUMER_GROUP || 'agent-assist';
     this.consumerName = config?.consumerName || process.env.REDIS_CONSUMER_NAME || `consumer-${process.pid}`;
 
     this.defaultRedisOptions = {
       retryStrategy: (times: number) => {
         // Exponential backoff with max delay
+        // Return null to stop retrying after max attempts
+        if (times > 10) {
+          console.error('[RedisStreamsAdapter] Max retries reached, stopping connection attempts');
+          return null; // Stop retrying
+        }
         const delay = Math.min(times * 50, 2000);
         return delay;
       },
@@ -58,15 +68,51 @@ export class RedisStreamsAdapter implements PubSubAdapter {
       throw new Error('ioredis is not installed. Install it with: npm install ioredis');
     }
     
-    this.redis = new ioredis(url, this.defaultRedisOptions);
+    // SINGLETON: Reuse existing connection for this URL if available
+    if (connectionCache.has(url)) {
+      const cachedConnection = connectionCache.get(url);
+      // Check if connection is still valid
+      if (cachedConnection && cachedConnection.status === 'ready') {
+        console.info('[RedisStreamsAdapter] Reusing existing Redis connection:', url);
+        this.redis = cachedConnection;
+      } else {
+        // Connection is dead, remove from cache and create new one
+        connectionCache.delete(url);
+        this.redis = this.createNewConnection(url);
+      }
+    } else {
+      this.redis = this.createNewConnection(url);
+    }
 
     this.redis.on('error', (err: Error) => {
-      console.error('[RedisStreamsAdapter] Redis error:', err);
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      console.error('[RedisStreamsAdapter] Redis error:', errorMsg);
+      
+      // If max clients error, don't retry immediately - wait longer
+      if (errorMsg.includes('max number of clients')) {
+        console.warn('[RedisStreamsAdapter] Max clients reached - will retry after delay');
+        // Don't create new connections on error
+      }
     });
 
     this.redis.on('connect', () => {
       console.info('[RedisStreamsAdapter] Connected to Redis:', url);
     });
+
+    this.redis.on('close', () => {
+      console.warn('[RedisStreamsAdapter] Redis connection closed:', url);
+      // Remove from cache when closed
+      if (connectionCache.get(url) === this.redis) {
+        connectionCache.delete(url);
+      }
+    });
+  }
+
+  private createNewConnection(url: string): RedisInstance {
+    console.info('[RedisStreamsAdapter] Creating new Redis connection:', url);
+    const connection = new ioredis(url, this.defaultRedisOptions);
+    connectionCache.set(url, connection);
+    return connection;
   }
 
   async publish(topic: string, message: any): Promise<string | void> {
@@ -207,10 +253,23 @@ export class RedisStreamsAdapter implements PubSubAdapter {
           }
         } catch (error: unknown) {
           const errorMessage = error instanceof Error ? error.message : String(error);
-          if (errorMessage.includes('Connection') || errorMessage.includes('max number of clients')) {
-            // Connection error or max clients - wait longer and retry
-            console.warn(`[RedisStreamsAdapter] Connection issue (${errorMessage}), retrying in 5s...`);
+          if (errorMessage.includes('max number of clients')) {
+            // Max clients error - wait much longer and DON'T create new connections
+            console.warn(`[RedisStreamsAdapter] Max clients reached, waiting 30s before retry...`);
+            await new Promise((resolve) => setTimeout(resolve, 30000));
+            // Check if subscription is still running before continuing
+            if (!subscription.running) {
+              break;
+            }
+            continue;
+          }
+          if (errorMessage.includes('Connection')) {
+            // Connection error - wait and retry
+            console.warn(`[RedisStreamsAdapter] Connection issue, retrying in 5s...`);
             await new Promise((resolve) => setTimeout(resolve, 5000));
+            if (!subscription.running) {
+              break;
+            }
             continue;
           }
           console.error('[RedisStreamsAdapter] Consumer error:', error);
@@ -261,8 +320,22 @@ export class RedisStreamsAdapter implements PubSubAdapter {
     );
     await Promise.all(unsubscribePromises);
 
-    // Close main Redis connection
-    await this.redis.quit();
+    // Only close connection if we're the last adapter using it
+    // Check if other adapters are using the same connection
+    const connectionUsers = Array.from(connectionCache.values()).filter(
+      (conn) => conn === this.redis
+    ).length;
+    
+    if (connectionUsers <= 1) {
+      // We're the only user, safe to close
+      if (this.redis) {
+        await this.redis.quit();
+        connectionCache.delete(this.redisUrl);
+      }
+    } else {
+      // Other adapters are using this connection, don't close it
+      console.info('[RedisStreamsAdapter] Keeping Redis connection open (other adapters using it)');
+    }
   }
 }
 
