@@ -1,23 +1,26 @@
 {
-  "extends": "../../tsconfig.json",
   "compilerOptions": {
     "target": "ES2020",
     "module": "commonjs",
     "lib": ["ES2020"],
     "outDir": "./dist",
+    "rootDir": "./src",
     "baseUrl": ".",
     "paths": {
-      "@rtaa/pubsub": ["../../lib/pubsub/index.ts"],
-      "@rtaa/pubsub/*": ["../../lib/pubsub/*"]
+      "@rtaa/pubsub": ["../../lib/pubsub/dist/index.js"],
+      "@rtaa/pubsub/*": ["../../lib/pubsub/dist/*"]
     },
-    "strict": true,
+    "strict": false,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
     "moduleResolution": "node",
-    "types": ["node", "jest"]
+    "types": ["node", "jest"],
+    "noEmit": false,
+    "declaration": false,
+    "sourceMap": false
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist", "tests"]
+  "exclude": ["node_modules", "dist", "tests", "../../lib/pubsub"]
 }
