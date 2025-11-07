@@ -30,6 +30,23 @@ interface RedisSubscription {
 
 // Singleton pattern: Reuse Redis connections per URL to prevent max clients error
 const connectionCache = new Map<string, RedisInstance>();
+const connectionRefCount = new Map<string, number>(); // Track how many adapters use each connection
+
+// Cleanup dead connections periodically
+setInterval(() => {
+  for (const [url, conn] of connectionCache.entries()) {
+    if (conn && conn.status !== 'ready' && conn.status !== 'connecting') {
+      console.warn(`[RedisStreamsAdapter] Removing dead connection from cache: ${url}`);
+      connectionCache.delete(url);
+      connectionRefCount.delete(url);
+      try {
+        conn.disconnect();
+      } catch (e) {
+        // Ignore disconnect errors
+      }
+    }
+  }
+}, 30000); // Check every 30 seconds
 
 export class RedisStreamsAdapter implements PubSubAdapter {
   private redis: RedisInstance | null = null;
@@ -71,13 +88,22 @@ export class RedisStreamsAdapter implements PubSubAdapter {
     // SINGLETON: Reuse existing connection for this URL if available
     if (connectionCache.has(url)) {
       const cachedConnection = connectionCache.get(url);
-      // Check if connection is still valid
-      if (cachedConnection && cachedConnection.status === 'ready') {
-        console.info('[RedisStreamsAdapter] Reusing existing Redis connection:', url);
+      // Check if connection is still valid and ready
+      if (cachedConnection && (cachedConnection.status === 'ready' || cachedConnection.status === 'connecting')) {
+        console.info('[RedisStreamsAdapter] Reusing existing Redis connection:', url, `(status: ${cachedConnection.status})`);
         this.redis = cachedConnection;
+        // Increment reference count
+        connectionRefCount.set(url, (connectionRefCount.get(url) || 0) + 1);
       } else {
         // Connection is dead, remove from cache and create new one
+        console.warn('[RedisStreamsAdapter] Cached connection is dead, creating new one:', url);
         connectionCache.delete(url);
+        connectionRefCount.delete(url);
+        try {
+          cachedConnection?.disconnect();
+        } catch (e) {
+          // Ignore disconnect errors
+        }
         this.redis = this.createNewConnection(url);
       }
     } else {
@@ -101,9 +127,17 @@ export class RedisStreamsAdapter implements PubSubAdapter {
 
     this.redis.on('close', () => {
       console.warn('[RedisStreamsAdapter] Redis connection closed:', url);
-      // Remove from cache when closed
+      // Remove from cache when closed (only if this is the cached connection)
       if (connectionCache.get(url) === this.redis) {
-        connectionCache.delete(url);
+        const refCount = connectionRefCount.get(url) || 0;
+        if (refCount <= 1) {
+          // Last reference, safe to remove
+          connectionCache.delete(url);
+          connectionRefCount.delete(url);
+        } else {
+          // Other adapters still using it, just decrement ref count
+          connectionRefCount.set(url, refCount - 1);
+        }
       }
     });
   }
@@ -112,6 +146,22 @@ export class RedisStreamsAdapter implements PubSubAdapter {
     console.info('[RedisStreamsAdapter] Creating new Redis connection:', url);
     const connection = new ioredis(url, this.defaultRedisOptions);
     connectionCache.set(url, connection);
+    connectionRefCount.set(url, 1);
+    
+    // Add error handler to remove from cache on fatal errors
+    connection.on('error', (err: Error) => {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      if (errorMsg.includes('max number of clients') || errorMsg.includes('ECONNREFUSED')) {
+        // Don't remove on max clients - might be temporary
+        // But do remove on connection refused (server down)
+        if (errorMsg.includes('ECONNREFUSED')) {
+          console.warn('[RedisStreamsAdapter] Connection refused, removing from cache:', url);
+          connectionCache.delete(url);
+          connectionRefCount.delete(url);
+        }
+      }
+    });
+    
     return connection;
   }
 
@@ -320,21 +370,33 @@ export class RedisStreamsAdapter implements PubSubAdapter {
     );
     await Promise.all(unsubscribePromises);
 
-    // Only close connection if we're the last adapter using it
-    // Check if other adapters are using the same connection
-    const connectionUsers = Array.from(connectionCache.values()).filter(
-      (conn) => conn === this.redis
-    ).length;
+    // Decrement reference count
+    const refCount = connectionRefCount.get(this.redisUrl) || 0;
+    if (refCount > 1) {
+      // Other adapters are using this connection, just decrement
+      connectionRefCount.set(this.redisUrl, refCount - 1);
+      console.info('[RedisStreamsAdapter] Keeping Redis connection open (other adapters using it)');
+      return;
+    }
     
-    if (connectionUsers <= 1) {
-      // We're the only user, safe to close
-      if (this.redis) {
+    // We're the last user, safe to close
+    if (this.redis) {
+      try {
         await this.redis.quit();
         connectionCache.delete(this.redisUrl);
+        connectionRefCount.delete(this.redisUrl);
+        console.info('[RedisStreamsAdapter] Closed Redis connection:', this.redisUrl);
+      } catch (error: unknown) {
+        console.error('[RedisStreamsAdapter] Error closing connection:', error);
+        // Force disconnect if quit fails
+        try {
+          this.redis.disconnect();
+        } catch (e) {
+          // Ignore
+        }
+        connectionCache.delete(this.redisUrl);
+        connectionRefCount.delete(this.redisUrl);
       }
-    } else {
-      // Other adapters are using this connection, don't close it
-      console.info('[RedisStreamsAdapter] Keeping Redis connection open (other adapters using it)');
     }
   }
 }
