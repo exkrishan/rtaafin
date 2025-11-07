@@ -300,12 +300,84 @@ class IngestionServer {
     // Exotel doesn't require JWT, uses IP whitelisting or Basic Auth
     // We'll accept the connection and handle messages
     
+    // Initialize default state for binary-only connections
+    let exotelState: any = {
+      streamSid: `exotel-${Date.now()}`,
+      callSid: `call-${Date.now()}`,
+      accountSid: 'exotel',
+      sampleRate: 8000, // Default, will be updated from start event if received
+      encoding: 'pcm16',
+      seq: 0,
+      started: false,
+    };
+    (ws as any).exotelState = exotelState;
+    
     ws.on('message', (data: Buffer | string) => {
       if (typeof data === 'string') {
-        // Exotel sends JSON messages
+        // Exotel sends JSON messages (start, media, stop events)
+        try {
+          const json = JSON.parse(data);
+          // If this is a start event, update state
+          if (json.event === 'start' && json.start) {
+            exotelState.streamSid = json.stream_sid || json.start.stream_sid || exotelState.streamSid;
+            exotelState.callSid = json.start.call_sid || exotelState.callSid;
+            exotelState.accountSid = json.start.account_sid || exotelState.accountSid;
+            exotelState.sampleRate = parseInt(json.start.media_format?.sample_rate || '8000', 10);
+            exotelState.encoding = json.start.media_format?.encoding || 'pcm16';
+            exotelState.started = true;
+            console.info('[exotel] Start event received via JSON', {
+              stream_sid: exotelState.streamSid,
+              call_sid: exotelState.callSid,
+              sample_rate: exotelState.sampleRate,
+            });
+          }
+        } catch (e) {
+          // Not JSON, might be text but not valid JSON
+        }
         this.exotelHandler.handleMessage(ws as any, data);
       } else {
-        console.warn('[exotel] Received binary message, expected JSON');
+        // Binary message - Exotel is sending raw PCM16 audio
+        // Handle binary frames directly if state is initialized
+        if (exotelState.started || exotelState.seq === 0) {
+          // If not started yet, assume defaults and start processing
+          if (!exotelState.started) {
+            exotelState.started = true;
+            console.info('[exotel] Processing binary frames with default config', {
+              sample_rate: exotelState.sampleRate,
+              stream_sid: exotelState.streamSid,
+            });
+          }
+          
+          exotelState.seq += 1;
+          
+          // Create audio frame from binary data
+          const frame: AudioFrame = {
+            tenant_id: exotelState.accountSid,
+            interaction_id: exotelState.callSid || exotelState.streamSid,
+            seq: exotelState.seq,
+            timestamp_ms: Date.now(),
+            sample_rate: exotelState.sampleRate,
+            encoding: 'pcm16' as const,
+            audio: data,
+          };
+          
+          // Publish to pub/sub
+          this.pubsub.publish(frame).then(() => {
+            // Log every 100th frame to reduce noise
+            if (exotelState.seq % 100 === 0) {
+              console.info('[exotel] Published binary audio frame', {
+                stream_sid: exotelState.streamSid,
+                call_sid: exotelState.callSid,
+                seq: exotelState.seq,
+                size: data.length,
+              });
+            }
+          }).catch((error: any) => {
+            console.error('[exotel] Failed to publish binary frame:', error);
+          });
+        } else {
+          console.warn('[exotel] Received binary message before start event');
+        }
       }
     });
 
