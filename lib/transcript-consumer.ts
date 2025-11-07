@@ -306,7 +306,7 @@ class TranscriptConsumer {
             console.warn('[TranscriptConsumer] SCAN limit reached, stopping discovery');
             break;
           }
-        } while (cursor !== '0' && cursor !== 0);
+        } while (cursor !== '0'); // Redis SCAN always returns string cursor
         
         // Subscribe to discovered streams
         let newSubscriptions = 0;
