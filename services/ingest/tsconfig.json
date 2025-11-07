@@ -4,11 +4,10 @@
     "module": "commonjs",
     "lib": ["ES2020"],
     "outDir": "./dist",
-    "rootDir": "./src",
     "baseUrl": ".",
     "paths": {
-      "@rtaa/pubsub": ["../../lib/pubsub/index.ts"],
-      "@rtaa/pubsub/*": ["../../lib/pubsub/*"]
+      "@rtaa/pubsub": ["../../lib/pubsub/dist/index.js"],
+      "@rtaa/pubsub/*": ["../../lib/pubsub/dist/*"]
     },
     "strict": true,
     "esModuleInterop": true,
@@ -17,7 +16,8 @@
     "resolveJsonModule": true,
     "moduleResolution": "node",
     "types": ["node", "jest"],
-    "noEmit": false
+    "noEmit": false,
+    "allowJs": true
   },
   "include": ["src/**/*"],
   "exclude": ["node_modules", "dist", "tests", "../../lib/pubsub"]
