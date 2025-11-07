@@ -43,21 +43,30 @@ export class MockProvider implements AsrProvider {
     let currentIndex = this.interactionIndex.get(interactionId)!;
     const seqCount = this.seqCount.get(interactionId)! || 0;
 
-    // Increment sequence counter
-    this.seqCount.set(interactionId, seqCount + 1);
+    // Increment sequence counter FIRST
+    const newSeqCount = seqCount + 1;
+    this.seqCount.set(interactionId, newSeqCount);
 
     // Every 2 chunks, add a word (simulate progressive transcription)
     // This ensures we complete within reasonable number of chunks for testing
-    if (seqCount > 0 && seqCount % 2 === 0 && currentIndex < words.length) {
+    // IMPORTANT: Check newSeqCount, not seqCount, since we already incremented
+    if (newSeqCount > 0 && newSeqCount % 2 === 0 && currentIndex < words.length) {
       currentIndex++;
       this.interactionIndex.set(interactionId, currentIndex);
     }
 
     // Build partial transcript
-    // Always include at least the first word to avoid empty transcripts
-    const partialText = currentIndex === 0 
-      ? words[0] || 'Processing...'  // First chunk: return first word
-      : words.slice(0, currentIndex).join(' ');
+    // CRITICAL FIX: Always return at least the first word, even if currentIndex is 0
+    // This ensures we NEVER return empty text
+    let partialText: string;
+    if (currentIndex === 0) {
+      // First chunk(s): always return first word
+      partialText = words[0] || 'Processing...';
+    } else {
+      // Subsequent chunks: return words up to currentIndex
+      partialText = words.slice(0, currentIndex).join(' ');
+    }
+    
     const isComplete = currentIndex >= words.length;
     
     // Force completion after 20 chunks to ensure tests pass
