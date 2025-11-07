@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start",
+    "start": "next start -p ${PORT:-5000}",
     "lint": "echo \"lint skipped (temporary Phase 0 bypass)\"; exit 0",
     "format": "prettier --write \"**/*.{ts,tsx,js,json,md}\"",
     "prepare": "husky install",
