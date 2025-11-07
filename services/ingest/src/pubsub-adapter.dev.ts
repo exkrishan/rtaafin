@@ -3,7 +3,7 @@
  * Uses the pluggable pub/sub abstraction from lib/pubsub
  */
 
-// Use workspace dependency - automatically resolved by npm workspaces
+// Use workspace import - will be fixed to relative path in postbuild
 import { createPubSubAdapterFromEnv, PubSubAdapter as CorePubSubAdapter } from '@rtaa/pubsub';
 import { audioTopic } from '@rtaa/pubsub/topics';
 import { AudioFrame } from './types';
@@ -19,21 +19,33 @@ class IngestionPubSubAdapter implements PubSubAdapter {
   private topic: string;
 
   constructor() {
-    // Use the pluggable pub/sub adapter
-    this.adapter = createPubSubAdapterFromEnv();
-    
-    // Determine topic based on configuration
-    // Default to audio_stream for POC (matches ASR worker)
-    const useStreams = process.env.USE_AUDIO_STREAM !== 'false'; // Default true
-    this.topic = audioTopic({ useStreams });
-    console.info('[pubsub] Topic configuration:', { useStreams, topic: this.topic });
-    
-    console.info('[pubsub] Using pub/sub adapter:', process.env.PUBSUB_ADAPTER || 'redis_streams');
-    console.info('[pubsub] Audio topic:', this.topic);
+    try {
+      // Use the pluggable pub/sub adapter
+      this.adapter = createPubSubAdapterFromEnv();
+      
+      // Determine topic based on configuration
+      // Default to audio_stream for POC (matches ASR worker)
+      const useStreams = process.env.USE_AUDIO_STREAM !== 'false'; // Default true
+      this.topic = audioTopic({ useStreams });
+      
+      console.info('[pubsub] ✅ Pub/Sub adapter initialized:', {
+        adapter: process.env.PUBSUB_ADAPTER || 'redis_streams',
+        topic: this.topic,
+        useStreams,
+      });
+    } catch (error: any) {
+      console.error('[pubsub] ❌ Failed to initialize pub/sub adapter:', error.message);
+      throw new Error(`Pub/Sub initialization failed: ${error.message}. Check PUBSUB_ADAPTER and REDIS_URL.`);
+    }
   }
 
   async publish(event: AudioFrame): Promise<void> {
     try {
+      // Validate event before publishing
+      if (!event.interaction_id || !event.tenant_id) {
+        throw new Error('Invalid audio frame: missing interaction_id or tenant_id');
+      }
+
       // Use the pluggable adapter to publish
       await this.adapter.publish(this.topic, {
         tenant_id: event.tenant_id,
@@ -45,14 +57,27 @@ class IngestionPubSubAdapter implements PubSubAdapter {
         // Convert Buffer to base64 for JSON serialization
         audio: event.audio.toString('base64'),
       });
-    } catch (error) {
-      console.error('[pubsub] Failed to publish audio frame:', error);
+    } catch (error: any) {
+      // Log error with context
+      console.error('[pubsub] Failed to publish audio frame:', {
+        interaction_id: event.interaction_id,
+        tenant_id: event.tenant_id,
+        seq: event.seq,
+        topic: this.topic,
+        error: error.message,
+      });
       throw error;
     }
   }
 
   async disconnect(): Promise<void> {
-    await this.adapter.close();
+    try {
+      await this.adapter.close();
+      console.info('[pubsub] ✅ Pub/Sub adapter disconnected');
+    } catch (error: any) {
+      console.error('[pubsub] ❌ Error disconnecting pub/sub adapter:', error.message);
+      throw error;
+    }
   }
 }
 

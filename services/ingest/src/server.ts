@@ -17,18 +17,91 @@ import {
   PubSubAdapter,
 } from './types';
 import { ExotelHandler } from './exotel-handler';
+import { validateConfig, printValidationResults } from './config-validator';
 
 // Load environment variables from project root .env.local
-require('dotenv').config({ path: require('path').join(__dirname, '../../../.env.local') });
+// This is safe - dotenv handles missing files gracefully
+try {
+  require('dotenv').config({ path: require('path').join(__dirname, '../../../.env.local') });
+} catch (err) {
+  // Ignore - environment variables may be set via Render dashboard
+}
 
-// PORT: Use process.env.PORT for cloud deployment (Render, etc.), default to 5000
-const PORT = parseInt(process.env.PORT || '5000', 10);
-const BUFFER_DURATION_MS = parseInt(process.env.BUFFER_DURATION_MS || '3000', 10);
-const ACK_INTERVAL = parseInt(process.env.ACK_INTERVAL || '10', 10);
+/**
+ * Environment variable validation and configuration
+ */
+interface ServerConfig {
+  port: number;
+  bufferDurationMs: number;
+  ackInterval: number;
+  sslKeyPath?: string;
+  sslCertPath?: string;
+  supportExotel: boolean;
+  pubsubAdapter: string;
+  redisUrl?: string;
+}
 
-// SSL/TLS configuration (optional for POC)
-const SSL_KEY_PATH = process.env.SSL_KEY_PATH;
-const SSL_CERT_PATH = process.env.SSL_CERT_PATH;
+function validateAndLoadConfig(): ServerConfig {
+  // PORT: Use process.env.PORT for cloud deployment (Render, etc.), default to 5000
+  const port = parseInt(process.env.PORT || '5000', 10);
+  if (isNaN(port) || port < 1 || port > 65535) {
+    throw new Error(`Invalid PORT: ${process.env.PORT}. Must be between 1 and 65535.`);
+  }
+
+  const bufferDurationMs = parseInt(process.env.BUFFER_DURATION_MS || '3000', 10);
+  if (isNaN(bufferDurationMs) || bufferDurationMs < 100 || bufferDurationMs > 30000) {
+    throw new Error(`Invalid BUFFER_DURATION_MS: ${process.env.BUFFER_DURATION_MS}. Must be between 100 and 30000.`);
+  }
+
+  const ackInterval = parseInt(process.env.ACK_INTERVAL || '10', 10);
+  if (isNaN(ackInterval) || ackInterval < 1 || ackInterval > 1000) {
+    throw new Error(`Invalid ACK_INTERVAL: ${process.env.ACK_INTERVAL}. Must be between 1 and 1000.`);
+  }
+
+  const pubsubAdapter = process.env.PUBSUB_ADAPTER || 'redis_streams';
+  if (!['redis_streams', 'kafka', 'in_memory'].includes(pubsubAdapter)) {
+    throw new Error(`Invalid PUBSUB_ADAPTER: ${pubsubAdapter}. Must be one of: redis_streams, kafka, in_memory`);
+  }
+
+  // Validate Redis URL if using redis_streams
+  if (pubsubAdapter === 'redis_streams') {
+    const redisUrl = process.env.REDIS_URL;
+    if (!redisUrl) {
+      throw new Error('REDIS_URL is required when PUBSUB_ADAPTER=redis_streams');
+    }
+    if (!redisUrl.startsWith('redis://') && !redisUrl.startsWith('rediss://')) {
+      throw new Error(`Invalid REDIS_URL format: ${redisUrl}. Must start with redis:// or rediss://`);
+    }
+  }
+
+  return {
+    port,
+    bufferDurationMs,
+    ackInterval,
+    sslKeyPath: process.env.SSL_KEY_PATH,
+    sslCertPath: process.env.SSL_CERT_PATH,
+    supportExotel: process.env.SUPPORT_EXOTEL === 'true',
+    pubsubAdapter,
+    redisUrl: process.env.REDIS_URL,
+  };
+}
+
+// Validate configuration at startup
+const validationResult = validateConfig();
+printValidationResults(validationResult);
+
+if (!validationResult.valid) {
+  console.error('[server] ❌ Configuration validation failed. Please fix the errors above.');
+  process.exit(1);
+}
+
+// Load and validate configuration
+const config = validateAndLoadConfig();
+const PORT = config.port;
+const BUFFER_DURATION_MS = config.bufferDurationMs;
+const ACK_INTERVAL = config.ackInterval;
+const SSL_KEY_PATH = config.sslKeyPath;
+const SSL_CERT_PATH = config.sslCertPath;
 
 interface Connection extends WebSocket {
   state?: ConnectionState;
@@ -39,33 +112,70 @@ class IngestionServer {
   private pubsub: PubSubAdapter;
   private exotelHandler: ExotelHandler;
   private supportExotel: boolean;
+  private server: any;
+  private isShuttingDown: boolean = false;
+  private healthStatus: { status: 'healthy' | 'degraded' | 'unhealthy'; pubsub: boolean; timestamp: number } = {
+    status: 'healthy',
+    pubsub: true,
+    timestamp: Date.now(),
+  };
 
   constructor() {
-    this.pubsub = createPubSubAdapter();
+    // Initialize pub/sub adapter with error handling
+    try {
+      this.pubsub = createPubSubAdapter();
+      console.info('[server] Pub/Sub adapter initialized:', config.pubsubAdapter);
+    } catch (error: any) {
+      console.error('[server] Failed to initialize pub/sub adapter:', error.message);
+      throw new Error(`Pub/Sub initialization failed: ${error.message}. Check REDIS_URL and PUBSUB_ADAPTER.`);
+    }
+
     this.exotelHandler = new ExotelHandler(this.pubsub);
-    this.supportExotel = process.env.SUPPORT_EXOTEL === 'true';
+    this.supportExotel = config.supportExotel;
 
     // Create HTTP/HTTPS server
-    let server;
     if (SSL_KEY_PATH && SSL_CERT_PATH) {
-      const key = readFileSync(SSL_KEY_PATH);
-      const cert = readFileSync(SSL_CERT_PATH);
-      server = createServer({ key, cert });
-      console.info('[server] Using HTTPS/WSS');
+      try {
+        const key = readFileSync(SSL_KEY_PATH);
+        const cert = readFileSync(SSL_CERT_PATH);
+        this.server = createServer({ key, cert });
+        console.info('[server] Using HTTPS/WSS');
+      } catch (error: any) {
+        console.error('[server] Failed to load SSL certificates:', error.message);
+        throw new Error(`SSL configuration error: ${error.message}`);
+      }
     } else {
       const http = require('http');
-      server = http.createServer();
-      console.warn('[server] Using HTTP/WS (no SSL) - not recommended for production');
+      this.server = http.createServer();
+      if (process.env.NODE_ENV === 'production') {
+        console.warn('[server] Using HTTP/WS (no SSL) - Render handles HTTPS termination');
+      } else {
+        console.warn('[server] Using HTTP/WS (no SSL) - not recommended for production');
+      }
     }
 
     // ============================================
     // HTTP Routes
     // ============================================
     // Health check endpoint (required for cloud deployment)
-    server.on('request', (req: any, res: any) => {
+    this.server.on('request', (req: any, res: any) => {
       if (req.url === '/health') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: 'ok', service: 'ingest' }));
+        // Update health status
+        this.updateHealthStatus();
+        
+        const statusCode = this.healthStatus.status === 'healthy' ? 200 : 
+                          this.healthStatus.status === 'degraded' ? 200 : 503;
+        
+        res.writeHead(statusCode, { 
+          'Content-Type': 'application/json',
+          'Cache-Control': 'no-cache',
+        });
+        res.end(JSON.stringify({
+          status: this.healthStatus.status,
+          service: 'ingest',
+          pubsub: this.healthStatus.pubsub,
+          timestamp: new Date(this.healthStatus.timestamp).toISOString(),
+        }));
         return;
       }
       res.writeHead(404);
@@ -77,7 +187,7 @@ class IngestionServer {
     // ============================================
     // WebSocket endpoint: /v1/ingest (required for cloud deployment)
     this.wss = new WebSocketServer({
-      server,
+      server: this.server,
       path: '/v1/ingest',
       verifyClient: (info, callback) => {
         // Check if this is Exotel (no JWT or Basic Auth) or our protocol (JWT)
@@ -124,11 +234,40 @@ class IngestionServer {
       }
     });
 
-    server.listen(PORT, () => {
-      console.info(`[server] Ingestion server listening on port ${PORT}`);
+    // Handle server errors
+    this.server.on('error', (error: NodeJS.ErrnoException) => {
+      if (error.code === 'EADDRINUSE') {
+        console.error(`[server] Port ${PORT} is already in use`);
+        process.exit(1);
+      } else {
+        console.error('[server] Server error:', error);
+      }
+    });
+
+    this.server.listen(PORT, () => {
+      console.info(`[server] ✅ Ingestion server listening on port ${PORT}`);
       console.info(`[server] WebSocket endpoint: ws${SSL_KEY_PATH ? 's' : ''}://localhost:${PORT}/v1/ingest`);
       console.info(`[server] Health check: http://localhost:${PORT}/health`);
+      console.info(`[server] Configuration:`, {
+        port: PORT,
+        bufferDurationMs: BUFFER_DURATION_MS,
+        ackInterval: ACK_INTERVAL,
+        pubsubAdapter: config.pubsubAdapter,
+        supportExotel: this.supportExotel,
+        ssl: !!(SSL_KEY_PATH && SSL_CERT_PATH),
+      });
     });
+  }
+
+  private updateHealthStatus(): void {
+    // Check pub/sub health (basic check - adapter exists)
+    const pubsubHealthy = this.pubsub !== null;
+    
+    this.healthStatus = {
+      status: pubsubHealthy ? 'healthy' : 'unhealthy',
+      pubsub: pubsubHealthy,
+      timestamp: Date.now(),
+    };
   }
 
   private detectExotelProtocol(req: any): boolean {
@@ -297,13 +436,25 @@ class IngestionServer {
 
     // Publish to pub/sub (async, non-blocking)
     this.pubsub.publish(frame).then(() => {
-      console.info('[server] Published audio frame', {
+      // Only log every 100th frame to reduce noise
+      if (state.seq % 100 === 0) {
+        console.info('[server] Published audio frame', {
+          interaction_id: state.interactionId,
+          seq: state.seq,
+          topic: 'audio_stream',
+        });
+      }
+    }).catch((error: any) => {
+      console.error('[server] Failed to publish frame:', {
         interaction_id: state.interactionId,
         seq: state.seq,
-        topic: 'audio_stream',
+        error: error.message,
       });
-    }).catch((error) => {
-      console.error('[server] Failed to publish frame:', error);
+      // Update health status on repeated failures
+      if (this.healthStatus.pubsub) {
+        this.healthStatus.pubsub = false;
+        this.healthStatus.status = 'degraded';
+      }
     });
 
     // Send ACK every N frames
@@ -342,34 +493,83 @@ class IngestionServer {
   }
 
   async shutdown(): Promise<void> {
+    if (this.isShuttingDown) {
+      return;
+    }
+    this.isShuttingDown = true;
+
+    console.info('[server] Starting graceful shutdown...');
+
     return new Promise((resolve) => {
+      // Close WebSocket server
       this.wss.close(() => {
         console.info('[server] WebSocket server closed');
-        if ('disconnect' in this.pubsub) {
-          (this.pubsub as any).disconnect().then(() => {
+        
+        // Close HTTP server
+        this.server.close(() => {
+          console.info('[server] HTTP server closed');
+          
+          // Disconnect pub/sub
+          if ('disconnect' in this.pubsub) {
+            (this.pubsub as any).disconnect().then(() => {
+              console.info('[server] Pub/Sub adapter disconnected');
+              resolve();
+            }).catch((error: any) => {
+              console.error('[server] Error disconnecting pub/sub:', error);
+              resolve(); // Continue shutdown even if pub/sub fails
+            });
+          } else if ('close' in this.pubsub) {
+            (this.pubsub as any).close().then(() => {
+              console.info('[server] Pub/Sub adapter closed');
+              resolve();
+            }).catch((error: any) => {
+              console.error('[server] Error closing pub/sub:', error);
+              resolve();
+            });
+          } else {
             resolve();
-          });
-        } else {
-          resolve();
-        }
+          }
+        });
       });
     });
   }
 }
 
-// Start server
-const server = new IngestionServer();
+// Start server with error handling
+let server: IngestionServer;
+try {
+  server = new IngestionServer();
+} catch (error: any) {
+  console.error('[server] ❌ Failed to start server:', error.message);
+  console.error('[server] Stack:', error.stack);
+  process.exit(1);
+}
 
 // Graceful shutdown
-process.on('SIGTERM', async () => {
-  console.info('[server] SIGTERM received, shutting down gracefully');
-  await server.shutdown();
-  process.exit(0);
+const shutdown = async (signal: string) => {
+  console.info(`[server] ${signal} received, shutting down gracefully...`);
+  try {
+    await server.shutdown();
+    console.info('[server] ✅ Shutdown complete');
+    process.exit(0);
+  } catch (error: any) {
+    console.error('[server] ❌ Error during shutdown:', error);
+    process.exit(1);
+  }
+};
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+
+// Handle uncaught exceptions
+process.on('uncaughtException', (error: Error) => {
+  console.error('[server] ❌ Uncaught exception:', error);
+  shutdown('uncaughtException').catch(() => process.exit(1));
 });
 
-process.on('SIGINT', async () => {
-  console.info('[server] SIGINT received, shutting down gracefully');
-  await server.shutdown();
-  process.exit(0);
+// Handle unhandled promise rejections
+process.on('unhandledRejection', (reason: any, promise: Promise<any>) => {
+  console.error('[server] ❌ Unhandled rejection:', reason);
+  // Don't exit - log and continue (may be recoverable)
 });
 

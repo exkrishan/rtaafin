@@ -16,21 +16,24 @@ let InMemoryAdapter: any = null;
 // Lazy load adapters to avoid requiring optional dependencies at build time
 function getRedisStreamsAdapter() {
   if (!RedisStreamsAdapter) {
-    RedisStreamsAdapter = require('./adapters/redisStreamsAdapter').RedisStreamsAdapter;
+    const adapterModule = require('./adapters/redisStreamsAdapter');
+    RedisStreamsAdapter = adapterModule.RedisStreamsAdapter;
   }
   return RedisStreamsAdapter;
 }
 
 function getKafkaAdapter() {
   if (!KafkaAdapter) {
-    KafkaAdapter = require('./adapters/kafkaAdapter').KafkaAdapter;
+    const adapterModule = require('./adapters/kafkaAdapter');
+    KafkaAdapter = adapterModule.KafkaAdapter;
   }
   return KafkaAdapter;
 }
 
 function getInMemoryAdapter() {
   if (!InMemoryAdapter) {
-    InMemoryAdapter = require('./adapters/inMemoryAdapter').InMemoryAdapter;
+    const adapterModule = require('./adapters/inMemoryAdapter');
+    InMemoryAdapter = adapterModule.InMemoryAdapter;
   }
   return InMemoryAdapter;
 }
@@ -38,10 +41,11 @@ function getInMemoryAdapter() {
 export * from './types';
 export * from './topics';
 
-// Export adapter classes (loaded dynamically)
-export { RedisStreamsAdapter } from './adapters/redisStreamsAdapter';
-export { KafkaAdapter } from './adapters/kafkaAdapter';
-export { InMemoryAdapter } from './adapters/inMemoryAdapter';
+// Export adapter classes (loaded dynamically via getters)
+// These are re-exported but will be loaded lazily via the getter functions
+export type { RedisStreamsAdapter } from './adapters/redisStreamsAdapter';
+export type { KafkaAdapter } from './adapters/kafkaAdapter';
+export type { InMemoryAdapter } from './adapters/inMemoryAdapter';
 
 /**
  * Create a pub/sub adapter based on configuration
@@ -53,13 +57,13 @@ export function createPubSubAdapter(config?: PubSubConfig): PubSubAdapter {
 
   switch (adapterType) {
     case 'redis_streams':
-      return new RedisStreamsAdapter(config?.redis);
+      return new (getRedisStreamsAdapter())(config?.redis);
 
     case 'kafka':
-      return new KafkaAdapter(config?.kafka);
+      return new (getKafkaAdapter())(config?.kafka);
 
     case 'in_memory':
-      return new InMemoryAdapter();
+      return new (getInMemoryAdapter())();
 
     default:
       throw new Error(`Unknown pub/sub adapter: ${adapterType}`);
@@ -73,6 +77,20 @@ export function createPubSubAdapterFromEnv(): PubSubAdapter {
   const adapter = (process.env.PUBSUB_ADAPTER || 'redis_streams') as 
     'redis_streams' | 'kafka' | 'in_memory';
 
+  // Validate adapter type
+  if (!['redis_streams', 'kafka', 'in_memory'].includes(adapter)) {
+    throw new Error(`Invalid PUBSUB_ADAPTER: ${adapter}. Must be one of: redis_streams, kafka, in_memory`);
+  }
+
+  // Validate required environment variables based on adapter
+  if (adapter === 'redis_streams' && !process.env.REDIS_URL) {
+    throw new Error('REDIS_URL is required when PUBSUB_ADAPTER=redis_streams');
+  }
+
+  if (adapter === 'kafka' && !process.env.KAFKA_BROKERS) {
+    throw new Error('KAFKA_BROKERS is required when PUBSUB_ADAPTER=kafka');
+  }
+
   const config: PubSubConfig = {
     adapter,
     redis: {
@@ -81,12 +99,16 @@ export function createPubSubAdapterFromEnv(): PubSubAdapter {
       consumerName: process.env.REDIS_CONSUMER_NAME,
     },
     kafka: {
-      brokers: process.env.KAFKA_BROKERS?.split(','),
+      brokers: process.env.KAFKA_BROKERS?.split(',').filter(Boolean),
       clientId: process.env.KAFKA_CLIENT_ID,
       consumerGroup: process.env.KAFKA_CONSUMER_GROUP,
     },
   };
 
-  return createPubSubAdapter(config);
+  try {
+    return createPubSubAdapter(config);
+  } catch (error: any) {
+    throw new Error(`Failed to create pub/sub adapter: ${error.message}`);
+  }
 }
 
