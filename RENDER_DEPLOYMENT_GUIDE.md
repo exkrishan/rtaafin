@@ -19,9 +19,10 @@ This guide provides the **stable, production-ready** deployment process for RTAA
 **Environment:** Node  
 **Root Directory:** `/` (repo root)  
 **Build Command:** `npm ci && npm run build`  
-**Start Command:** `npm run start`  
+**Start Command:** `npm run start` (automatically uses `process.env.PORT`)  
 **Node Version:** 20.x  
-**Health Check Path:** `/api/health` ⚠️ **REQUIRED**
+**Health Check Path:** `/api/health` ⚠️ **REQUIRED**  
+**Port Configuration:** ✅ Automatically uses Render's `PORT` environment variable
 
 **Environment Variables:**
 ```
