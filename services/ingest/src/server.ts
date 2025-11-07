@@ -190,18 +190,36 @@ class IngestionServer {
       server: this.server,
       path: '/v1/ingest',
       verifyClient: (info, callback) => {
+        // Log ALL WebSocket upgrade attempts for debugging
+        console.info('[server] WebSocket upgrade request received', {
+          url: info.req.url,
+          method: info.req.method,
+          headers: {
+            authorization: info.req.headers.authorization ? 'present' : 'missing',
+            'user-agent': info.req.headers['user-agent']?.substring(0, 50) || 'unknown',
+            origin: info.req.headers.origin || 'none',
+          },
+          remoteAddress: info.req.socket?.remoteAddress || 'unknown',
+        });
+        
         // Check if this is Exotel (no JWT or Basic Auth) or our protocol (JWT)
         const authHeader = info.req.headers.authorization;
         const isExotel = this.detectExotelProtocol(info.req);
         
         if (isExotel && this.supportExotel) {
           // Exotel connection - accept without JWT validation
-          console.info('[server] Exotel WebSocket upgrade request (IP whitelist/Basic Auth)');
+          console.info('[server] ✅ Exotel WebSocket upgrade request accepted (IP whitelist/Basic Auth)');
+          (info.req as any).isExotel = true;
+          callback(true);
+        } else if (!authHeader && this.supportExotel) {
+          // No auth header but Exotel support enabled - might be Exotel with IP whitelisting
+          console.info('[server] ⚠️  WebSocket upgrade with no auth - accepting as Exotel (SUPPORT_EXOTEL=true)');
+          (info.req as any).isExotel = true;
           callback(true);
         } else {
           // Our protocol - require JWT authentication
           try {
-            console.info('[server] WebSocket upgrade request', {
+            console.info('[server] WebSocket upgrade request (JWT protocol)', {
               hasAuthHeader: !!authHeader,
               authHeaderPrefix: authHeader?.substring(0, 20) || 'none',
             });
@@ -209,13 +227,13 @@ class IngestionServer {
             // Store payload in request for later use
             (info.req as any).jwtPayload = payload;
             (info.req as any).isExotel = false;
-            console.info('[server] Authentication successful', {
+            console.info('[server] ✅ Authentication successful', {
               tenant_id: payload.tenant_id,
               interaction_id: payload.interaction_id,
             });
             callback(true);
           } catch (error: any) {
-            console.warn('[server] Authentication failed:', error.message);
+            console.warn('[server] ❌ Authentication failed:', error.message);
             console.warn('[server] Error details:', error);
             callback(false, 401, 'Unauthorized');
           }
