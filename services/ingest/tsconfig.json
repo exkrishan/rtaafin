@@ -4,7 +4,6 @@
     "module": "commonjs",
     "lib": ["ES2020"],
     "outDir": "./dist",
-    "rootDir": "./src",
     "baseUrl": ".",
     "paths": {
       "@rtaa/pubsub": ["../../lib/pubsub/index.ts"],
@@ -20,5 +19,5 @@
     "noEmit": false
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist", "tests", "../../lib/pubsub"]
+  "exclude": ["node_modules", "dist", "tests", "../../lib/pubsub", "../../lib"]
 }
