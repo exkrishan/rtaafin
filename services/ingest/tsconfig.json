@@ -6,8 +6,8 @@
     "outDir": "./dist",
     "baseUrl": ".",
     "paths": {
-      "@rtaa/pubsub": ["../../lib/pubsub/dist/index.js"],
-      "@rtaa/pubsub/*": ["../../lib/pubsub/dist/*"]
+      "@rtaa/pubsub": ["../../lib/pubsub/index.ts"],
+      "@rtaa/pubsub/*": ["../../lib/pubsub/*"]
     },
     "strict": true,
     "esModuleInterop": true,
@@ -16,9 +16,8 @@
     "resolveJsonModule": true,
     "moduleResolution": "node",
     "types": ["node", "jest"],
-    "noEmit": false,
-    "allowJs": true
+    "noEmit": false
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist", "tests", "../../lib/pubsub"]
+  "exclude": ["node_modules", "dist", "tests"]
 }
