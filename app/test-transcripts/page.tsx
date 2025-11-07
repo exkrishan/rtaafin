@@ -44,6 +44,7 @@ export default function TestTranscriptsPage() {
     eventSource.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
+        console.log('[TestUI] Received SSE event:', data);
         if (data.type === 'transcript_line') {
           setTranscripts((prev) => [
             ...prev,
@@ -51,16 +52,36 @@ export default function TestTranscriptsPage() {
               interaction_id: interactionId,
               tenant_id: data.tenantId || 'default',
               seq: data.seq || prev.length + 1,
-              type: data.type || 'partial',
+              type: 'partial', // transcript_line is always partial
               text: data.text || '',
               timestamp_ms: Date.now(),
             },
           ]);
         }
       } catch (error) {
-        console.error('Failed to parse SSE message:', error);
+        console.error('Failed to parse SSE message:', error, event.data);
       }
     };
+    
+    eventSource.addEventListener('transcript_line', (event: any) => {
+      try {
+        const data = JSON.parse(event.data);
+        console.log('[TestUI] Received transcript_line event:', data);
+        setTranscripts((prev) => [
+          ...prev,
+          {
+            interaction_id: interactionId,
+            tenant_id: data.tenantId || 'default',
+            seq: data.seq || prev.length + 1,
+            type: 'partial',
+            text: data.text || '',
+            timestamp_ms: Date.now(),
+          },
+        ]);
+      } catch (error) {
+        console.error('Failed to parse transcript_line event:', error);
+      }
+    });
 
     eventSource.onerror = () => {
       eventSource.close();
@@ -117,7 +138,7 @@ export default function TestTranscriptsPage() {
     }
 
     try {
-      // Simulate a transcript message
+      // Simulate a transcript message - this will trigger intent detection and SSE broadcast
       const response = await fetch('/api/calls/ingest-transcript', {
         method: 'POST',
         headers: {
@@ -128,12 +149,25 @@ export default function TestTranscriptsPage() {
           callId: interactionId,
           seq: transcripts.length + 1,
           ts: new Date().toISOString(),
-          text: 'Test transcript message from UI',
+          text: `Test transcript message #${transcripts.length + 1} from UI at ${new Date().toLocaleTimeString()}`,
         }),
       });
 
       if (response.ok) {
-        setStatus('✅ Test transcript sent');
+        const result = await response.json();
+        setStatus(`✅ Test transcript sent! Intent: ${result.intent || 'unknown'}, Articles: ${result.articles?.length || 0}`);
+        // The transcript should appear via SSE, but add it directly too for immediate feedback
+        setTranscripts((prev) => [
+          ...prev,
+          {
+            interaction_id: interactionId,
+            tenant_id: 'test',
+            seq: prev.length + 1,
+            type: 'partial',
+            text: `Test transcript message #${prev.length + 1} from UI`,
+            timestamp_ms: Date.now(),
+          },
+        ]);
       } else {
         const error = await response.text();
         setStatus(`❌ Failed: ${error}`);

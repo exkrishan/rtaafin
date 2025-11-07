@@ -170,11 +170,25 @@ class AsrWorker {
       const topic = transcriptTopic(buffer.interactionId);
       await this.pubsub.publish(topic, transcriptMsg);
 
+      // Enhanced logging to debug empty text issue
+      const textPreview = transcript.text ? transcript.text.substring(0, 50) : '(EMPTY)';
       console.info(`[ASRWorker] Published ${transcript.type} transcript`, {
         interaction_id: buffer.interactionId,
-        text: transcript.text.substring(0, 50),
+        text: textPreview,
+        textLength: transcript.text?.length || 0,
         seq,
+        provider: process.env.ASR_PROVIDER || 'mock',
       });
+      
+      // Warn if text is empty
+      if (!transcript.text || transcript.text.trim().length === 0) {
+        console.warn(`[ASRWorker] ⚠️ WARNING: Published transcript with EMPTY text!`, {
+          interaction_id: buffer.interactionId,
+          seq,
+          type: transcript.type,
+          provider: process.env.ASR_PROVIDER || 'mock',
+        });
+      }
 
       // Clear buffer if final transcript
       if (transcript.isFinal) {

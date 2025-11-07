@@ -37,6 +37,12 @@ export class MockProvider implements AsrProvider {
       this.interactionTranscripts.set(interactionId, words);
       this.interactionIndex.set(interactionId, 0);
       this.seqCount.set(interactionId, 0);
+      
+      console.debug('[MockProvider] Initialized for interaction', {
+        interactionId,
+        template: baseTemplate,
+        wordCount: words.length,
+      });
     }
 
     const words = this.interactionTranscripts.get(interactionId)!;
@@ -86,9 +92,23 @@ export class MockProvider implements AsrProvider {
     } else {
       // Partial transcript - ensure we always have text
       const text = partialText || words[0] || 'Processing audio...';
+      
+      // Debug logging to track empty text issue
+      if (!text || text.trim().length === 0) {
+        console.error('[MockProvider] ⚠️ CRITICAL: Generated EMPTY text!', {
+          interactionId,
+          seq,
+          currentIndex,
+          newSeqCount,
+          partialText,
+          words: words.slice(0, 3),
+          wordsLength: words.length,
+        });
+      }
+      
       return {
         type: 'partial',
-        text,
+        text: text || 'Processing...', // Final fallback
         confidence: 0.85,
         isFinal: false,
       };
