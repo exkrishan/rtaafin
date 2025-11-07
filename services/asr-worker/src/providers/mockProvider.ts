@@ -54,7 +54,10 @@ export class MockProvider implements AsrProvider {
     }
 
     // Build partial transcript
-    const partialText = words.slice(0, currentIndex).join(' ');
+    // Always include at least the first word to avoid empty transcripts
+    const partialText = currentIndex === 0 
+      ? words[0] || 'Processing...'  // First chunk: return first word
+      : words.slice(0, currentIndex).join(' ');
     const isComplete = currentIndex >= words.length;
     
     // Force completion after 20 chunks to ensure tests pass
@@ -72,10 +75,11 @@ export class MockProvider implements AsrProvider {
         isFinal: true,
       };
     } else {
-      // Partial transcript
+      // Partial transcript - ensure we always have text
+      const text = partialText || words[0] || 'Processing audio...';
       return {
         type: 'partial',
-        text: partialText || '',
+        text,
         confidence: 0.85,
         isFinal: false,
       };
