@@ -124,7 +124,12 @@ export default function TestTranscriptsPage() {
       const response = await fetch('/api/transcripts/status');
       if (response.ok) {
         const data = await response.json();
-        setStatus(JSON.stringify(data.status, null, 2));
+        // API returns status directly, not nested under 'status'
+        const statusData = data.status || data;
+        setStatus(JSON.stringify(statusData, null, 2));
+      } else {
+        const error = await response.json();
+        setStatus(`❌ Failed: ${error.error || 'Unknown error'}`);
       }
     } catch (error: any) {
       setStatus(`❌ Error: ${error.message}`);

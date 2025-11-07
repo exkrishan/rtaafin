@@ -138,6 +138,12 @@ export class RedisStreamsAdapter implements PubSubAdapter {
       if (errorMsg.includes('max number of clients')) {
         maxClientsErrorTime.set(url, Date.now());
         console.error('[RedisStreamsAdapter] ❌ Max clients reached - stopping connection attempts for 60s:', url);
+        // Close connection immediately to prevent retry loops
+        try {
+          this.redis?.disconnect();
+        } catch (e) {
+          // Ignore disconnect errors
+        }
         // Don't log as regular error to reduce log spam
         return;
       }
@@ -381,17 +387,26 @@ export class RedisStreamsAdapter implements PubSubAdapter {
             subscription.running = false;
             break;
           }
-          if (errorMessage.includes('Connection')) {
-            // Connection error - check if we're in max clients backoff
-            const lastMaxClientsError = maxClientsErrorTime.get(topic) || maxClientsErrorTime.get(this.redisUrl);
+          if (errorMessage.includes('Connection') || errorMessage.includes('max number of clients')) {
+            // Check if we're in max clients backoff (check URL, not topic)
+            const lastMaxClientsError = maxClientsErrorTime.get(this.redisUrl);
             if (lastMaxClientsError && (Date.now() - lastMaxClientsError) < MAX_CLIENTS_BACKOFF_MS) {
-              // We're in backoff period, stop consumer
+              // We're in backoff period, stop consumer completely
               const waitTime = Math.ceil((MAX_CLIENTS_BACKOFF_MS - (Date.now() - lastMaxClientsError)) / 1000);
               console.warn(`[RedisStreamsAdapter] ⏸️  In max clients backoff (${waitTime}s remaining), stopping consumer: ${topic}`);
               subscription.running = false;
+              break; // Exit consumer loop
+            }
+            
+            // If max clients error, mark it and stop
+            if (errorMessage.includes('max number of clients')) {
+              maxClientsErrorTime.set(this.redisUrl, Date.now());
+              console.error(`[RedisStreamsAdapter] ❌ Max clients reached - stopping consumer: ${topic}`);
+              subscription.running = false;
               break;
             }
-            // Regular connection error - wait and retry
+            
+            // Regular connection error (not max clients) - wait and retry
             console.warn(`[RedisStreamsAdapter] Connection issue, retrying in 5s...`);
             await new Promise((resolve) => setTimeout(resolve, 5000));
             if (!subscription.running) {
