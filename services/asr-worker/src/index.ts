@@ -165,6 +165,16 @@ class AsrWorker {
       const combinedAudio = Buffer.concat(buffer.chunks);
       const seq = buffer.chunks.length;
 
+      // Log audio details before sending to ASR
+      console.info(`[ASRWorker] Processing audio buffer:`, {
+        interaction_id: buffer.interactionId,
+        seq,
+        sampleRate: buffer.sampleRate,
+        audioSize: combinedAudio.length,
+        chunksCount: buffer.chunks.length,
+        bufferAge: Date.now() - buffer.lastProcessed,
+      });
+
       // Send to ASR provider
       const transcript = await this.asrProvider.sendAudioChunk(combinedAudio, {
         interactionId: buffer.interactionId,
