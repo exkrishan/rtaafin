@@ -59,13 +59,36 @@ export class DeepgramProvider implements AsrProvider {
 
       // Access underlying WebSocket for text frames (KeepAlive)
       // The Deepgram SDK connection object may expose the socket in different ways
-      // Try common patterns: _socket, socket, getSocket(), or connection._connection
+      // Based on logs, connection has 'conn' and 'transport' keys
+      // Try multiple patterns to find the WebSocket
       let socket: any = null;
+      
+      // Try direct socket access patterns
       if (connection._socket) {
         socket = connection._socket;
       } else if (connection.socket) {
         socket = connection.socket;
-      } else if (connection._connection?._socket) {
+      } 
+      // Try through 'conn' property (seen in connection object keys)
+      else if (connection.conn?._socket) {
+        socket = connection.conn._socket;
+      } else if (connection.conn?.socket) {
+        socket = connection.conn.socket;
+      } else if (connection.conn && typeof connection.conn.send === 'function' && connection.conn.readyState !== undefined) {
+        // conn might be the WebSocket itself
+        socket = connection.conn;
+      }
+      // Try through 'transport' property (seen in connection object keys)
+      else if (connection.transport?._socket) {
+        socket = connection.transport._socket;
+      } else if (connection.transport?.socket) {
+        socket = connection.transport.socket;
+      } else if (connection.transport && typeof connection.transport.send === 'function' && connection.transport.readyState !== undefined) {
+        // transport might be the WebSocket itself
+        socket = connection.transport;
+      }
+      // Try nested patterns
+      else if (connection._connection?._socket) {
         socket = connection._connection._socket;
       } else if (connection._connection?.socket) {
         socket = connection._connection.socket;
@@ -81,6 +104,12 @@ export class DeepgramProvider implements AsrProvider {
           has_socket: !!connection.socket,
           has_socket_underscore: !!connection._socket,
           has_connection: !!connection._connection,
+          has_conn: !!connection.conn,
+          has_transport: !!connection.transport,
+          conn_type: connection.conn ? typeof connection.conn : 'undefined',
+          transport_type: connection.transport ? typeof connection.transport : 'undefined',
+          conn_keys: connection.conn ? Object.keys(connection.conn) : [],
+          transport_keys: connection.transport ? Object.keys(connection.transport) : [],
           connection_keys: connection._connection ? Object.keys(connection._connection) : [],
         });
       } else {
@@ -105,10 +134,24 @@ export class DeepgramProvider implements AsrProvider {
         // Try to access socket again if not found initially (socket might only be available after Open)
         if (!state.socket) {
           console.debug(`[DeepgramProvider] Socket not found initially, trying again after Open event for ${interactionId}`);
+          
+          // Try all patterns again, including conn and transport
           if (connection._socket) {
             state.socket = connection._socket;
           } else if (connection.socket) {
             state.socket = connection.socket;
+          } else if (connection.conn?._socket) {
+            state.socket = connection.conn._socket;
+          } else if (connection.conn?.socket) {
+            state.socket = connection.conn.socket;
+          } else if (connection.conn && typeof connection.conn.send === 'function' && connection.conn.readyState !== undefined) {
+            state.socket = connection.conn;
+          } else if (connection.transport?._socket) {
+            state.socket = connection.transport._socket;
+          } else if (connection.transport?.socket) {
+            state.socket = connection.transport.socket;
+          } else if (connection.transport && typeof connection.transport.send === 'function' && connection.transport.readyState !== undefined) {
+            state.socket = connection.transport;
           } else if (connection._connection?._socket) {
             state.socket = connection._connection._socket;
           } else if (connection._connection?.socket) {
@@ -119,6 +162,23 @@ export class DeepgramProvider implements AsrProvider {
           
           if (state.socket) {
             console.info(`[DeepgramProvider] ✅ Accessed underlying WebSocket after Open event for ${interactionId}`);
+            console.debug(`[DeepgramProvider] Socket path:`, {
+              has_conn: !!connection.conn,
+              has_transport: !!connection.transport,
+              conn_keys: connection.conn ? Object.keys(connection.conn) : [],
+              transport_keys: connection.transport ? Object.keys(connection.transport) : [],
+            });
+          } else {
+            // Log detailed structure for debugging
+            console.warn(`[DeepgramProvider] ⚠️ Socket still not found after Open event for ${interactionId}`);
+            console.warn(`[DeepgramProvider] Connection structure after Open:`, {
+              has_conn: !!connection.conn,
+              has_transport: !!connection.transport,
+              conn_type: connection.conn ? typeof connection.conn : 'undefined',
+              transport_type: connection.transport ? typeof connection.transport : 'undefined',
+              conn_keys: connection.conn ? Object.keys(connection.conn) : [],
+              transport_keys: connection.transport ? Object.keys(connection.transport) : [],
+            });
           }
         }
         
