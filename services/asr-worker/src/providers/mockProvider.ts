@@ -122,3 +122,36 @@ export class MockProvider implements AsrProvider {
   }
 }
 
+
+      // Partial transcript - ensure we always have text
+      const text = partialText || words[0] || 'Processing audio...';
+      
+      // Debug logging to track empty text issue
+      if (!text || text.trim().length === 0) {
+        console.error('[MockProvider] ⚠️ CRITICAL: Generated EMPTY text!', {
+          interactionId,
+          seq,
+          currentIndex,
+          newSeqCount,
+          partialText,
+          words: words.slice(0, 3),
+          wordsLength: words.length,
+        });
+      }
+      
+      return {
+        type: 'partial',
+        text: text || 'Processing...', // Final fallback
+        confidence: 0.85,
+        isFinal: false,
+      };
+    }
+  }
+
+  async close(): Promise<void> {
+    this.interactionTranscripts.clear();
+    this.interactionIndex.clear();
+    this.seqCount.clear();
+  }
+}
+

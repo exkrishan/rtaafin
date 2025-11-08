@@ -3,7 +3,8 @@
  * Uses the pluggable pub/sub abstraction from lib/pubsub
  */
 
-// Use workspace import - will be fixed to relative path in postbuild
+// Use relative import to compiled lib/pubsub - paths will be fixed in postbuild
+// TypeScript will resolve @rtaa/pubsub to ../../lib/pubsub/dist/index.js
 import { createPubSubAdapterFromEnv, PubSubAdapter as CorePubSubAdapter } from '@rtaa/pubsub';
 import { audioTopic } from '@rtaa/pubsub/topics';
 import { AudioFrame } from './types';

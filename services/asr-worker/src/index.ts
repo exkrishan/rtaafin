@@ -250,3 +250,17 @@ process.on('SIGINT', async () => {
   process.exit(0);
 });
 
+
+// Graceful shutdown
+process.on('SIGTERM', async () => {
+  console.info('[ASRWorker] SIGTERM received, shutting down gracefully');
+  await worker.stop();
+  process.exit(0);
+});
+
+process.on('SIGINT', async () => {
+  console.info('[ASRWorker] SIGINT received, shutting down gracefully');
+  await worker.stop();
+  process.exit(0);
+});
+

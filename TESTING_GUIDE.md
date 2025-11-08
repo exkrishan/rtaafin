@@ -1,190 +1,280 @@
-# Agent Assist UI - Local Testing Guide
+# 🧪 Complete Testing Guide - Step by Step
 
-## 🚀 Quick Start
+## Prerequisites
 
-The dev server should already be running. If not, start it with:
+1. **Next.js Running Locally:**
+   ```bash
+   # Check if running
+   curl http://localhost:3000/api/health
+   
+   # If not running, start it:
+   ./start-dev.sh
+   # or
+   npm run dev
+   ```
 
-```bash
-npm run dev
+2. **Transcript Consumer Active:**
+   ```bash
+   curl http://localhost:3000/api/transcripts/status
+   ```
+   Should show: `"isRunning": true`
+
+---
+
+## Step 1: Test UI Locally (Verify UI Works)
+
+1. **Open Test UI:**
+   ```
+   http://localhost:3000/test-transcripts
+   ```
+
+2. **Test Manual Injection:**
+   - Enter interaction ID: `test-123`
+   - Click: **"Send Test Transcript"** (green button)
+   - ✅ Transcript should appear immediately
+   - This confirms the UI works
+
+---
+
+## Step 2: Make a NEW Call from Exotel
+
+⚠️ **IMPORTANT:** Make a **NEW** call, not the old one!
+
+- Start a fresh call from Exotel
+- Get the **NEW interaction ID** from:
+  - Exotel dashboard, OR
+  - Render ASR worker logs (look for new `call-*` ID)
+- Example: `call-1762531234567` (new ID, not `call-1762530768573`)
+
+**Why NEW call?**
+- Old call (`call-1762530768573`) has cached empty state
+- New call will use fresh mock provider state with the fix
+
+---
+
+## Step 3: Subscribe in Test UI
+
+1. **Open Test UI:**
+   ```
+   http://localhost:3000/test-transcripts
+   ```
+
+2. **Enter the NEW Interaction ID:**
+   - Paste the interaction ID from Step 2
+   - Example: `call-1762531234567`
+
+3. **Click: "Subscribe to Transcripts"** (blue button)
+   - Status should show: `✅ Subscribed to transcripts`
+   - Green "Subscribed" badge should appear at top right
+
+---
+
+## Step 4: Watch for Transcripts
+
+- Transcripts should appear **automatically** in the list below
+- Should see **actual text** (not empty or `[EMPTY]`)
+- Watch the count increase: `Transcripts (1)`, `Transcripts (2)`, etc.
+- Each transcript shows:
+  - Type: `partial` or `final`
+  - Sequence number
+  - **Text content** (should have words!)
+  - Timestamp
+
+---
+
+## Step 5: Verify in Logs
+
+### Render ASR Worker Logs
+
+**✅ GOOD (New Call):**
+```
+[ASRWorker] Published partial transcript {
+  interaction_id: 'call-1762531234567',
+  text: 'Hello',
+  textLength: 5,
+  seq: 1,
+  provider: 'mock'
+}
 ```
 
-## 📍 Access the Demo Page
+**❌ BAD (Old Call - Expected):**
+```
+[ASRWorker] Published partial transcript {
+  interaction_id: 'call-1762530768573',
+  text: '',
+  textLength: 0,
+  seq: 4
+}
+⚠️ WARNING: Published transcript with EMPTY text!
+```
 
-Open your browser and navigate to:
-**http://localhost:3000/demo**
+### Next.js Terminal Logs
 
-## ✅ Testing Checklist
+**✅ GOOD:**
+```
+[TranscriptConsumer] Received transcript message {
+  interaction_id: 'call-1762531234567',
+  type: 'partial',
+  seq: 1,
+  textLength: 5,
+  textPreview: 'Hello'
+}
+[TranscriptConsumer] ✅ Forwarded transcript successfully {
+  intent: 'credit_card_issue',
+  articlesCount: 3
+}
+```
 
-### 1. **Layout & Visual Structure**
-- [ ] **Top Bar**: Should show "Agent Assist 22" with notification bell and "SM" avatar with green dot
-- [ ] **Left Navigation**: Dark gray sidebar with icons (home, arrow, headset, plus, calendar, search, settings)
-- [ ] **Three Columns**: 
-  - Left: Call/Transcript panel (320px)
-  - Center: Customer details (flexible width)
-  - Right: Agent Assist panel (320px)
+**❌ BAD (Old Call):**
+```
+[TranscriptConsumer] ⚠️ Received transcript with EMPTY text (allowing through for debugging)
+[TranscriptConsumer] Received transcript message {
+  textLength: 0,
+  textPreview: ''
+}
+```
 
-### 2. **Left Column - Call/Transcript**
-- [ ] **Call Header**: Green dot, "Manish", timer "01:33", navigation arrows
-- [ ] **Call Controls**: Microphone, pause, rewind, fast-forward, hang up buttons
-- [ ] **Transcript Header**: "Transcript" title with search icon and "All" dropdown
-- [ ] **Call Details**: Campaign, Queue, Call Type, DID displayed
-- [ ] **Transcript Messages**: Should be empty initially (waiting for call to start)
+### Browser Console (F12)
 
-### 3. **Center Column - Customer Details**
-- [ ] **Customer Header**: "Manish Jain" with "M" avatar, green checkmark, phone/edit icons
-- [ ] **Tabs**: "Customer" (active) and "LeadSquare" tabs
-- [ ] **Customer Info Card**: 
-  - Contact details (phone, email, Instagram)
-  - Sentiment Trend graph placeholder
-  - "Positive" sentiment indicator
-- [ ] **Summary Section**: "Summary" title with "Last 5 Interaction" button
-- [ ] **Past Interactions**: 
-  - Intent: "Complex Trade Execution Support" with "Neutral" pill
-  - Case cards with descriptions and timestamps
+**✅ GOOD:**
+```
+[TestUI] Received SSE event: { type: 'transcript_line', text: 'Hello', seq: 1 }
+```
 
-### 4. **Right Column - Agent Assist Panel**
-- [ ] **Header**: "Agent Assist" with "AI Powered Suggestions" subtitle and collapse icon
-- [ ] **Search Box**: Input with magnifying glass icon, placeholder "Search"
-- [ ] **Empty State**: Should show "Looking for suggestions" when no KB articles are available
+---
 
-### 5. **Testing the Call Flow**
+## ✅ Success Indicators
 
-#### Step 1: Start a Call
-1. Click the **"▶ Start Call"** button (bottom left)
-2. Watch the transcript panel - messages should appear one by one
-3. Messages should display as chat bubbles:
-   - Agent messages (blue/purple) on the right
-   - Customer messages (white/gray) on the left with "M" avatar
+### In Render ASR Worker:
+- ✅ `text: 'Hello'` (actual text, not empty)
+- ✅ `textLength: 5` (or higher)
+- ✅ No `⚠️ WARNING: Published transcript with EMPTY text!` for new calls
 
-#### Step 2: Check KB Suggestions
-- After a few transcript lines, KB articles should appear in the right panel
-- Each article card should show:
-  - Title (bold)
-  - Relevance pill (green, e.g., "90% Relevant")
-  - Description (2-line truncated)
-  - Action buttons: thumbs up, thumbs down, copy, open
+### In Next.js Terminal:
+- ✅ `textLength: 5` (or higher)
+- ✅ `✅ Forwarded transcript successfully`
+- ✅ `intent: 'credit_card_issue'` (or similar)
+- ✅ `articlesCount: 3` (or similar)
 
-#### Step 3: Test KB Article Actions
-1. Click **thumbs up** on an article → Should show "Good Response" toast
-2. Click **copy** button → Should show "Copied link" toast
-3. Click **open** button → Should open article in new tab
+### In Test UI:
+- ✅ Transcripts appear in the list
+- ✅ Text shows actual words: `"Hello"`, `"Hello, I"`, etc.
+- ✅ Count increases: `Transcripts (1)`, `Transcripts (2)`, etc.
+- ✅ Green "Subscribed" badge visible
 
-#### Step 4: Stop/End Call
-1. Click **"⏹ Stop Call"** to stop sending transcript lines
-2. Or wait for all lines to finish (call will auto-end)
+---
 
-#### Step 5: Dispose Call
-1. Click **"📝 Dispose Call"** button
-2. **Disposition Modal** should appear:
-   - Floating panel from left side (~360px wide)
-   - "Dispose" header with X close button
-   - Disposition dropdown (with emoji, e.g., "💳 Credit Card")
-   - Sub-disposition dropdown
-   - Call Notes textarea (with light background #FAFBFE)
-   - LLM indicator icon (purple) in bottom-right of textarea
-   - Warning text: "AI-suggested dispositions may be inaccurate..."
-   - "Save and Dispose" button (primary blue)
-   - "Dispose and Dial" button (secondary)
+## ❌ Troubleshooting
 
-#### Step 6: Test Disposition Modal
-1. Review the auto-generated notes
-2. Select a disposition from dropdown
-3. Optionally select a sub-disposition
-4. Edit notes if needed
-5. Click **"Save and Dispose"** → Should save and close modal, show success toast
-6. Or click **"Dispose and Dial"** → Should retry summary generation
+### No Transcripts Appearing in UI
 
-### 6. **Keyboard Accessibility**
-- [ ] Press **Tab** to navigate through interactive elements
-- [ ] Press **Enter** to activate buttons
-- [ ] In modal, press **Esc** to close
-- [ ] Focus should be visible on all interactive elements
+1. **Check Transcript Consumer:**
+   ```bash
+   curl http://localhost:3000/api/transcripts/status
+   ```
+   Should show: `"isRunning": true`
 
-### 7. **Responsive Design**
-- [ ] Resize browser window to mobile size (< 768px)
-- [ ] Columns should stack vertically
-- [ ] Layout should remain usable
+2. **Check Subscription:**
+   - Look for green "Subscribed" badge in UI
+   - Check browser console (F12) for SSE connection
+   - Should see: `[TestUI] Received SSE event`
 
-## 🐛 Common Issues & Solutions
+3. **Check Next.js Logs:**
+   - Should see: `[TranscriptConsumer] Received transcript message`
+   - Should see: `[TranscriptConsumer] ✅ Forwarded transcript successfully`
 
-### Issue: "Server is not running"
-**Solution**: Run `npm run dev` in terminal
+4. **Check ASR Worker:**
+   - Check Render ASR worker logs
+   - Should see: `[ASRWorker] Published partial transcript`
+   - Verify it's a **NEW call** (not old one)
 
-### Issue: "Transcript not appearing"
-**Solution**: 
-1. Check browser console for errors
-2. Verify SSE connection: Look for "Connected to realtime stream" message
-3. Click "Start Call" button to send test transcript
+5. **Verify It's a NEW Call:**
+   - Old call (`call-1762530768573`) will show empty text
+   - Need a **fresh call** to test the fix
 
-### Issue: "KB articles not showing"
-**Solution**:
-1. Wait a few seconds after transcript lines start
-2. Check browser console for `intent_update` events
-3. Verify `/api/kb/search` endpoint is working
+### Still Seeing Empty Text
 
-### Issue: "Disposition modal not opening"
-**Solution**:
-1. Make sure call has ended (not actively sending lines)
-2. Check browser console for errors
-3. Verify `/api/calls/summary` endpoint is accessible
+- **If it's the old call:** This is expected - make a NEW call
+- **If it's a new call:** Check Render logs for:
+  - `⚠️ WARNING: Published transcript with EMPTY text!`
+  - `[MockProvider] ⚠️ CRITICAL: Generated EMPTY text!`
+  - This will help debug the mock provider
 
-### Issue: "Styling looks broken"
-**Solution**:
-1. Ensure Tailwind CSS is compiled: Check `tailwind.config.js` exists
-2. Clear browser cache and hard refresh (Cmd+Shift+R / Ctrl+Shift+R)
-3. Check browser console for CSS errors
+### UI Not Loading
 
-## 🔍 Debugging Tips
+- Check Next.js is running: `curl http://localhost:3000/api/health`
+- Check browser console for errors
+- Try refreshing the page
 
-### Browser Console
-Open DevTools (F12) and look for:
-- `[Demo] Sent transcript line` - confirms transcript is being sent
-- `[TranscriptPanel] Received transcript_line` - confirms SSE events are received
-- `[KBSuggestions] Received intent_update` - confirms KB articles are being received
-- Any error messages in red
+---
 
-### Network Tab
-Check Network tab in DevTools:
-- `/api/calls/ingest-transcript` - should return 200 OK
-- `/api/events/stream` - should show EventStream connection
-- `/api/calls/summary` - should return JSON with dispositions
+## 🎯 Quick Test Checklist
 
-### Server Logs
-Check terminal where `npm run dev` is running:
-- Look for `[ingest-transcript]` logs
-- Look for `[realtime] Broadcast` logs
-- Check for any error messages
+- [ ] Next.js running on port 3000
+- [ ] Test UI opens: `http://localhost:3000/test-transcripts`
+- [ ] "Send Test Transcript" works (UI verified)
+- [ ] Made a **NEW** call from Exotel
+- [ ] Got new interaction ID
+- [ ] Subscribed to new interaction ID in UI
+- [ ] Transcripts appear with actual text
+- [ ] Render logs show `textLength > 0` for new call
+- [ ] Next.js logs show successful forwarding
 
-## 📝 Test Data
+---
 
-The demo uses a pre-configured test transcript with 16 messages simulating a credit card delivery inquiry conversation between Agent (Priya) and Customer (Manish).
+## 📞 Support
 
-## 🎯 Expected Behavior
+If issues persist:
+1. Check all logs (Render, Next.js, Browser console)
+2. Verify it's a NEW call (not old cached one)
+3. Check transcript consumer status
+4. Verify ASR worker is processing audio
 
-1. **On Page Load**: 
-   - Empty transcript panel
-   - Customer details displayed
-   - Empty KB suggestions panel
+---
 
-2. **After Clicking "Start Call"**:
-   - Transcript messages appear one by one (1.5s intervals)
-   - Chat bubbles appear with proper styling
-   - KB articles appear after intent detection
+**🎉 Ready to test! Follow the steps above and you should see transcripts with text!**
 
-3. **After Call Ends**:
-   - "Dispose Call" button becomes enabled
-   - Clicking it opens disposition modal with AI-generated notes
+   - Old call (`call-1762530768573`) will show empty text
+   - Need a **fresh call** to test the fix
 
-4. **In Disposition Modal**:
-   - Dispositions are pre-filled from LLM
-   - Notes are auto-generated
-   - Can edit and save
+### Still Seeing Empty Text
 
-## ✨ Next Steps
+- **If it's the old call:** This is expected - make a NEW call
+- **If it's a new call:** Check Render logs for:
+  - `⚠️ WARNING: Published transcript with EMPTY text!`
+  - `[MockProvider] ⚠️ CRITICAL: Generated EMPTY text!`
+  - This will help debug the mock provider
 
-Once basic testing is complete, you can:
-1. Test with different call scenarios
-2. Test KB search functionality
-3. Test feedback actions (like/dislike)
-4. Verify database persistence of dispositions
-5. Test with multiple concurrent calls
+### UI Not Loading
+
+- Check Next.js is running: `curl http://localhost:3000/api/health`
+- Check browser console for errors
+- Try refreshing the page
+
+---
+
+## 🎯 Quick Test Checklist
+
+- [ ] Next.js running on port 3000
+- [ ] Test UI opens: `http://localhost:3000/test-transcripts`
+- [ ] "Send Test Transcript" works (UI verified)
+- [ ] Made a **NEW** call from Exotel
+- [ ] Got new interaction ID
+- [ ] Subscribed to new interaction ID in UI
+- [ ] Transcripts appear with actual text
+- [ ] Render logs show `textLength > 0` for new call
+- [ ] Next.js logs show successful forwarding
+
+---
+
+## 📞 Support
+
+If issues persist:
+1. Check all logs (Render, Next.js, Browser console)
+2. Verify it's a NEW call (not old cached one)
+3. Check transcript consumer status
+4. Verify ASR worker is processing audio
+
+---
+
+**🎉 Ready to test! Follow the steps above and you should see transcripts with text!**

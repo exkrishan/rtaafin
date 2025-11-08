@@ -236,3 +236,116 @@ export class DeepgramProvider implements AsrProvider {
   }
 }
 
+
+      try {
+        connection.start();
+        console.info(`[DeepgramProvider] 🚀 Connection start() called for ${interactionId}`);
+      } catch (error: any) {
+        console.error(`[DeepgramProvider] Failed to start connection for ${interactionId}:`, error);
+        throw error;
+      }
+    }
+
+    return state;
+  }
+
+  async sendAudioChunk(
+    audio: Buffer,
+    opts: { interactionId: string; seq: number; sampleRate: number }
+  ): Promise<Transcript> {
+    const { interactionId, sampleRate, seq } = opts;
+
+    try {
+      // Get or create connection
+      const state = await this.getOrCreateConnection(interactionId, sampleRate);
+
+      // Wait for connection to be ready (with timeout)
+      if (!state.isReady) {
+        console.debug(`[DeepgramProvider] Waiting for connection to be ready for ${interactionId}...`);
+        await new Promise<void>((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            reject(new Error(`Connection not ready after 5 seconds for ${interactionId}`));
+          }, 5000);
+
+          const checkReady = setInterval(() => {
+            if (state.isReady) {
+              clearInterval(checkReady);
+              clearTimeout(timeout);
+              resolve();
+            }
+          }, 100);
+        });
+      }
+
+      // Send audio chunk
+      try {
+        state.connection.send(audio);
+        console.debug(`[DeepgramProvider] 📤 Sent audio chunk for ${interactionId}, seq=${seq}, size=${audio.length}`);
+      } catch (error: any) {
+        console.error(`[DeepgramProvider] Failed to send audio for ${interactionId}:`, error);
+        throw error;
+      }
+
+      // Return a promise that resolves when we get a transcript
+      return new Promise<Transcript>((resolve) => {
+        // Check if we have a queued transcript
+        if (state.transcriptQueue.length > 0) {
+          const transcript = state.transcriptQueue.shift()!;
+          resolve(transcript);
+          return;
+        }
+
+        // Check if we have a last transcript (for partial updates)
+        if (state.lastTranscript && state.lastTranscript.type === 'partial') {
+          resolve(state.lastTranscript);
+          return;
+        }
+
+        // Add to pending resolvers
+        state.pendingResolvers.push(resolve);
+
+        // Timeout after 5 seconds if no response (longer for Deepgram processing)
+        setTimeout(() => {
+          const index = state.pendingResolvers.indexOf(resolve);
+          if (index >= 0) {
+            state.pendingResolvers.splice(index, 1);
+            // Return last known transcript or empty
+            if (state.lastTranscript) {
+              resolve(state.lastTranscript);
+            } else {
+              console.warn(`[DeepgramProvider] ⚠️ Timeout waiting for transcript for ${interactionId}, seq=${seq}`);
+              resolve({
+                type: 'partial',
+                text: '',
+                isFinal: false,
+              });
+            }
+          }
+        }, 5000);
+      });
+    } catch (error: any) {
+      console.error(`[DeepgramProvider] Error in sendAudioChunk for ${interactionId}:`, error);
+      return {
+        type: 'partial',
+        text: '',
+        isFinal: false,
+      };
+    }
+  }
+
+  async close(): Promise<void> {
+    // Close all connections
+    const closePromises = Array.from(this.connections.values()).map((state) => {
+      return new Promise<void>((resolve) => {
+        if (state.connection && typeof state.connection.finish === 'function') {
+          state.connection.finish();
+        }
+        resolve();
+      });
+    });
+
+    await Promise.all(closePromises);
+    this.connections.clear();
+  }
+}
+

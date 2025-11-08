@@ -70,8 +70,12 @@ export function createPubSubAdapter(config?: PubSubConfig): PubSubAdapter {
   }
 }
 
+// Singleton cache for adapters to prevent multiple instances
+const adapterCache = new Map<string, PubSubAdapter>();
+
 /**
  * Create adapter from environment variables
+ * Returns a singleton instance per configuration to prevent multiple connections
  */
 export function createPubSubAdapterFromEnv(): PubSubAdapter {
   const adapter = (process.env.PUBSUB_ADAPTER || 'redis_streams') as 
@@ -91,6 +95,30 @@ export function createPubSubAdapterFromEnv(): PubSubAdapter {
     throw new Error('KAFKA_BROKERS is required when PUBSUB_ADAPTER=kafka');
   }
 
+  // Create cache key from config to ensure singleton per config
+  const cacheKey = JSON.stringify({
+    adapter,
+    redis: {
+      url: process.env.REDIS_URL,
+      consumerGroup: process.env.REDIS_CONSUMER_GROUP,
+      consumerName: process.env.REDIS_CONSUMER_NAME,
+    },
+    kafka: {
+      brokers: process.env.KAFKA_BROKERS,
+      clientId: process.env.KAFKA_CLIENT_ID,
+      consumerGroup: process.env.KAFKA_CONSUMER_GROUP,
+    },
+  });
+
+  // Return cached adapter if available
+  if (adapterCache.has(cacheKey)) {
+    const cached = adapterCache.get(cacheKey);
+    if (cached) {
+      console.info('[createPubSubAdapterFromEnv] Reusing cached adapter instance');
+      return cached;
+    }
+  }
+
   const config: PubSubConfig = {
     adapter,
     redis: {
@@ -106,7 +134,41 @@ export function createPubSubAdapterFromEnv(): PubSubAdapter {
   };
 
   try {
-    return createPubSubAdapter(config);
+    const instance = createPubSubAdapter(config);
+    adapterCache.set(cacheKey, instance);
+    console.info('[createPubSubAdapterFromEnv] Created new adapter instance (cached)');
+    return instance;
+  } catch (error: any) {
+    throw new Error(`Failed to create pub/sub adapter: ${error.message}`);
+  }
+}
+
+
+    if (cached) {
+      console.info('[createPubSubAdapterFromEnv] Reusing cached adapter instance');
+      return cached;
+    }
+  }
+
+  const config: PubSubConfig = {
+    adapter,
+    redis: {
+      url: process.env.REDIS_URL,
+      consumerGroup: process.env.REDIS_CONSUMER_GROUP,
+      consumerName: process.env.REDIS_CONSUMER_NAME,
+    },
+    kafka: {
+      brokers: process.env.KAFKA_BROKERS?.split(',').filter(Boolean),
+      clientId: process.env.KAFKA_CLIENT_ID,
+      consumerGroup: process.env.KAFKA_CONSUMER_GROUP,
+    },
+  };
+
+  try {
+    const instance = createPubSubAdapter(config);
+    adapterCache.set(cacheKey, instance);
+    console.info('[createPubSubAdapterFromEnv] Created new adapter instance (cached)');
+    return instance;
   } catch (error: any) {
     throw new Error(`Failed to create pub/sub adapter: ${error.message}`);
   }

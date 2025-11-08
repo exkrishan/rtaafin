@@ -97,7 +97,9 @@ export class RedisStreamsAdapter implements PubSubAdapter {
     
     // Check if we recently hit max clients error - if so, don't try to connect
     const lastMaxClientsError = maxClientsErrorTime.get(url);
-    if (lastMaxClientsError && (Date.now() - lastMaxClientsError) < MAX_CLIENTS_BACKOFF_MS) {
+    const inBackoff = lastMaxClientsError && (Date.now() - lastMaxClientsError) < MAX_CLIENTS_BACKOFF_MS;
+    
+    if (inBackoff) {
       const waitTime = Math.ceil((MAX_CLIENTS_BACKOFF_MS - (Date.now() - lastMaxClientsError)) / 1000);
       console.warn(`[RedisStreamsAdapter] ⏸️  Max clients backoff active, waiting ${waitTime}s before retry: ${url}`);
       // Don't throw - just set redis to null and let operations fail gracefully
@@ -116,8 +118,8 @@ export class RedisStreamsAdapter implements PubSubAdapter {
         // Increment reference count
         connectionRefCount.set(url, (connectionRefCount.get(url) || 0) + 1);
       } else {
-        // Connection is dead, remove from cache and create new one
-        console.warn('[RedisStreamsAdapter] Cached connection is dead, creating new one:', url);
+        // Connection is dead, remove from cache
+        console.warn('[RedisStreamsAdapter] Cached connection is dead, removing from cache:', url);
         connectionCache.delete(url);
         connectionRefCount.delete(url);
         try {
@@ -125,10 +127,26 @@ export class RedisStreamsAdapter implements PubSubAdapter {
         } catch (e) {
           // Ignore disconnect errors
         }
-        this.redis = this.createNewConnection(url);
+        // Only create new connection if NOT in backoff
+        if (!inBackoff) {
+          this.redis = this.createNewConnection(url);
+        } else {
+          this.redis = null;
+        }
       }
     } else {
-      this.redis = this.createNewConnection(url);
+      // No cached connection - only create new one if NOT in backoff
+      if (!inBackoff) {
+        this.redis = this.createNewConnection(url);
+      } else {
+        this.redis = null;
+        return; // Exit early if in backoff and no cached connection
+      }
+    }
+
+    // Only attach event handlers if we have a connection
+    if (!this.redis) {
+      return; // No connection available (backoff or other issue)
     }
 
     this.redis.on('error', (err: Error) => {
@@ -138,12 +156,10 @@ export class RedisStreamsAdapter implements PubSubAdapter {
       if (errorMsg.includes('max number of clients')) {
         maxClientsErrorTime.set(url, Date.now());
         console.error('[RedisStreamsAdapter] ❌ Max clients reached - stopping connection attempts for 60s:', url);
-        // Close connection immediately to prevent retry loops
-        try {
-          this.redis?.disconnect();
-        } catch (e) {
-          // Ignore disconnect errors
-        }
+        // DON'T close connection - keep it in cache but mark as unavailable
+        // Closing and removing from cache causes new instances to create new connections
+        // Instead, just mark the connection as unavailable and let operations fail gracefully
+        // The connection will be reused when backoff expires
         // Don't log as regular error to reduce log spam
         return;
       }
@@ -157,6 +173,16 @@ export class RedisStreamsAdapter implements PubSubAdapter {
 
     this.redis.on('close', () => {
       console.warn('[RedisStreamsAdapter] Redis connection closed:', url);
+      // Only remove from cache if we're NOT in backoff period
+      // During backoff, we want to keep the connection in cache to prevent new connections
+      const lastMaxClientsError = maxClientsErrorTime.get(url);
+      const inBackoff = lastMaxClientsError && (Date.now() - lastMaxClientsError) < MAX_CLIENTS_BACKOFF_MS;
+      
+      if (inBackoff) {
+        console.info('[RedisStreamsAdapter] Connection closed during backoff, keeping in cache to prevent new connections:', url);
+        return; // Don't remove from cache during backoff
+      }
+      
       // Remove from cache when closed (only if this is the cached connection)
       if (connectionCache.get(url) === this.redis) {
         const refCount = connectionRefCount.get(url) || 0;
@@ -232,6 +258,268 @@ export class RedisStreamsAdapter implements PubSubAdapter {
       // XADD topic * field1 value1 field2 value2 ...
       // Use * for auto-generated message ID
       const msgId = await this.redis.xadd(
+        topic,
+        '*',
+        'data',
+        JSON.stringify(envelope)
+      );
+
+      return msgId as string;
+    } catch (error: unknown) {
+      console.error('[RedisStreamsAdapter] Publish error:', error);
+      throw error;
+    }
+  }
+
+  async subscribe(
+    topic: string,
+    handler: (msg: MessageEnvelope) => Promise<void>
+  ): Promise<SubscriptionHandle> {
+    // Check if we're in backoff period
+    const lastMaxClientsError = maxClientsErrorTime.get(this.redisUrl);
+    if (lastMaxClientsError && (Date.now() - lastMaxClientsError) < MAX_CLIENTS_BACKOFF_MS) {
+      const waitTime = Math.ceil((MAX_CLIENTS_BACKOFF_MS - (Date.now() - lastMaxClientsError)) / 1000);
+      throw new Error(`Redis max clients backoff active - waiting ${waitTime}s before retry`);
+    }
+    
+    const id = `sub-${Date.now()}-${Math.random()}`;
+
+    // Try to create connection if we don't have one (and not in backoff)
+    if (!this.redis) {
+      // Re-check backoff before creating connection
+      if (lastMaxClientsError && (Date.now() - lastMaxClientsError) < MAX_CLIENTS_BACKOFF_MS) {
+        const waitTime = Math.ceil((MAX_CLIENTS_BACKOFF_MS - (Date.now() - lastMaxClientsError)) / 1000);
+        throw new Error(`Redis max clients backoff active - waiting ${waitTime}s before retry`);
+      }
+      // Create connection now
+      if (connectionCache.has(this.redisUrl)) {
+        this.redis = connectionCache.get(this.redisUrl);
+        connectionRefCount.set(this.redisUrl, (connectionRefCount.get(this.redisUrl) || 0) + 1);
+      } else {
+        this.redis = this.createNewConnection(this.redisUrl);
+      }
+    }
+
+    // Create consumer group if it doesn't exist
+    await this.ensureConsumerGroup(topic, this.consumerGroup);
+
+    if (!this.redis) {
+      throw new Error('Redis client not initialized. ioredis is required.');
+    }
+    
+    // REUSE the main Redis connection instead of creating a new one
+    // This prevents hitting Redis Cloud's max client limit
+    // ioredis supports concurrent XREADGROUP calls on the same connection
+    const subscriptionRedis = this.redis;
+
+    const subscription: RedisSubscription = {
+      id,
+      topic,
+      consumerGroup: this.consumerGroup,
+      consumerName: `${this.consumerName}-${id}`,
+      handler,
+      redis: subscriptionRedis,
+      running: true,
+    };
+
+    this.subscriptions.set(id, subscription);
+
+    // Start consuming messages
+    this.startConsumer(subscription);
+
+    return {
+      id,
+      topic,
+      unsubscribe: async () => {
+        await this.unsubscribe(id);
+      },
+    };
+  }
+
+  private async ensureConsumerGroup(topic: string, groupName: string): Promise<void> {
+    try {
+      // Try to create consumer group starting from 0 (beginning of stream)
+      await this.redis.xgroup('CREATE', topic, groupName, '0', 'MKSTREAM');
+    } catch (error: unknown) {
+      // BUSYGROUP means group already exists - that's fine
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      if (errorMessage.includes('BUSYGROUP')) {
+        // Group exists, continue
+        return;
+      }
+      // Other errors might mean stream doesn't exist yet, try without MKSTREAM
+      try {
+        await this.redis.xgroup('CREATE', topic, groupName, '0');
+      } catch (err2: unknown) {
+        const err2Message = err2 instanceof Error ? err2.message : String(err2);
+        if (err2Message.includes('BUSYGROUP')) {
+          // Group exists, continue
+          return;
+        }
+        // If stream doesn't exist, it will be created on first XADD
+        // We can ignore this error
+      }
+    }
+  }
+
+  private async startConsumer(subscription: RedisSubscription): Promise<void> {
+    const { topic, consumerGroup, consumerName, handler, redis } = subscription;
+
+    const consume = async () => {
+      while (subscription.running) {
+        try {
+          // XREADGROUP GROUP group consumer COUNT count BLOCK blockms STREAMS key [key ...] id [id ...]
+          // Use '>' to read new messages, or '0' to read pending messages
+          const results = await redis.xreadgroup(
+            'GROUP',
+            consumerGroup,
+            consumerName,
+            'COUNT',
+            1,
+            'BLOCK',
+            1000, // Block for 1 second
+            'STREAMS',
+            topic,
+            '>' // Read new messages
+          ) as [string, [string, string[]][]][] | null;
+
+          if (results && results.length > 0) {
+            const [streamName, messages] = results[0];
+            if (messages && messages.length > 0) {
+              for (const messageEntry of messages) {
+                const [msgId, fields] = messageEntry;
+                try {
+                  // Parse message - fields is [key1, value1, key2, value2, ...]
+                  const dataIndex = fields.findIndex((f: string) => f === 'data');
+                  if (dataIndex >= 0 && dataIndex + 1 < fields.length) {
+                    const envelope = JSON.parse(fields[dataIndex + 1]) as MessageEnvelope;
+                    await handler(envelope);
+                    // Note: ACK is handled separately via ack() method
+                  }
+                } catch (error: unknown) {
+                  console.error(`[RedisStreamsAdapter] Error processing message ${msgId}:`, error);
+                  // Don't ack on error - message will be retried
+                }
+              }
+            }
+          }
+        } catch (error: unknown) {
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          if (errorMessage.includes('max number of clients')) {
+            // Max clients error - mark it and stop this consumer loop
+            maxClientsErrorTime.set(topic, Date.now());
+            console.error(`[RedisStreamsAdapter] ❌ Max clients reached - stopping consumer for ${topic}`);
+            // Stop this consumer - it will be retried when backoff period expires
+            subscription.running = false;
+            break;
+          }
+          if (errorMessage.includes('Connection') || errorMessage.includes('max number of clients')) {
+            // Check if we're in max clients backoff (check URL, not topic)
+            const lastMaxClientsError = maxClientsErrorTime.get(this.redisUrl);
+            if (lastMaxClientsError && (Date.now() - lastMaxClientsError) < MAX_CLIENTS_BACKOFF_MS) {
+              // We're in backoff period, stop consumer completely
+              const waitTime = Math.ceil((MAX_CLIENTS_BACKOFF_MS - (Date.now() - lastMaxClientsError)) / 1000);
+              console.warn(`[RedisStreamsAdapter] ⏸️  In max clients backoff (${waitTime}s remaining), stopping consumer: ${topic}`);
+              subscription.running = false;
+              break; // Exit consumer loop
+            }
+            
+            // If max clients error, mark it and stop
+            if (errorMessage.includes('max number of clients')) {
+              maxClientsErrorTime.set(this.redisUrl, Date.now());
+              console.error(`[RedisStreamsAdapter] ❌ Max clients reached - stopping consumer: ${topic}`);
+              subscription.running = false;
+              break;
+            }
+            
+            // Regular connection error (not max clients) - wait and retry
+            console.warn(`[RedisStreamsAdapter] Connection issue, retrying in 5s...`);
+            await new Promise((resolve) => setTimeout(resolve, 5000));
+            if (!subscription.running) {
+              break;
+            }
+            continue;
+          }
+          console.error('[RedisStreamsAdapter] Consumer error:', error);
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+      }
+    };
+
+    // Start consuming in background
+    consume().catch((error: unknown) => {
+      console.error('[RedisStreamsAdapter] Consumer loop error:', error);
+    });
+  }
+
+  async ack(handle: SubscriptionHandle, msgId: string): Promise<void> {
+    const subscription = this.subscriptions.get(handle.id);
+    if (!subscription) {
+      throw new Error(`Subscription ${handle.id} not found`);
+    }
+
+    try {
+      // XACK topic group id [id ...]
+      await subscription.redis.xack(
+        subscription.topic,
+        subscription.consumerGroup,
+        msgId
+      );
+    } catch (error: unknown) {
+      console.error('[RedisStreamsAdapter] ACK error:', error);
+      throw error;
+    }
+  }
+
+  private async unsubscribe(id: string): Promise<void> {
+    const subscription = this.subscriptions.get(id);
+    if (subscription) {
+      subscription.running = false;
+      // Don't quit the shared Redis connection - only stop the consumer loop
+      // The connection is shared and will be closed in close()
+      this.subscriptions.delete(id);
+    }
+  }
+
+  async close(): Promise<void> {
+    // Stop all subscriptions
+    const unsubscribePromises = Array.from(this.subscriptions.keys()).map((id) =>
+      this.unsubscribe(id)
+    );
+    await Promise.all(unsubscribePromises);
+
+    // Decrement reference count
+    const refCount = connectionRefCount.get(this.redisUrl) || 0;
+    if (refCount > 1) {
+      // Other adapters are using this connection, just decrement
+      connectionRefCount.set(this.redisUrl, refCount - 1);
+      console.info('[RedisStreamsAdapter] Keeping Redis connection open (other adapters using it)');
+      return;
+    }
+    
+    // We're the last user, safe to close
+    if (this.redis) {
+      try {
+        await this.redis.quit();
+        connectionCache.delete(this.redisUrl);
+        connectionRefCount.delete(this.redisUrl);
+        console.info('[RedisStreamsAdapter] Closed Redis connection:', this.redisUrl);
+      } catch (error: unknown) {
+        console.error('[RedisStreamsAdapter] Error closing connection:', error);
+        // Force disconnect if quit fails
+        try {
+          this.redis.disconnect();
+        } catch (e) {
+          // Ignore
+        }
+        connectionCache.delete(this.redisUrl);
+        connectionRefCount.delete(this.redisUrl);
+      }
+    }
+  }
+}
+
+
         topic,
         '*',
         'data',
