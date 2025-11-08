@@ -123,14 +123,9 @@ export class DeepgramProvider implements AsrProvider {
 
       this.connections.set(interactionId, state);
 
-      // Start the connection
-      try {
-        connection.start();
-        console.info(`[DeepgramProvider] 🚀 Connection start() called for ${interactionId}`);
-      } catch (error: any) {
-        console.error(`[DeepgramProvider] Failed to start connection for ${interactionId}:`, error);
-        throw error;
-      }
+      // Note: Deepgram SDK connection is already active when created via listen.live()
+      // No need to call start() - the connection is ready when Open event fires
+      console.info(`[DeepgramProvider] 🚀 Connection created for ${interactionId}, waiting for Open event...`);
     }
 
     return state;
