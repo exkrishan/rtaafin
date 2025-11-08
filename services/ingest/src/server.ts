@@ -663,58 +663,6 @@ process.on('unhandledRejection', (reason: any, promise: Promise<any>) => {
   // Don't exit - log and continue (may be recoverable)
 });
 
-
-      const framesToKeep = Math.ceil((BUFFER_DURATION_MS / 200) * 0.8);
-      if (state.frameBuffer.length > framesToKeep) {
-        state.frameBuffer = state.frameBuffer.slice(-framesToKeep);
-      }
-      state.bufferStartTime = timestampMs - BUFFER_DURATION_MS;
-    }
-  }
-
-  async shutdown(): Promise<void> {
-    if (this.isShuttingDown) {
-      return;
-    }
-    this.isShuttingDown = true;
-
-    console.info('[server] Starting graceful shutdown...');
-
-    return new Promise((resolve) => {
-      // Close WebSocket server
-      this.wss.close(() => {
-        console.info('[server] WebSocket server closed');
-        
-        // Close HTTP server
-        this.server.close(() => {
-          console.info('[server] HTTP server closed');
-          
-          // Disconnect pub/sub
-          if ('disconnect' in this.pubsub) {
-            (this.pubsub as any).disconnect().then(() => {
-              console.info('[server] Pub/Sub adapter disconnected');
-              resolve();
-            }).catch((error: any) => {
-              console.error('[server] Error disconnecting pub/sub:', error);
-              resolve(); // Continue shutdown even if pub/sub fails
-            });
-          } else if ('close' in this.pubsub) {
-            (this.pubsub as any).close().then(() => {
-              console.info('[server] Pub/Sub adapter closed');
-              resolve();
-            }).catch((error: any) => {
-              console.error('[server] Error closing pub/sub:', error);
-              resolve();
-            });
-          } else {
-            resolve();
-          }
-        });
-      });
-    });
-  }
-}
-
 // Start server with error handling
 let server: IngestionServer;
 try {
