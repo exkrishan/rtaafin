@@ -102,15 +102,41 @@ export class DeepgramProvider implements AsrProvider {
         console.info(`[DeepgramProvider] ✅ Connection opened for ${interactionId}`);
         state.isReady = true;
         
+        // Try to access socket again if not found initially (socket might only be available after Open)
+        if (!state.socket) {
+          console.debug(`[DeepgramProvider] Socket not found initially, trying again after Open event for ${interactionId}`);
+          if (connection._socket) {
+            state.socket = connection._socket;
+          } else if (connection.socket) {
+            state.socket = connection.socket;
+          } else if (connection._connection?._socket) {
+            state.socket = connection._connection._socket;
+          } else if (connection._connection?.socket) {
+            state.socket = connection._connection.socket;
+          } else if (typeof connection.getSocket === 'function') {
+            state.socket = connection.getSocket();
+          }
+          
+          if (state.socket) {
+            console.info(`[DeepgramProvider] ✅ Accessed underlying WebSocket after Open event for ${interactionId}`);
+          }
+        }
+        
         // Send KeepAlive message immediately after connection opens
         // Deepgram REQUIRES KeepAlive as JSON text frame: {"type": "KeepAlive"}
         // Must be sent as TEXT WebSocket frame via underlying socket, not binary via connection.send()
         // connection.send() only accepts binary audio data (Uint8Array)
         try {
           if (state.socket && typeof state.socket.send === 'function') {
-            const keepAliveMsg = JSON.stringify({ type: 'KeepAlive' });
-            state.socket.send(keepAliveMsg); // Send as text frame via underlying WebSocket
-            console.info(`[DeepgramProvider] 📡 Sent initial KeepAlive (JSON text frame) for ${interactionId}`);
+            // Check socket readyState (1 = OPEN, 0 = CONNECTING, 2 = CLOSING, 3 = CLOSED)
+            const readyState = state.socket.readyState;
+            if (readyState === 1) { // WebSocket.OPEN
+              const keepAliveMsg = JSON.stringify({ type: 'KeepAlive' });
+              state.socket.send(keepAliveMsg); // Send as text frame via underlying WebSocket
+              console.info(`[DeepgramProvider] 📡 Sent initial KeepAlive (JSON text frame) for ${interactionId}`);
+            } else {
+              console.warn(`[DeepgramProvider] ⚠️ Socket not open (readyState=${readyState}), cannot send KeepAlive for ${interactionId}`);
+            }
           } else {
             console.warn(`[DeepgramProvider] ⚠️ Cannot send KeepAlive: underlying WebSocket not accessible for ${interactionId}`);
             // Fallback: Try connection.send() as last resort (may not work)
@@ -131,14 +157,36 @@ export class DeepgramProvider implements AsrProvider {
         state.keepAliveInterval = setInterval(() => {
           try {
             if (state.socket && state.isReady && typeof state.socket.send === 'function') {
-              const keepAliveMsg = JSON.stringify({ type: 'KeepAlive' });
-              state.socket.send(keepAliveMsg); // Send as text frame via underlying WebSocket
-              console.info(`[DeepgramProvider] 📡 Sent periodic KeepAlive (JSON text frame) for ${interactionId}`);
+              // Check socket readyState (1 = OPEN)
+              const readyState = state.socket.readyState;
+              if (readyState === 1) { // WebSocket.OPEN
+                const keepAliveMsg = JSON.stringify({ type: 'KeepAlive' });
+                state.socket.send(keepAliveMsg); // Send as text frame via underlying WebSocket
+                console.info(`[DeepgramProvider] 📡 Sent periodic KeepAlive (JSON text frame) for ${interactionId}`);
+              } else {
+                console.warn(`[DeepgramProvider] ⚠️ Socket not open (readyState=${readyState}), skipping KeepAlive for ${interactionId}`);
+                // Clear interval if socket is closed
+                if (readyState === 3) { // WebSocket.CLOSED
+                  if (state.keepAliveInterval) {
+                    clearInterval(state.keepAliveInterval);
+                    state.keepAliveInterval = undefined;
+                    console.debug(`[DeepgramProvider] Cleared KeepAlive interval (socket closed) for ${interactionId}`);
+                  }
+                }
+              }
             } else {
               console.warn(`[DeepgramProvider] ⚠️ Cannot send periodic KeepAlive: WebSocket not accessible for ${interactionId}`);
             }
           } catch (error: any) {
             console.error(`[DeepgramProvider] ❌ Failed to send periodic KeepAlive for ${interactionId}:`, error);
+            // If error is due to closed socket, clear interval
+            if (error.message?.includes('closed') || error.message?.includes('CLOSED')) {
+              if (state.keepAliveInterval) {
+                clearInterval(state.keepAliveInterval);
+                state.keepAliveInterval = undefined;
+                console.debug(`[DeepgramProvider] Cleared KeepAlive interval (error: socket closed) for ${interactionId}`);
+              }
+            }
           }
         }, 3000); // Every 3 seconds
       });
