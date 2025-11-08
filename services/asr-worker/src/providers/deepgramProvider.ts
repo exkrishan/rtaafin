@@ -70,28 +70,23 @@ export class DeepgramProvider implements AsrProvider {
         state.isReady = true;
         
         // Send KeepAlive message immediately after connection opens
-        // Deepgram expects KeepAlive as a simple text message, not JSON
+        // Deepgram REQUIRES KeepAlive as JSON text frame: {"type": "KeepAlive"}
+        // Must be sent as text WebSocket frame, not binary
         try {
-          // Try simple string format (most common for WebSocket KeepAlive)
-          connection.send("KeepAlive");
-          console.debug(`[DeepgramProvider] 📡 Sent initial KeepAlive for ${interactionId}`);
+          connection.send(JSON.stringify({ type: 'KeepAlive' }));
+          console.debug(`[DeepgramProvider] 📡 Sent initial KeepAlive (JSON) for ${interactionId}`);
         } catch (error: any) {
-          // Fallback: try JSON format if simple string doesn't work
-          try {
-            connection.send(JSON.stringify({ type: 'KeepAlive' }));
-            console.debug(`[DeepgramProvider] 📡 Sent KeepAlive (JSON format) for ${interactionId}`);
-          } catch (fallbackError: any) {
-            console.warn(`[DeepgramProvider] Failed to send KeepAlive for ${interactionId}:`, fallbackError);
-          }
+          console.warn(`[DeepgramProvider] Failed to send initial KeepAlive for ${interactionId}:`, error);
         }
         
         // Set up periodic KeepAlive (every 3 seconds) to prevent timeout during silence
         // This is CRITICAL - Deepgram closes connections if no data is received within timeout
+        // KeepAlive must be JSON format sent as text frame
         state.keepAliveInterval = setInterval(() => {
           try {
             if (state.connection && state.isReady) {
-              connection.send("KeepAlive");
-              console.debug(`[DeepgramProvider] 📡 Sent periodic KeepAlive for ${interactionId}`);
+              connection.send(JSON.stringify({ type: 'KeepAlive' }));
+              console.debug(`[DeepgramProvider] 📡 Sent periodic KeepAlive (JSON) for ${interactionId}`);
             }
           } catch (error: any) {
             console.warn(`[DeepgramProvider] Failed to send periodic KeepAlive for ${interactionId}:`, error);

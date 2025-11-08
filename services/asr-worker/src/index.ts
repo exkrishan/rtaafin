@@ -18,7 +18,8 @@ require('dotenv').config({ path: require('path').join(__dirname, '../../../.env.
 const PORT = parseInt(process.env.PORT || '3001', 10);
 // Increase buffer window to send larger chunks to Deepgram
 // Deepgram needs continuous audio streams, not tiny chunks
-const BUFFER_WINDOW_MS = parseInt(process.env.BUFFER_WINDOW_MS || '500', 10); // Increased from 300ms to 500ms
+// Increased to 1000ms to accumulate at least 200-500ms of audio before processing
+const BUFFER_WINDOW_MS = parseInt(process.env.BUFFER_WINDOW_MS || '1000', 10); // Increased from 500ms to 1000ms
 const ASR_PROVIDER = (process.env.ASR_PROVIDER || 'mock') as 'mock' | 'deepgram' | 'whisper';
 
 interface AudioBuffer {
@@ -270,20 +271,6 @@ worker.start().catch((error) => {
   console.error('[ASRWorker] Failed to start:', error);
   process.exit(1);
 });
-
-// Graceful shutdown
-process.on('SIGTERM', async () => {
-  console.info('[ASRWorker] SIGTERM received, shutting down gracefully');
-  await worker.stop();
-  process.exit(0);
-});
-
-process.on('SIGINT', async () => {
-  console.info('[ASRWorker] SIGINT received, shutting down gracefully');
-  await worker.stop();
-  process.exit(0);
-});
-
 
 // Graceful shutdown
 process.on('SIGTERM', async () => {
