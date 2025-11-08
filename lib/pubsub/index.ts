@@ -143,34 +143,3 @@ export function createPubSubAdapterFromEnv(): PubSubAdapter {
   }
 }
 
-
-    if (cached) {
-      console.info('[createPubSubAdapterFromEnv] Reusing cached adapter instance');
-      return cached;
-    }
-  }
-
-  const config: PubSubConfig = {
-    adapter,
-    redis: {
-      url: process.env.REDIS_URL,
-      consumerGroup: process.env.REDIS_CONSUMER_GROUP,
-      consumerName: process.env.REDIS_CONSUMER_NAME,
-    },
-    kafka: {
-      brokers: process.env.KAFKA_BROKERS?.split(',').filter(Boolean),
-      clientId: process.env.KAFKA_CLIENT_ID,
-      consumerGroup: process.env.KAFKA_CONSUMER_GROUP,
-    },
-  };
-
-  try {
-    const instance = createPubSubAdapter(config);
-    adapterCache.set(cacheKey, instance);
-    console.info('[createPubSubAdapterFromEnv] Created new adapter instance (cached)');
-    return instance;
-  } catch (error: any) {
-    throw new Error(`Failed to create pub/sub adapter: ${error.message}`);
-  }
-}
-
