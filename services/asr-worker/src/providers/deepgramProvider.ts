@@ -38,7 +38,7 @@ export class DeepgramProvider implements AsrProvider {
       console.info(`[DeepgramProvider] Creating new connection for ${interactionId}`);
       
       // Create new live connection
-      const connection = this.client.listen.live({
+      const connectionConfig = {
         model: 'nova-2',
         language: 'en-US',
         smart_format: true,
@@ -46,7 +46,14 @@ export class DeepgramProvider implements AsrProvider {
         sample_rate: sampleRate,
         encoding: 'linear16',
         channels: 1,
+      };
+      
+      console.info(`[DeepgramProvider] Connection config:`, {
+        interactionId,
+        ...connectionConfig,
       });
+      
+      const connection = this.client.listen.live(connectionConfig);
 
       state = {
         connection,
@@ -104,7 +111,13 @@ export class DeepgramProvider implements AsrProvider {
       });
 
       connection.on(LiveTranscriptionEvents.Error, (error: any) => {
-        console.error(`[DeepgramProvider] ❌ Error for ${interactionId}:`, error);
+        console.error(`[DeepgramProvider] ❌ API Error for ${interactionId}:`, {
+          error: error.message || String(error),
+          code: error.code,
+          type: error.type,
+          fullError: error,
+          interactionId,
+        });
         // Reject pending resolvers on error
         state.pendingResolvers.forEach((resolve) => {
           resolve({
@@ -161,10 +174,30 @@ export class DeepgramProvider implements AsrProvider {
 
       // Send audio chunk
       try {
+        // Calculate expected audio duration for debugging
+        const bytesPerSample = 2; // 16-bit = 2 bytes
+        const samples = audio.length / bytesPerSample;
+        const durationMs = (samples / sampleRate) * 1000;
+        
+        console.info(`[DeepgramProvider] 📤 Sending audio chunk:`, {
+          interactionId,
+          seq,
+          size: audio.length,
+          sampleRate,
+          samples,
+          durationMs: durationMs.toFixed(0) + 'ms',
+          isReady: state.isReady,
+        });
+        
         state.connection.send(audio);
-        console.debug(`[DeepgramProvider] 📤 Sent audio chunk for ${interactionId}, seq=${seq}, size=${audio.length}`);
       } catch (error: any) {
-        console.error(`[DeepgramProvider] Failed to send audio for ${interactionId}:`, error);
+        console.error(`[DeepgramProvider] Failed to send audio for ${interactionId}:`, {
+          error: error.message || String(error),
+          code: error.code,
+          interactionId,
+          seq,
+          audioSize: audio.length,
+        });
         throw error;
       }
 
