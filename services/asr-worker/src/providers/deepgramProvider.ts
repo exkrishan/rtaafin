@@ -142,8 +142,13 @@ export class DeepgramProvider implements AsrProvider {
         state.pendingResolvers = [];
       });
 
-      connection.on(LiveTranscriptionEvents.Close, () => {
-        console.info(`[DeepgramProvider] 🔒 Connection closed for ${interactionId}`);
+      connection.on(LiveTranscriptionEvents.Close, (event: any) => {
+        console.warn(`[DeepgramProvider] 🔒 Connection closed for ${interactionId}`, {
+          reason: event?.reason || 'unknown',
+          code: event?.code,
+          wasClean: event?.wasClean,
+          fullEvent: event ? JSON.stringify(event).substring(0, 200) : 'no event data',
+        });
         this.connections.delete(interactionId);
       });
 
