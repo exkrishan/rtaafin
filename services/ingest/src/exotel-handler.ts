@@ -7,6 +7,7 @@ import { WebSocket } from 'ws';
 import { ExotelMessage, ExotelStartEvent, ExotelMediaEvent, ExotelStopEvent } from './exotel-types';
 import { AudioFrame } from './types';
 import { PubSubAdapter } from './types';
+import { callEndTopic } from '@rtaa/pubsub/topics';
 
 export interface ExotelConnectionState {
   streamSid: string;
@@ -176,6 +177,27 @@ export class ExotelHandler {
         call_sid: state.callSid,
         reason: event.stop.reason,
         total_chunks: state.seq,
+      });
+
+      // Publish call end message to notify ASR worker and other services
+      const interactionId = state.callSid || state.streamSid;
+      const callEndMessage = {
+        interaction_id: interactionId,
+        tenant_id: state.accountSid || 'exotel',
+        call_sid: state.callSid,
+        stream_sid: state.streamSid,
+        reason: event.stop.reason,
+        timestamp_ms: Date.now(),
+      };
+
+      const callEndTopicName = callEndTopic();
+      this.pubsub.publishToTopic(callEndTopicName, callEndMessage).then(() => {
+        console.info('[exotel] Published call end event', {
+          interaction_id: interactionId,
+          topic: callEndTopicName,
+        });
+      }).catch((error) => {
+        console.error('[exotel] Failed to publish call end event:', error);
       });
 
       this.connections.delete(state.streamSid);

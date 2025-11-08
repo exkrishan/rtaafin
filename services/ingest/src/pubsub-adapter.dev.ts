@@ -12,6 +12,7 @@ import { AudioFrame } from './types';
 // Wrapper to match ingestion service interface
 export interface PubSubAdapter {
   publish(event: AudioFrame): Promise<void>;
+  publishToTopic(topic: string, message: any): Promise<void>;
   disconnect(): Promise<void>;
 }
 
@@ -65,6 +66,18 @@ class IngestionPubSubAdapter implements PubSubAdapter {
         tenant_id: event.tenant_id,
         seq: event.seq,
         topic: this.topic,
+        error: error.message,
+      });
+      throw error;
+    }
+  }
+
+  async publishToTopic(topic: string, message: any): Promise<void> {
+    try {
+      await this.adapter.publish(topic, message);
+    } catch (error: any) {
+      console.error('[pubsub] Failed to publish message to topic:', {
+        topic,
         error: error.message,
       });
       throw error;

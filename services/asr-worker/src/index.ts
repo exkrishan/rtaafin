@@ -7,7 +7,7 @@
 
 import { createServer } from 'http';
 import { createPubSubAdapterFromEnv } from '@rtaa/pubsub';
-import { audioTopic, transcriptTopic } from '@rtaa/pubsub/topics';
+import { audioTopic, transcriptTopic, callEndTopic } from '@rtaa/pubsub/topics';
 import { createAsrProvider } from './providers';
 import { AudioFrameMessage, TranscriptMessage } from './types';
 import { MetricsCollector } from './metrics';
@@ -20,6 +20,9 @@ const PORT = parseInt(process.env.PORT || '3001', 10);
 // Deepgram needs continuous audio streams, not tiny chunks
 // Increased to 1000ms to accumulate at least 200-500ms of audio before processing
 const BUFFER_WINDOW_MS = parseInt(process.env.BUFFER_WINDOW_MS || '1000', 10); // Increased from 500ms to 1000ms
+// Stale buffer timeout: if no new audio arrives for this duration, clean up the buffer
+// This prevents processing old audio after a call has ended
+const STALE_BUFFER_TIMEOUT_MS = parseInt(process.env.STALE_BUFFER_TIMEOUT_MS || '5000', 10); // 5 seconds
 const ASR_PROVIDER = (process.env.ASR_PROVIDER || 'mock') as 'mock' | 'deepgram' | 'whisper';
 
 interface AudioBuffer {
@@ -29,6 +32,7 @@ interface AudioBuffer {
   chunks: Buffer[];
   timestamps: number[];
   lastProcessed: number;
+  lastChunkReceived: number; // Timestamp of last audio chunk received
 }
 
 class AsrWorker {
@@ -95,11 +99,24 @@ class AsrWorker {
     const audioTopicName = audioTopic({ useStreams: true });
     console.info(`[ASRWorker] Subscribing to audio topic: ${audioTopicName}`);
 
-    const handle = await this.pubsub.subscribe(audioTopicName, async (msg) => {
+    const audioHandle = await this.pubsub.subscribe(audioTopicName, async (msg) => {
       await this.handleAudioFrame(msg as any);
     });
 
-    this.subscriptions.push(handle);
+    this.subscriptions.push(audioHandle);
+
+    // Subscribe to call end events to clean up buffers
+    const callEndTopicName = callEndTopic();
+    console.info(`[ASRWorker] Subscribing to call end topic: ${callEndTopicName}`);
+
+    const callEndHandle = await this.pubsub.subscribe(callEndTopicName, async (msg) => {
+      await this.handleCallEnd(msg as any);
+    });
+
+    this.subscriptions.push(callEndHandle);
+
+    // Start periodic stale buffer cleanup
+    this.startStaleBufferCleanup();
 
     // Start HTTP server
     this.server.listen(PORT, () => {
@@ -134,9 +151,13 @@ class AsrWorker {
           chunks: [],
           timestamps: [],
           lastProcessed: Date.now(),
+          lastChunkReceived: Date.now(),
         };
         this.buffers.set(interaction_id, buffer);
       }
+
+      // Update last chunk received timestamp
+      buffer.lastChunkReceived = Date.now();
 
       // Decode base64 audio
       const audioBuffer = Buffer.from(audio, 'base64');
@@ -165,6 +186,79 @@ class AsrWorker {
       console.error('[ASRWorker] Error handling audio frame:', error);
       this.metrics.recordError(error.message || String(error));
     }
+  }
+
+  private async handleCallEnd(msg: any): Promise<void> {
+    try {
+      const interactionId = msg.interaction_id;
+      if (!interactionId) {
+        console.warn('[ASRWorker] Call end event missing interaction_id:', msg);
+        return;
+      }
+
+      console.info('[ASRWorker] Call end event received', {
+        interaction_id: interactionId,
+        reason: msg.reason,
+        call_sid: msg.call_sid,
+      });
+
+      // Clean up buffer for this interaction
+      const buffer = this.buffers.get(interactionId);
+      if (buffer) {
+        console.info('[ASRWorker] Cleaning up buffer for ended call', {
+          interaction_id: interactionId,
+          chunksCount: buffer.chunks.length,
+        });
+        this.buffers.delete(interactionId);
+        this.metrics.resetInteraction(interactionId);
+        
+        // Close ASR provider connection for this specific interaction if supported
+        try {
+          // Check if provider supports closing a specific connection (e.g., Deepgram)
+          if (typeof (this.asrProvider as any).closeConnection === 'function') {
+            await (this.asrProvider as any).closeConnection(interactionId);
+          }
+        } catch (error: any) {
+          console.warn('[ASRWorker] Error closing ASR provider connection:', error.message);
+        }
+      } else {
+        console.debug('[ASRWorker] No buffer found for ended call', {
+          interaction_id: interactionId,
+        });
+      }
+    } catch (error: any) {
+      console.error('[ASRWorker] Error handling call end event:', error);
+      this.metrics.recordError(error.message || String(error));
+    }
+  }
+
+  private startStaleBufferCleanup(): void {
+    // Check for stale buffers every 2 seconds
+    setInterval(() => {
+      const now = Date.now();
+      const staleBuffers: string[] = [];
+
+      for (const [interactionId, buffer] of this.buffers.entries()) {
+        const timeSinceLastChunk = now - buffer.lastChunkReceived;
+        if (timeSinceLastChunk >= STALE_BUFFER_TIMEOUT_MS) {
+          staleBuffers.push(interactionId);
+        }
+      }
+
+      // Clean up stale buffers
+      for (const interactionId of staleBuffers) {
+        const buffer = this.buffers.get(interactionId);
+        if (buffer) {
+          console.warn('[ASRWorker] Cleaning up stale buffer (no audio received)', {
+            interaction_id: interactionId,
+            timeSinceLastChunk: now - buffer.lastChunkReceived,
+            chunksCount: buffer.chunks.length,
+          });
+          this.buffers.delete(interactionId);
+          this.metrics.resetInteraction(interactionId);
+        }
+      }
+    }, 2000); // Check every 2 seconds
   }
 
   private async processBuffer(buffer: AudioBuffer): Promise<void> {

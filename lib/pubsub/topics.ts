@@ -45,10 +45,18 @@ export function intentTopic(interactionId: string): string {
 }
 
 /**
+ * Generate topic name for call end events
+ * Format: call_end (shared topic for all calls)
+ */
+export function callEndTopic(): string {
+  return 'call_end';
+}
+
+/**
  * Parse topic name to extract metadata
  */
 export function parseTopic(topic: string): {
-  type: 'audio' | 'transcript' | 'intent' | 'unknown';
+  type: 'audio' | 'transcript' | 'intent' | 'call_end' | 'unknown';
   tenantId?: string;
   interactionId?: string;
 } {
@@ -66,6 +74,9 @@ export function parseTopic(topic: string): {
   if (topic.startsWith('intent.')) {
     const interactionId = topic.replace('intent.', '');
     return { type: 'intent', interactionId };
+  }
+  if (topic === 'call_end') {
+    return { type: 'call_end' };
   }
   return { type: 'unknown' };
 }
