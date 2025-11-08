@@ -12,6 +12,7 @@ interface ConnectionState {
   transcriptQueue: Transcript[];
   pendingResolvers: Array<(transcript: Transcript) => void>;
   lastTranscript: Transcript | null;
+  keepAliveInterval?: NodeJS.Timeout;
 }
 
 export class DeepgramProvider implements AsrProvider {
@@ -69,13 +70,33 @@ export class DeepgramProvider implements AsrProvider {
         state.isReady = true;
         
         // Send KeepAlive message immediately after connection opens
-        // This prevents Deepgram from closing due to inactivity
+        // Deepgram expects KeepAlive as a simple text message, not JSON
         try {
-          connection.send(JSON.stringify({ type: 'KeepAlive' }));
-          console.debug(`[DeepgramProvider] 📡 Sent KeepAlive for ${interactionId}`);
+          // Try simple string format (most common for WebSocket KeepAlive)
+          connection.send("KeepAlive");
+          console.debug(`[DeepgramProvider] 📡 Sent initial KeepAlive for ${interactionId}`);
         } catch (error: any) {
-          console.warn(`[DeepgramProvider] Failed to send KeepAlive for ${interactionId}:`, error);
+          // Fallback: try JSON format if simple string doesn't work
+          try {
+            connection.send(JSON.stringify({ type: 'KeepAlive' }));
+            console.debug(`[DeepgramProvider] 📡 Sent KeepAlive (JSON format) for ${interactionId}`);
+          } catch (fallbackError: any) {
+            console.warn(`[DeepgramProvider] Failed to send KeepAlive for ${interactionId}:`, fallbackError);
+          }
         }
+        
+        // Set up periodic KeepAlive (every 3 seconds) to prevent timeout during silence
+        // This is CRITICAL - Deepgram closes connections if no data is received within timeout
+        state.keepAliveInterval = setInterval(() => {
+          try {
+            if (state.connection && state.isReady) {
+              connection.send("KeepAlive");
+              console.debug(`[DeepgramProvider] 📡 Sent periodic KeepAlive for ${interactionId}`);
+            }
+          } catch (error: any) {
+            console.warn(`[DeepgramProvider] Failed to send periodic KeepAlive for ${interactionId}:`, error);
+          }
+        }, 3000); // Every 3 seconds
       });
 
       connection.on(LiveTranscriptionEvents.Transcript, (data: any) => {
@@ -159,6 +180,13 @@ export class DeepgramProvider implements AsrProvider {
           fullEvent: event ? JSON.stringify(event).substring(0, 200) : 'no event data',
         });
         
+        // Clear KeepAlive interval when connection closes
+        if (state.keepAliveInterval) {
+          clearInterval(state.keepAliveInterval);
+          state.keepAliveInterval = undefined;
+          console.debug(`[DeepgramProvider] Cleared KeepAlive interval for ${interactionId}`);
+        }
+        
         // If connection closed due to timeout (1011), log critical warning
         if (event?.code === 1011) {
           console.error(`[DeepgramProvider] ❌ CRITICAL: Connection closed due to timeout (1011) for ${interactionId}`);
@@ -167,6 +195,7 @@ export class DeepgramProvider implements AsrProvider {
           console.error(`[DeepgramProvider]   1. Audio chunks are too small/infrequent`);
           console.error(`[DeepgramProvider]   2. Audio format is incorrect`);
           console.error(`[DeepgramProvider]   3. connection.send() is not working properly`);
+          console.error(`[DeepgramProvider]   4. KeepAlive messages not being sent/recognized`);
         }
         
         this.connections.delete(interactionId);
