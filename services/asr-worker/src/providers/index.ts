@@ -17,7 +17,16 @@ export function createAsrProvider(type?: ProviderType, config?: any): AsrProvide
       return new MockProvider();
 
     case 'deepgram':
-      return new DeepgramProvider(config?.apiKey);
+      // Explicitly check for API key before creating provider
+      const apiKey = config?.apiKey || process.env.DEEPGRAM_API_KEY;
+      if (!apiKey) {
+        throw new Error(
+          'DEEPGRAM_API_KEY is required when ASR_PROVIDER=deepgram. ' +
+          'Please set DEEPGRAM_API_KEY environment variable. ' +
+          'The system will NOT fall back to mock provider - this is intentional for testing.'
+        );
+      }
+      return new DeepgramProvider(apiKey);
 
     case 'whisper':
       return new WhisperLocalProvider(config);
