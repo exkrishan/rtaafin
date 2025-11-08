@@ -158,6 +158,17 @@ export class DeepgramProvider implements AsrProvider {
           wasClean: event?.wasClean,
           fullEvent: event ? JSON.stringify(event).substring(0, 200) : 'no event data',
         });
+        
+        // If connection closed due to timeout (1011), log critical warning
+        if (event?.code === 1011) {
+          console.error(`[DeepgramProvider] ❌ CRITICAL: Connection closed due to timeout (1011) for ${interactionId}`);
+          console.error(`[DeepgramProvider] This means Deepgram did not receive audio data within the timeout window.`);
+          console.error(`[DeepgramProvider] Possible causes:`);
+          console.error(`[DeepgramProvider]   1. Audio chunks are too small/infrequent`);
+          console.error(`[DeepgramProvider]   2. Audio format is incorrect`);
+          console.error(`[DeepgramProvider]   3. connection.send() is not working properly`);
+        }
+        
         this.connections.delete(interactionId);
       });
 

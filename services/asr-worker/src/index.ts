@@ -228,18 +228,13 @@ class AsrWorker {
         this.buffers.delete(buffer.interactionId);
         this.metrics.resetInteraction(buffer.interactionId);
       } else {
-        // Clear processed chunks to prevent reprocessing
-        // Keep last 2 chunks ONLY if we have more than 2 chunks
+        // Clear ALL processed chunks to prevent reprocessing
+        // The buffer will accumulate new chunks for the next window
         // This prevents infinite loop of processing same chunks
-        if (buffer.chunks.length > 2) {
-          buffer.chunks = buffer.chunks.slice(-2);
-          buffer.timestamps = buffer.timestamps.slice(-2);
-        } else {
-          // If we have 2 or fewer chunks, clear them to prevent reprocessing
-          // New chunks will come in and trigger processing
-          buffer.chunks = [];
-          buffer.timestamps = [];
-        }
+        buffer.chunks = [];
+        buffer.timestamps = [];
+        
+        console.debug(`[ASRWorker] Cleared buffer for ${buffer.interactionId} after processing`);
       }
     } catch (error: any) {
       console.error('[ASRWorker] Error processing buffer:', error);
