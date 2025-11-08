@@ -207,7 +207,15 @@ export class DeepgramProvider implements AsrProvider {
           isReady: state.isReady,
         });
         
-        state.connection.send(audio);
+        // Deepgram SDK expects Uint8Array, not Buffer
+        // Convert Buffer to Uint8Array to ensure compatibility
+        const audioData = audio instanceof Uint8Array ? audio : new Uint8Array(audio);
+        
+        // Send audio chunk to Deepgram
+        state.connection.send(audioData);
+        
+        // Log successful send
+        console.debug(`[DeepgramProvider] ✅ Audio sent successfully for ${interactionId}, seq=${seq}`);
       } catch (error: any) {
         console.error(`[DeepgramProvider] Failed to send audio for ${interactionId}:`, {
           error: error.message || String(error),

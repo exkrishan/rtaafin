@@ -16,7 +16,9 @@ import { MetricsCollector } from './metrics';
 require('dotenv').config({ path: require('path').join(__dirname, '../../../.env.local') });
 
 const PORT = parseInt(process.env.PORT || '3001', 10);
-const BUFFER_WINDOW_MS = parseInt(process.env.BUFFER_WINDOW_MS || '300', 10); // 200-500ms
+// Increase buffer window to send larger chunks to Deepgram
+// Deepgram needs continuous audio streams, not tiny chunks
+const BUFFER_WINDOW_MS = parseInt(process.env.BUFFER_WINDOW_MS || '500', 10); // Increased from 300ms to 500ms
 const ASR_PROVIDER = (process.env.ASR_PROVIDER || 'mock') as 'mock' | 'deepgram' | 'whisper';
 
 interface AudioBuffer {
