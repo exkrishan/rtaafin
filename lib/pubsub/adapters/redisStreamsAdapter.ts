@@ -396,7 +396,12 @@ export class RedisStreamsAdapter implements PubSubAdapter {
                   if (dataIndex >= 0 && dataIndex + 1 < fields.length) {
                     const envelope = JSON.parse(fields[dataIndex + 1]) as MessageEnvelope;
                     await handler(envelope);
-                    // Note: ACK is handled separately via ack() method
+                    // Auto-ACK after successful handler execution to prevent redelivery
+                    try {
+                      await redis.xack(topic, consumerGroup, msgId);
+                    } catch (ackError: unknown) {
+                      console.warn(`[RedisStreamsAdapter] Failed to ACK message ${msgId}:`, ackError);
+                    }
                   }
                 } catch (error: unknown) {
                   console.error(`[RedisStreamsAdapter] Error processing message ${msgId}:`, error);

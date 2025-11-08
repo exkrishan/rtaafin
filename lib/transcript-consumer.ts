@@ -146,19 +146,16 @@ class TranscriptConsumer {
     }
 
     // Validate message has required fields
-    // TEMPORARY: Allow empty transcripts through for debugging (remove after fix is verified)
+    // Skip empty transcripts - they're not useful and cause log spam
     const isEmpty = !msg.text || (typeof msg.text === 'string' && msg.text.trim().length === 0);
     if (isEmpty) {
-      console.warn('[TranscriptConsumer] ⚠️ Received transcript with EMPTY text (allowing through for debugging)', {
+      console.debug('[TranscriptConsumer] ⚠️ Skipping transcript with EMPTY text', {
         interaction_id: interactionId,
         type: msg.type,
         seq: msg.seq,
-        msgKeys: Object.keys(msg),
-        msgSample: JSON.stringify(msg).substring(0, 200),
       });
-      // TEMPORARY: Forward empty transcripts with placeholder text for debugging
-      // Remove this after fix is verified and new calls work
-      msg.text = msg.text || '[EMPTY - Debug Mode]';
+      // Skip processing empty transcripts - they're not useful
+      return;
     }
 
     console.info('[TranscriptConsumer] Received transcript message', {
@@ -234,7 +231,7 @@ class TranscriptConsumer {
     // Run discovery immediately
     await this.discoverAndSubscribeToNewStreams();
 
-    // Start periodic discovery (every 5 seconds)
+    // Start periodic discovery (every 30 seconds to reduce log spam)
     this.discoveryInterval = setInterval(async () => {
       if (!this.isRunning) {
         if (this.discoveryInterval) {
@@ -249,7 +246,7 @@ class TranscriptConsumer {
       } catch (error: any) {
         console.error('[TranscriptConsumer] Stream discovery error:', error);
       }
-    }, 5000);
+    }, 30000); // Changed from 5000ms (5s) to 30000ms (30s) to reduce log spam
 
     console.info('[TranscriptConsumer] Stream discovery started (auto-subscribe mode)');
   }
