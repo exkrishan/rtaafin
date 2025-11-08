@@ -71,6 +71,16 @@ export class DeepgramProvider implements AsrProvider {
 
       connection.on(LiveTranscriptionEvents.Transcript, (data: any) => {
         try {
+          // Log ALL transcript events to debug
+          console.info(`[DeepgramProvider] 📨 Transcript event received for ${interactionId}`, {
+            hasChannel: !!data.channel,
+            hasAlternatives: !!data.channel?.alternatives,
+            alternativesCount: data.channel?.alternatives?.length || 0,
+            isFinal: data.is_final || false,
+            speechFinal: data.speech_final,
+            rawDataKeys: Object.keys(data),
+          });
+          
           const transcriptText = data.channel?.alternatives?.[0]?.transcript;
           const isFinal = data.is_final || false;
           const confidence = data.channel?.alternatives?.[0]?.confidence || 0.9;
@@ -99,10 +109,13 @@ export class DeepgramProvider implements AsrProvider {
               resolver(transcript);
             }
           } else {
-            console.debug(`[DeepgramProvider] Empty transcript received for ${interactionId}`, {
+            // Log empty transcripts to debug why Deepgram isn't returning text
+            console.warn(`[DeepgramProvider] ⚠️ Empty transcript received from Deepgram for ${interactionId}`, {
               isFinal,
               hasChannel: !!data.channel,
               hasAlternatives: !!data.channel?.alternatives,
+              alternativesCount: data.channel?.alternatives?.length || 0,
+              rawData: JSON.stringify(data).substring(0, 200), // First 200 chars for debugging
             });
           }
         } catch (error: any) {
