@@ -74,7 +74,7 @@ export class DeepgramProvider implements AsrProvider {
         // Must be sent as text WebSocket frame, not binary
         try {
           connection.send(JSON.stringify({ type: 'KeepAlive' }));
-          console.debug(`[DeepgramProvider] 📡 Sent initial KeepAlive (JSON) for ${interactionId}`);
+          console.info(`[DeepgramProvider] 📡 Sent initial KeepAlive (JSON) for ${interactionId}`);
         } catch (error: any) {
           console.warn(`[DeepgramProvider] Failed to send initial KeepAlive for ${interactionId}:`, error);
         }
@@ -86,7 +86,7 @@ export class DeepgramProvider implements AsrProvider {
           try {
             if (state.connection && state.isReady) {
               connection.send(JSON.stringify({ type: 'KeepAlive' }));
-              console.debug(`[DeepgramProvider] 📡 Sent periodic KeepAlive (JSON) for ${interactionId}`);
+              console.info(`[DeepgramProvider] 📡 Sent periodic KeepAlive (JSON) for ${interactionId}`);
             }
           } catch (error: any) {
             console.warn(`[DeepgramProvider] Failed to send periodic KeepAlive for ${interactionId}:`, error);

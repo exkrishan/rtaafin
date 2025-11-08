@@ -143,6 +143,15 @@ class AsrWorker {
       buffer.chunks.push(audioBuffer);
       buffer.timestamps.push(frame.timestamp_ms);
 
+      // Log new chunk arrival to verify new audio is coming in
+      console.info(`[ASRWorker] 📥 Received audio chunk:`, {
+        interaction_id,
+        seq,
+        audioSize: audioBuffer.length,
+        totalChunksInBuffer: buffer.chunks.length,
+        bufferAge: Date.now() - buffer.lastProcessed,
+      });
+
       // Record metrics
       this.metrics.recordAudioChunk(interaction_id);
 
@@ -232,10 +241,11 @@ class AsrWorker {
         // Clear ALL processed chunks to prevent reprocessing
         // The buffer will accumulate new chunks for the next window
         // This prevents infinite loop of processing same chunks
+        const clearedChunksCount = buffer.chunks.length;
         buffer.chunks = [];
         buffer.timestamps = [];
         
-        console.debug(`[ASRWorker] Cleared buffer for ${buffer.interactionId} after processing`);
+        console.info(`[ASRWorker] ✅ Cleared ${clearedChunksCount} chunks from buffer for ${buffer.interactionId} after processing`);
       }
     } catch (error: any) {
       console.error('[ASRWorker] Error processing buffer:', error);
