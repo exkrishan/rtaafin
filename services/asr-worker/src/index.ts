@@ -38,7 +38,28 @@ class AsrWorker {
 
   constructor() {
     this.pubsub = createPubSubAdapterFromEnv();
-    this.asrProvider = createAsrProvider(ASR_PROVIDER);
+    
+    // Validate provider configuration before creating
+    // This ensures we fail fast if required env vars are missing
+    if (ASR_PROVIDER === 'deepgram' && !process.env.DEEPGRAM_API_KEY) {
+      console.error('[ASRWorker] ❌ CRITICAL: ASR_PROVIDER=deepgram but DEEPGRAM_API_KEY is not set!');
+      console.error('[ASRWorker] The system will NOT fall back to mock provider.');
+      console.error('[ASRWorker] Please set DEEPGRAM_API_KEY environment variable or change ASR_PROVIDER to "mock".');
+      throw new Error(
+        'DEEPGRAM_API_KEY is required when ASR_PROVIDER=deepgram. ' +
+        'No fallback to mock provider - this ensures proper testing.'
+      );
+    }
+    
+    try {
+      this.asrProvider = createAsrProvider(ASR_PROVIDER);
+    } catch (error: any) {
+      console.error('[ASRWorker] ❌ Failed to create ASR provider:', error.message);
+      console.error('[ASRWorker] Provider type:', ASR_PROVIDER);
+      console.error('[ASRWorker] This is a fatal error - service will not start.');
+      throw error; // Re-throw to fail fast
+    }
+    
     this.metrics = new MetricsCollector();
 
     // Create HTTP server for metrics endpoint
