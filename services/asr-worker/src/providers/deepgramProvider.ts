@@ -67,6 +67,15 @@ export class DeepgramProvider implements AsrProvider {
       connection.on(LiveTranscriptionEvents.Open, () => {
         console.info(`[DeepgramProvider] ✅ Connection opened for ${interactionId}`);
         state.isReady = true;
+        
+        // Send KeepAlive message immediately after connection opens
+        // This prevents Deepgram from closing due to inactivity
+        try {
+          connection.send(JSON.stringify({ type: 'KeepAlive' }));
+          console.debug(`[DeepgramProvider] 📡 Sent KeepAlive for ${interactionId}`);
+        } catch (error: any) {
+          console.warn(`[DeepgramProvider] Failed to send KeepAlive for ${interactionId}:`, error);
+        }
       });
 
       connection.on(LiveTranscriptionEvents.Transcript, (data: any) => {
