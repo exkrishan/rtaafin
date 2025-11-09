@@ -819,6 +819,27 @@ class AsrWorker {
     seq: number
   ): Promise<void> {
     try {
+      // CRITICAL FIX: Handle undefined/null transcript gracefully
+      if (!transcript) {
+        console.warn(`[ASRWorker] ⚠️ Received undefined/null transcript for ${buffer.interactionId}, seq ${seq}`, {
+          interaction_id: buffer.interactionId,
+          seq,
+          transcriptType: typeof transcript,
+        });
+        return; // Skip processing if transcript is undefined
+      }
+      
+      // Validate transcript has required fields
+      if (typeof transcript.type === 'undefined') {
+        console.warn(`[ASRWorker] ⚠️ Transcript missing 'type' field for ${buffer.interactionId}, seq ${seq}`, {
+          interaction_id: buffer.interactionId,
+          seq,
+          transcriptKeys: transcript ? Object.keys(transcript) : [],
+          transcriptValue: transcript,
+        });
+        return; // Skip processing if transcript is invalid
+      }
+      
       // Record first partial latency
       if (transcript.type === 'partial' && !transcript.isFinal) {
         this.metrics.recordFirstPartial(buffer.interactionId);
@@ -830,8 +851,8 @@ class AsrWorker {
         tenant_id: buffer.tenantId,
         seq,
         type: transcript.type,
-        text: transcript.text,
-        confidence: transcript.confidence,
+        text: transcript.text || '',
+        confidence: transcript.confidence || 0.9,
         timestamp_ms: Date.now(),
       };
 
