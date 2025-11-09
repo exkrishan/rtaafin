@@ -283,23 +283,34 @@ class AsrWorker {
         // Calculate time since last continuous send (this doesn't reset on buffer clear)
         const timeSinceLastContinuousSend = Date.now() - buffer.lastContinuousSendTime;
         
+        // CRITICAL FIX: For continuous streaming, we need to send audio more aggressively
+        // Deepgram requires continuous audio flow - even small chunks are better than silence
+        // The key is to send audio FREQUENTLY (every 50-100ms), not wait for large chunks
         // Process if:
-        // 1. Enough time has passed since last continuous send (100ms for real-time), OR
+        // 1. Enough time has passed since last continuous send (100ms) AND we have ANY audio, OR
         // 2. We have accumulated enough audio (100ms), OR
-        // 3. We've accumulated too much audio (250ms max - force send)
-        // This ensures continuous flow with optimal chunk sizes (100-250ms)
+        // 3. We've accumulated too much audio (250ms max - force send), OR
+        // 4. Time-based trigger: Send every 50ms if we have at least 20ms of audio (for very small incoming chunks)
+        const MIN_CONTINUOUS_TIME_MS = 50; // Minimum time between sends (even for tiny chunks)
+        const MIN_CONTINUOUS_AUDIO_MS = 20; // Minimum audio to send in continuous mode (Deepgram can handle this)
+        
         const shouldProcess = 
-          timeSinceLastContinuousSend >= CONTINUOUS_CHUNK_DURATION_MS ||
-          currentAudioDurationMs >= CONTINUOUS_CHUNK_DURATION_MS ||
+          (timeSinceLastContinuousSend >= CONTINUOUS_CHUNK_DURATION_MS && currentAudioDurationMs >= MIN_CONTINUOUS_AUDIO_MS) || // Time-based: 100ms elapsed + 20ms audio
+          (timeSinceLastContinuousSend >= MIN_CONTINUOUS_TIME_MS && currentAudioDurationMs >= CONTINUOUS_CHUNK_DURATION_MS) || // Audio-based: 50ms elapsed + 100ms audio
           currentAudioDurationMs >= MAX_CHUNK_DURATION_MS; // Force send if too large
         
-        if (shouldProcess) {
+        if (shouldProcess && currentAudioDurationMs > 0) {
           buffer.isProcessing = true;
           try {
             await this.processBuffer(buffer);
             buffer.lastProcessed = Date.now();
             // Update lastContinuousSendTime to track continuous streaming (doesn't reset on buffer clear)
             buffer.lastContinuousSendTime = Date.now();
+            console.info(`[ASRWorker] ✅ Sent continuous chunk for ${interaction_id}`, {
+              timeSinceLastSend: timeSinceLastContinuousSend,
+              audioDuration: currentAudioDurationMs.toFixed(0),
+              chunksCount: buffer.chunks.length,
+            });
           } finally {
             buffer.isProcessing = false;
           }
@@ -310,7 +321,8 @@ class AsrWorker {
             timeSinceLastContinuousSend,
             bufferAge,
             currentAudioDurationMs: currentAudioDurationMs.toFixed(0),
-            needsTime: Math.max(0, CONTINUOUS_CHUNK_DURATION_MS - Math.max(timeSinceLastContinuousSend, bufferAge)),
+            chunksCount: buffer.chunks.length,
+            needsTime: Math.max(0, CONTINUOUS_CHUNK_DURATION_MS - timeSinceLastContinuousSend),
             needsAudio: Math.max(0, CONTINUOUS_CHUNK_DURATION_MS - currentAudioDurationMs),
             maxChunkSize: MAX_CHUNK_DURATION_MS,
           });
@@ -374,7 +386,14 @@ class AsrWorker {
 
       for (const [interactionId, buffer] of this.buffers.entries()) {
         const timeSinceLastChunk = now - buffer.lastChunkReceived;
-        if (timeSinceLastChunk >= STALE_BUFFER_TIMEOUT_MS) {
+        // CRITICAL: Don't clean up buffers that have sent initial chunk but are waiting for continuous streaming
+        // Only clean up if no audio received AND no initial chunk sent (call never started)
+        // OR if no audio received for a very long time (call definitely ended)
+        const isStale = timeSinceLastChunk >= STALE_BUFFER_TIMEOUT_MS;
+        const hasNoInitialChunk = !buffer.hasSentInitialChunk;
+        const isVeryStale = timeSinceLastChunk >= (STALE_BUFFER_TIMEOUT_MS * 2); // 10 seconds
+        
+        if (isStale && (hasNoInitialChunk || isVeryStale)) {
           staleBuffers.push(interactionId);
         }
       }
@@ -456,9 +475,10 @@ class AsrWorker {
       
       // CRITICAL: Audio duration check depends on streaming mode
       // - Initial chunk: Require 200ms minimum (reduced from 500ms)
-      // - Continuous streaming: Allow 100ms+ (for real-time flow)
+      // - Continuous streaming: Accept ANY audio (20ms+) for continuous flow
+      //   Deepgram can handle small chunks in continuous mode - the key is frequency, not size
       const requiredDuration = buffer.hasSentInitialChunk 
-        ? CONTINUOUS_CHUNK_DURATION_MS  // Continuous mode: 100ms+
+        ? 20  // Continuous mode: Accept even 20ms chunks (Deepgram minimum)
         : INITIAL_CHUNK_DURATION_MS;    // Initial chunk: 200ms
       
       if (audioDurationMs < requiredDuration) {
