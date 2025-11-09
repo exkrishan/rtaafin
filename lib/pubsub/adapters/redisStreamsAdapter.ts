@@ -499,8 +499,9 @@ export class RedisStreamsAdapter implements PubSubAdapter {
           // - First read: Use '0' to read from beginning (catch any existing messages)
           //   Note: With XREADGROUP, '0' reads messages that haven't been delivered to the group yet
           //   This works for both new and existing consumer groups
-          // - Subsequent reads: Use '>' to read only new messages
-          // - If we have a lastReadId, use it to continue from where we left off
+          // - Subsequent reads: ALWAYS use '>' to read new messages only
+          //   CRITICAL: Do NOT use lastReadId - once a message is ACKed, reading from its ID returns nothing
+          //   This causes the consumer to get stuck and never read new messages
           let readPosition: string;
           if (subscription.firstRead) {
             // First read: start from beginning to catch any existing messages
@@ -508,11 +509,10 @@ export class RedisStreamsAdapter implements PubSubAdapter {
             // This works even if consumer group exists - it reads undelivered messages from the beginning
             readPosition = '0';
             console.info(`[RedisStreamsAdapter] 🔍 First read for ${topic}, reading from beginning (position: 0) to catch existing undelivered messages`);
-          } else if (subscription.lastReadId && subscription.lastReadId !== '0') {
-            // Continue from last read position
-            readPosition = subscription.lastReadId;
           } else {
-            // Read new messages only
+            // After first read, ALWAYS use '>' to read new messages
+            // Do NOT use lastReadId - that causes the consumer to get stuck
+            // With Redis Streams consumer groups, '>' reads messages that haven't been delivered to this consumer
             readPosition = '>';
           }
 
