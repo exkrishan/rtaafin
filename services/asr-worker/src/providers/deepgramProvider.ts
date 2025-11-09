@@ -13,6 +13,14 @@ interface PendingSend {
   chunkSizeMs: number;
 }
 
+interface QueuedAudio {
+  audio: Buffer | Uint8Array;
+  seq: number;
+  sampleRate: number;
+  durationMs: number;
+  queuedAt: number;
+}
+
 interface ConnectionState {
   connection: any;
   socket?: any; // Underlying WebSocket for text frames
@@ -22,6 +30,7 @@ interface ConnectionState {
   lastTranscript: Transcript | null;
   lastSendTime?: number; // Timestamp of last audio send
   pendingSends?: PendingSend[]; // Track pending sends for timeout detection
+  pendingAudioQueue?: QueuedAudio[]; // Queue audio chunks when socket is not ready
   keepAliveInterval?: NodeJS.Timeout;
   keepAliveSuccessCount: number;
   keepAliveFailureCount: number;
@@ -506,6 +515,69 @@ export class DeepgramProvider implements AsrProvider {
               console.warn(`[DeepgramProvider] ⚠️ Could not send initial KeepAlive after retry for ${interactionId} - will try in periodic interval`);
             }
           }, 200); // Retry after 200ms
+        }
+        
+        // CRITICAL FIX: Flush queued audio chunks now that socket is ready
+        // Wait a bit for socket to actually become OPEN (readyState === 1)
+        if (state.pendingAudioQueue && state.pendingAudioQueue.length > 0) {
+          console.info(`[DeepgramProvider] 📤 Flushing ${state.pendingAudioQueue.length} queued audio chunks for ${interactionId}`);
+          
+          // Flush queue asynchronously to avoid blocking Open event handler
+          // Wait a short delay to ensure socket is fully ready
+          setTimeout(() => {
+            const queue = state.pendingAudioQueue || [];
+            state.pendingAudioQueue = []; // Clear queue
+            
+            // Check socket is ready before flushing
+            if (state.socket?.readyState !== 1) {
+              console.warn(`[DeepgramProvider] ⚠️ Socket not ready yet (readyState: ${state.socket?.readyState}), re-queueing ${queue.length} chunks for ${interactionId}`);
+              // Re-queue if socket not ready
+              if (!state.pendingAudioQueue) {
+                state.pendingAudioQueue = [];
+              }
+              state.pendingAudioQueue.push(...queue);
+              return;
+            }
+            
+            for (const queuedAudio of queue) {
+              try {
+                // Send directly via connection.send (socket is ready)
+                const audioData = queuedAudio.audio instanceof Uint8Array 
+                  ? queuedAudio.audio 
+                  : new Uint8Array(queuedAudio.audio);
+                
+                state.connection.send(audioData);
+                this.metrics.audioChunksSent++;
+                state.lastSendTime = Date.now();
+                
+                // Track pending send
+                if (!state.pendingSends) {
+                  state.pendingSends = [];
+                }
+                state.pendingSends.push({
+                  seq: queuedAudio.seq,
+                  sendTime: Date.now(),
+                  audioSize: audioData.length,
+                  chunkSizeMs: queuedAudio.durationMs,
+                });
+                
+                console.debug(`[DeepgramProvider] ✅ Flushed queued chunk seq ${queuedAudio.seq} for ${interactionId}`, {
+                  queueDelay: Date.now() - queuedAudio.queuedAt,
+                });
+              } catch (error: any) {
+                console.error(`[DeepgramProvider] ❌ Failed to flush queued audio chunk for ${interactionId}:`, {
+                  seq: queuedAudio.seq,
+                  error: error.message || String(error),
+                  queuedAt: new Date(queuedAudio.queuedAt).toISOString(),
+                  queueDelay: Date.now() - queuedAudio.queuedAt,
+                });
+              }
+            }
+            
+            if (queue.length > 0) {
+              console.info(`[DeepgramProvider] ✅ Flushed ${queue.length} queued audio chunks for ${interactionId}`);
+            }
+          }, 100); // Wait 100ms for socket to be fully ready
         }
         
         // Set up periodic KeepAlive (every 3 seconds) to prevent timeout during silence
@@ -1160,14 +1232,28 @@ export class DeepgramProvider implements AsrProvider {
         });
         console.info(`[DeepgramProvider] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
         
-        // CRITICAL FIX: Strict socket gating - only send when socket is OPEN
+        // CRITICAL FIX: Queue audio if socket is not ready, flush when socket opens
         // Verify socket readyState === 1 (OPEN) before sending
         const socketReady = state.socket?.readyState === 1;
         const connectionReady = state.isReady && !!state.connection;
         
         if (!socketReady || !connectionReady) {
-          const errorMsg = `Cannot send audio: socket not ready (socketReadyState: ${state.socket?.readyState ?? 'unknown'}, isReady: ${state.isReady})`;
-          console.error(`[DeepgramProvider] ❌ ${errorMsg}`, {
+          // Queue audio for later (will be sent when socket becomes ready)
+          if (!state.pendingAudioQueue) {
+            state.pendingAudioQueue = [];
+          }
+          
+          const queuedAudio: QueuedAudio = {
+            audio: audioData,
+            seq,
+            sampleRate,
+            durationMs,
+            queuedAt: Date.now(),
+          };
+          
+          state.pendingAudioQueue.push(queuedAudio);
+          
+          console.warn(`[DeepgramProvider] ⏳ Queueing audio chunk (socket not ready)`, {
             interactionId,
             seq,
             socketReadyState: state.socket?.readyState ?? 'unknown',
@@ -1175,21 +1261,58 @@ export class DeepgramProvider implements AsrProvider {
             isReady: state.isReady,
             hasConnection: !!state.connection,
             hasSocket: !!state.socket,
+            queueSize: state.pendingAudioQueue.length,
+            note: 'Audio will be sent when socket becomes OPEN (readyState === 1)',
           });
           
           // Track metric for sends blocked due to socket not ready
-          this.metrics.errors++;
           this.metrics.sendsBlockedNotReady++;
           
-          // Buffer for later (will be sent when socket becomes ready)
-          // For now, throw error to trigger retry logic
-          throw new Error(errorMsg);
+          // Don't throw error - audio is queued and will be sent when ready
+          // Return early to prevent sending attempt
+          return;
         }
         
         try {
           // CRITICAL: Verify connection.send is still available and socket is still ready
           if (state.socket?.readyState !== 1) {
-            throw new Error(`Socket closed during send preparation (readyState: ${state.socket?.readyState})`);
+            // Socket became not ready - queue this audio
+            if (!state.pendingAudioQueue) {
+              state.pendingAudioQueue = [];
+            }
+            state.pendingAudioQueue.push({
+              audio: audioData,
+              seq,
+              sampleRate,
+              durationMs,
+              queuedAt: Date.now(),
+            });
+            console.warn(`[DeepgramProvider] ⏳ Socket became not ready during send, queueing audio`, {
+              interactionId,
+              seq,
+              socketReadyState: state.socket?.readyState,
+              queueSize: state.pendingAudioQueue.length,
+            });
+            return; // Queue it, don't throw
+          }
+          
+          // Check if we have queued audio to flush first (maintain order)
+          if (state.pendingAudioQueue && state.pendingAudioQueue.length > 0) {
+            console.info(`[DeepgramProvider] 📤 Flushing ${state.pendingAudioQueue.length} queued chunks before sending new chunk for ${interactionId}`);
+            const queue = [...state.pendingAudioQueue]; // Copy queue
+            state.pendingAudioQueue = []; // Clear queue
+            
+            // Flush queue first, then send current chunk
+            for (const queuedAudio of queue) {
+              try {
+                state.connection.send(queuedAudio.audio instanceof Uint8Array ? queuedAudio.audio : new Uint8Array(queuedAudio.audio));
+                this.metrics.audioChunksSent++;
+                state.lastSendTime = Date.now();
+                console.debug(`[DeepgramProvider] ✅ Flushed queued chunk seq ${queuedAudio.seq} for ${interactionId}`);
+              } catch (error: any) {
+                console.error(`[DeepgramProvider] ❌ Failed to flush queued chunk seq ${queuedAudio.seq}:`, error);
+              }
+            }
           }
           
           state.connection.send(audioData);
