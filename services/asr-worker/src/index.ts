@@ -161,13 +161,24 @@ class AsrWorker {
     // For POC, subscribe to audio_stream (shared stream)
     // In production, would subscribe to audio.{tenant_id} per tenant
     const audioTopicName = audioTopic({ useStreams: true });
-    console.info(`[ASRWorker] Subscribing to audio topic: ${audioTopicName}`);
+    console.info(`[ASRWorker] 🔔 Subscribing to audio topic: ${audioTopicName}`);
 
-    const audioHandle = await this.pubsub.subscribe(audioTopicName, async (msg) => {
-      await this.handleAudioFrame(msg as any);
-    });
-
-    this.subscriptions.push(audioHandle);
+    try {
+      const audioHandle = await this.pubsub.subscribe(audioTopicName, async (msg) => {
+        await this.handleAudioFrame(msg as any);
+      });
+      console.info(`[ASRWorker] ✅ Successfully subscribed to audio topic: ${audioTopicName}`, {
+        subscriptionId: audioHandle.id,
+        topic: audioHandle.topic,
+      });
+      this.subscriptions.push(audioHandle);
+    } catch (error: any) {
+      console.error(`[ASRWorker] ❌ CRITICAL: Failed to subscribe to audio topic ${audioTopicName}:`, {
+        error: error.message,
+        stack: error.stack,
+      });
+      throw error; // Fail fast if subscription fails
+    }
 
     // Subscribe to call end events to clean up buffers
     const callEndTopicName = callEndTopic();

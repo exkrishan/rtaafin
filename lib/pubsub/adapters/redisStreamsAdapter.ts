@@ -479,6 +479,8 @@ export class RedisStreamsAdapter implements PubSubAdapter {
         }
       }
 
+      console.info(`[RedisStreamsAdapter] 🔁 Entering consumer loop for ${topic}, subscription.running: ${subscription.running}`);
+      
       while (subscription.running) {
         try {
           // Determine read position:
@@ -611,9 +613,15 @@ export class RedisStreamsAdapter implements PubSubAdapter {
     };
 
     // Start consuming in background
+    console.info(`[RedisStreamsAdapter] 🎬 Starting consumer loop for ${topic}...`);
     consume().catch((error: unknown) => {
-      console.error('[RedisStreamsAdapter] Consumer loop error:', error);
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.error(`[RedisStreamsAdapter] ❌ CRITICAL: Consumer loop error for ${topic}:`, {
+        error: errorMessage,
+        stack: error instanceof Error ? error.stack : undefined,
+      });
     });
+    console.info(`[RedisStreamsAdapter] ✅ Consumer loop started for ${topic}`);
   }
 
   async ack(handle: SubscriptionHandle, msgId: string): Promise<void> {
