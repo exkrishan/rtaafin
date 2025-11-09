@@ -257,10 +257,15 @@ export class RedisStreamsAdapter implements PubSubAdapter {
         timestamp_ms: message.timestamp_ms || Date.now(),
       };
 
-      // XADD topic * field1 value1 field2 value2 ...
+      // XADD topic MAXLEN ~ 1000 * field1 value1 field2 value2 ...
       // Use * for auto-generated message ID
+      // MAXLEN ~ 1000: Keep approximately last 1000 messages per stream to prevent OOM
+      // ~ means approximate trimming (faster, less precise)
       const msgId = await this.redis.xadd(
         topic,
+        'MAXLEN',
+        '~',
+        '1000', // Keep last ~1000 messages per stream
         '*',
         'data',
         JSON.stringify(envelope)

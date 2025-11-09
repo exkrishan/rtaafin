@@ -466,11 +466,15 @@ class IngestionServer {
                 note: 'Exotel is sending JSON as binary frames. This should be handled as text frames instead.',
               });
               
-              // Try to handle it as a JSON message instead
-              if (parsedJson.event === 'media' && parsedJson.media) {
-                console.info('[exotel] Attempting to handle binary JSON as media event');
-                this.exotelHandler.handleMessage(ws as any, jsonText);
-              }
+              // Handle it as a JSON message (Exotel is sending JSON as binary frames)
+              // This works but is not ideal - Exotel should send JSON as text frames
+              // Handle all event types: start, media, stop, dtmf, mark
+              console.info('[exotel] Handling binary JSON frame as text message', {
+                event: parsedJson.event,
+                stream_sid: exotelState.streamSid,
+                call_sid: exotelState.callSid,
+              });
+              this.exotelHandler.handleMessage(ws as any, jsonText);
               return; // Don't publish as audio
             } catch (parseError) {
               // Not valid JSON, but starts with { or [
