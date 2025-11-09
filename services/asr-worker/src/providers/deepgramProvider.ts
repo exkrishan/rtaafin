@@ -782,6 +782,11 @@ export class DeepgramProvider implements AsrProvider {
         const samples = audio.length / bytesPerSample;
         const durationMs = (samples / sampleRate) * 1000;
         
+        // CRITICAL: Verify connection state before sending
+        const connectionAny = state.connection as any;
+        const connectionReadyState = connectionAny?.getReadyState?.() ?? connectionAny?.readyState ?? 'unknown';
+        const socketReadyState = state.socket?.readyState ?? 'unknown';
+        
         console.info(`[DeepgramProvider] 📤 Sending audio chunk:`, {
           interactionId,
           seq,
@@ -790,11 +795,46 @@ export class DeepgramProvider implements AsrProvider {
           samples,
           durationMs: durationMs.toFixed(0) + 'ms',
           isReady: state.isReady,
+          connectionReadyState,
+          socketReadyState,
+          hasConnection: !!state.connection,
+          hasSocket: !!state.socket,
+          connectionType: typeof state.connection,
+          connectionHasSend: typeof state.connection?.send === 'function',
         });
         
-        // Deepgram SDK expects Uint8Array, not Buffer
+        // Verify connection is ready
+        if (!state.isReady) {
+          throw new Error(`Connection not ready for ${interactionId} (isReady: ${state.isReady})`);
+        }
+        
+        if (!state.connection) {
+          throw new Error(`Connection object is null for ${interactionId}`);
+        }
+        
+        if (typeof state.connection.send !== 'function') {
+          throw new Error(`Connection.send is not a function for ${interactionId}. Connection type: ${typeof state.connection}, keys: ${Object.keys(state.connection).join(', ')}`);
+        }
+        
+        // Deepgram SDK expects Uint8Array or Buffer for binary audio
         // Convert Buffer to Uint8Array to ensure compatibility
         const audioData = audio instanceof Uint8Array ? audio : new Uint8Array(audio);
+        
+        // Verify audio data is valid
+        if (!audioData || audioData.length === 0) {
+          throw new Error(`Invalid audio data: empty or null (length: ${audioData?.length ?? 'null'})`);
+        }
+        
+        // Log audio data details for debugging
+        console.debug(`[DeepgramProvider] Audio data details:`, {
+          interactionId,
+          seq,
+          dataType: audioData.constructor.name,
+          dataLength: audioData.length,
+          firstBytes: Array.from(audioData.slice(0, Math.min(8, audioData.length)))).map(b => `0x${b.toString(16).padStart(2, '0')}`)),
+          isBuffer: audioData instanceof Buffer,
+          isUint8Array: audioData instanceof Uint8Array,
+        });
         
         // Track metrics
         this.metrics.audioChunksSent++;
@@ -803,14 +843,37 @@ export class DeepgramProvider implements AsrProvider {
         this.metrics.averageChunkSizeMs = 
           (this.metrics.averageChunkSizeMs * (this.metrics.audioChunksSent - 1) + chunkSizeMs) / this.metrics.audioChunksSent;
         
-        // Send audio chunk to Deepgram
-        state.connection.send(audioData);
-        
-        // Log successful send
-        console.debug(`[DeepgramProvider] ✅ Audio sent successfully for ${interactionId}, seq=${seq}`, {
-          chunkSizeMs: chunkSizeMs.toFixed(0),
-          averageChunkSizeMs: this.metrics.averageChunkSizeMs.toFixed(0),
-        });
+        // CRITICAL: Send audio chunk to Deepgram
+        // According to Deepgram SDK docs, connection.send() accepts Buffer or Uint8Array
+        // The SDK handles binary WebSocket frame transmission internally
+        const sendStartTime = Date.now();
+        try {
+          state.connection.send(audioData);
+          const sendDuration = Date.now() - sendStartTime;
+          
+          // Log successful send with detailed metrics
+          console.info(`[DeepgramProvider] ✅ Audio sent successfully for ${interactionId}, seq=${seq}`, {
+            chunkSizeMs: chunkSizeMs.toFixed(0),
+            averageChunkSizeMs: this.metrics.averageChunkSizeMs.toFixed(0),
+            sendDurationMs: sendDuration,
+            dataLength: audioData.length,
+            connectionReadyState,
+            socketReadyState,
+          });
+        } catch (sendError: any) {
+          console.error(`[DeepgramProvider] ❌ Error during connection.send() for ${interactionId}:`, {
+            error: sendError.message || String(sendError),
+            errorType: sendError.constructor?.name,
+            errorCode: sendError.code,
+            stack: sendError.stack?.split('\n').slice(0, 5).join('\n'),
+            interactionId,
+            seq,
+            audioDataLength: audioData.length,
+            connectionType: typeof state.connection,
+            connectionKeys: Object.keys(state.connection || {}).slice(0, 10),
+          });
+          throw sendError;
+        }
       } catch (error: any) {
         console.error(`[DeepgramProvider] Failed to send audio for ${interactionId}:`, {
           error: error.message || String(error),
