@@ -545,6 +545,9 @@ class AsrWorker {
     const existingTimer = this.bufferTimers.get(interactionId);
     if (existingTimer) {
       clearInterval(existingTimer);
+      console.debug(`[ASRWorker] 🔄 Restarting timer for ${interactionId}`);
+    } else {
+      console.info(`[ASRWorker] 🚀 Starting timer for ${interactionId} (checks every 200ms)`);
     }
 
     // Start new timer: check every 200ms
