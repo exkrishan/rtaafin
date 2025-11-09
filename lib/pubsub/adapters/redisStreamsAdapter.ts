@@ -567,9 +567,14 @@ export class RedisStreamsAdapter implements PubSubAdapter {
               console.info(`[RedisStreamsAdapter] First read for ${topic} found no messages. Switching to '>' for new messages only.`);
             }
           }
-    } catch (error: unknown) {
-      console.error('[RedisStreamsAdapter] Publish error:', error);
-      throw error;
+        } catch (error: unknown) {
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          if (errorMessage.includes('max number of clients')) {
+            // Max clients error - mark it and stop this consumer loop
+            maxClientsErrorTime.set(topic, Date.now());
+            console.error(`[RedisStreamsAdapter] ❌ Max clients reached - stopping consumer for ${topic}`);
+            // Stop this consumer - it will be retried when backoff period expires
+            subscription.running = false;
             break;
           }
           if (errorMessage.includes('Connection') || errorMessage.includes('max number of clients')) {
