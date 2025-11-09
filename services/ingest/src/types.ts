@@ -38,6 +38,8 @@ export interface ConnectionState {
 
 export interface PubSubAdapter {
   publish(event: AudioFrame): Promise<void>;
+  publishToTopic(topic: string, message: any): Promise<void>;
+  disconnect(): Promise<void>;
 }
 
 export interface JWTPayload {
