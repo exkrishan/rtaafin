@@ -1,48 +1,56 @@
 /**
- * Transcript Subscription API
- * 
+ * Subscribe to transcripts for a specific interaction ID
  * POST /api/transcripts/subscribe
- * Subscribe to transcripts for a specific interaction/call
  * 
- * Body: { interactionId: string, callId?: string }
+ * Body: { interactionId: string }
+ * 
+ * This will start the transcript consumer (if not running) and subscribe to
+ * the transcript.{interactionId} topic from Redis Streams.
+ * Transcripts will be automatically forwarded to /api/calls/ingest-transcript
+ * which triggers intent detection and SSE broadcast.
  */
-
-import { NextResponse } from 'next/server';
-import { subscribeToTranscripts } from '@/lib/transcript-consumer';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
+import { subscribeToTranscripts } from '@/lib/transcript-consumer';
+import { startTranscriptConsumer } from '@/lib/transcript-consumer';
+
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    const { interactionId, callId } = body;
+    const { interactionId } = body;
 
-    if (!interactionId) {
-      return NextResponse.json(
-        { ok: false, error: 'Missing required field: interactionId' },
+    if (!interactionId || typeof interactionId !== 'string') {
+      return Response.json(
+        { ok: false, error: 'interactionId is required and must be a string' },
         { status: 400 }
       );
     }
 
-    console.info('[transcripts/subscribe] Subscribing to transcripts', {
-      interactionId,
-      callId: callId || interactionId,
-    });
+    // Start consumer if not already running
+    try {
+      await startTranscriptConsumer();
+    } catch (err: any) {
+      // Consumer might already be running, that's okay
+      if (!err.message?.includes('already running')) {
+        console.warn('[transcripts/subscribe] Consumer start warning:', err.message);
+      }
+    }
 
+    // Subscribe to this specific interaction
     await subscribeToTranscripts(interactionId);
 
-    return NextResponse.json({
+    return Response.json({
       ok: true,
+      message: `Subscribed to transcripts for interaction ${interactionId}`,
       interactionId,
-      message: 'Subscribed to transcripts',
     });
   } catch (error: any) {
     console.error('[transcripts/subscribe] Error:', error);
-    return NextResponse.json(
-      { ok: false, error: error.message || String(error) },
+    return Response.json(
+      { ok: false, error: error.message || 'Failed to subscribe to transcripts' },
       { status: 500 }
     );
   }
 }
-

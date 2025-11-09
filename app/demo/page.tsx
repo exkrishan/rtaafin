@@ -1,59 +1,94 @@
 'use client';
 
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import TranscriptPanel from '@/components/TranscriptPanel';
 import AutoDispositionModal, { Suggestion } from '@/components/AutoDispositionModal';
 import AgentAssistPanel from '@/components/AgentAssistPanel';
 import ToastContainer from '@/components/ToastContainer';
 
+interface DemoTranscriptLine {
+  seq: number;
+  speaker: string;
+  text: string;
+  ts: string;
+}
+
+interface DemoResult {
+  callId: string;
+  tenantId: string;
+  startedAt: string;
+  endedAt: string;
+  disposition?: {
+    suggested: Suggestion[];
+    autoNotes: string;
+  };
+}
+
 export default function DemoPage() {
   const [callId] = useState(`demo-call-${Date.now()}`);
   const [tenantId] = useState('default');
   const [isCallActive, setIsCallActive] = useState(false);
+  const [isPaused, setIsPaused] = useState(false);
   const [callEnded, setCallEnded] = useState(false);
   const [dispositionOpen, setDispositionOpen] = useState(false);
   const [dispositionData, setDispositionData] = useState<{
     suggested: Suggestion[];
     autoNotes: string;
   } | null>(null);
+  const [demoTranscript, setDemoTranscript] = useState<DemoTranscriptLine[]>([]);
+  const [progress, setProgress] = useState(0);
+  const [demoResult, setDemoResult] = useState<DemoResult | null>(null);
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
   const transcriptIndexRef = useRef(0);
+  const callStartTimeRef = useRef<Date | null>(null);
 
-  const testTranscript = [
-    { text: "Good morning! Thank you for calling MoneyAssure Bank. This is Priya from the Card Services team. How may I help you today?", speaker: "Agent" },
-    { text: "Hi, I'm following up on my replacement Platinum Credit Card. I reported fraud a few days ago, and I haven't received any update on the delivery status.", speaker: "Customer" },
-    { text: "I understand your concern. Let me quickly check the latest dispatch status for your card. Can you please provide your card number or account number?", speaker: "Agent" },
-    { text: "Sure, it's ending in 7792.", speaker: "Customer" },
-    { text: "Thank you. Let me pull up your account information. One moment please.", speaker: "Agent" },
-    { text: "Yes, I can confirm that your Platinum Credit Card ending in 7792 was shipped on November 08, 2025 via India Post. It's currently In Transit and expected to be delivered by November 15, 2025.", speaker: "Agent" },
-    { text: "Alright, thanks for the update. Can you please share the tracking number?", speaker: "Customer" },
-    { text: "Of course. The tracking number is IN123456789. You can track it on the India Post website.", speaker: "Agent" },
-    { text: "Perfect. Also, I wanted to check if there are any additional security measures I should take since I reported fraud earlier.", speaker: "Customer" },
-    { text: "Absolutely. Since you reported fraud, I recommend enabling transaction alerts and setting up two-factor authentication. I can help you with that right now.", speaker: "Agent" },
-    { text: "That would be great. Let's do that.", speaker: "Customer" },
-    { text: "Excellent. I've enabled transaction alerts for your account. You'll receive SMS notifications for all transactions above Rs. 1000. I'm also sending you a link to set up two-factor authentication.", speaker: "Agent" },
-    { text: "Thank you so much for your help. This has been very helpful.", speaker: "Customer" },
-    { text: "You're most welcome. Is there anything else I can assist you with today?", speaker: "Agent" },
-    { text: "No, that's all. Thanks again!", speaker: "Customer" },
-    { text: "Thank you for calling MoneyAssure Bank. Have a great day!", speaker: "Agent" },
-  ];
+  // Load demo transcript from JSON file
+  useEffect(() => {
+    fetch('/demo_playback.json')
+      .then(res => res.json())
+      .then(data => {
+        setDemoTranscript(data);
+      })
+      .catch(err => {
+        console.error('[Demo] Failed to load demo transcript:', err);
+      });
+  }, []);
+
+  const sendTranscriptLineRef = useRef<((index: number) => Promise<void>) | null>(null);
 
   const startCall = async () => {
-    if (isCallActive) return;
+    if (isCallActive || demoTranscript.length === 0) return;
     
     setIsCallActive(true);
+    setIsPaused(false);
     setCallEnded(false);
+    setProgress(0);
     transcriptIndexRef.current = 0;
+    callStartTimeRef.current = new Date();
 
     const sendTranscriptLine = async (index: number) => {
-      if (index >= testTranscript.length) {
+      if (index >= demoTranscript.length) {
+        setIsCallActive(false);
+        setCallEnded(true);
+        setProgress(100);
+        console.log('[Demo] All transcript lines sent');
+        // Auto-open disposition modal
+        setTimeout(() => {
+          disposeCall();
+        }, 1000);
         return;
       }
 
-      const line = testTranscript[index];
-      const seq = index + 1;
-      const ts = new Date(Date.now() - (testTranscript.length - index) * 2000).toISOString();
+      if (isPaused) {
+        transcriptIndexRef.current = index;
+        return;
+      }
+
+      const line = demoTranscript[index];
       const text = `${line.speaker}: ${line.text}`;
+      const progressPercent = ((index + 1) / demoTranscript.length) * 100;
+      setProgress(progressPercent);
+      transcriptIndexRef.current = index;
 
       try {
         const response = await fetch('/api/calls/ingest-transcript', {
@@ -64,31 +99,58 @@ export default function DemoPage() {
           },
           body: JSON.stringify({
             callId,
-            seq,
-            ts,
+            seq: line.seq,
+            ts: line.ts,
             text,
           }),
         });
 
         if (response.ok) {
-          console.log('[Demo] Sent transcript line', { seq, text: text.substring(0, 50) });
+          console.log('[Demo] Sent transcript line', { seq: line.seq, text: text.substring(0, 50) });
         }
       } catch (err) {
         console.error('[Demo] Failed to send transcript line', err);
       }
 
-      if (index < testTranscript.length - 1) {
+      if (index < demoTranscript.length - 1) {
         intervalRef.current = setTimeout(() => {
           sendTranscriptLine(index + 1);
-        }, 1500);
-      } else {
-        setIsCallActive(false);
-        setCallEnded(true);
-        console.log('[Demo] All transcript lines sent');
+        }, 2000); // ~2s cadence as specified
       }
     };
 
+    sendTranscriptLineRef.current = sendTranscriptLine;
     sendTranscriptLine(0);
+  };
+
+  const pauseCall = () => {
+    if (intervalRef.current) {
+      clearTimeout(intervalRef.current);
+      intervalRef.current = null;
+    }
+    setIsPaused(true);
+  };
+
+  const resumeCall = () => {
+    if (!isCallActive || !isPaused || !sendTranscriptLineRef.current) return;
+    setIsPaused(false);
+    const currentIndex = transcriptIndexRef.current;
+    sendTranscriptLineRef.current(currentIndex);
+  };
+
+  const resetCall = () => {
+    if (intervalRef.current) {
+      clearTimeout(intervalRef.current);
+      intervalRef.current = null;
+    }
+    setIsCallActive(false);
+    setIsPaused(false);
+    setCallEnded(false);
+    setProgress(0);
+    transcriptIndexRef.current = 0;
+    callStartTimeRef.current = null;
+    setDispositionData(null);
+    setDispositionOpen(false);
   };
 
   const disposeCall = async () => {
@@ -149,11 +211,49 @@ export default function DemoPage() {
       };
 
       setDispositionData(dispositionData);
+      
+      // Store demo result
+      const result: DemoResult = {
+        callId,
+        tenantId,
+        startedAt: callStartTimeRef.current?.toISOString() || new Date().toISOString(),
+        endedAt: new Date().toISOString(),
+        disposition: dispositionData,
+      };
+      setDemoResult(result);
+      
+      // Save to localStorage
+      try {
+        const savedResults = JSON.parse(localStorage.getItem('demo_results') || '[]');
+        savedResults.push(result);
+        localStorage.setItem('demo_results', JSON.stringify(savedResults));
+      } catch (err) {
+        console.error('[Demo] Failed to save to localStorage:', err);
+      }
+      
       setDispositionOpen(true);
     } catch (err: any) {
       console.error('[Demo] Failed to generate summary', err);
       alert('Failed to generate summary: ' + (err?.message || 'Unknown error'));
     }
+  };
+
+  const exportDemoResult = () => {
+    if (!demoResult) {
+      alert('No demo result to export. Please complete a call first.');
+      return;
+    }
+
+    const dataStr = JSON.stringify(demoResult, null, 2);
+    const dataBlob = new Blob([dataStr], { type: 'application/json' });
+    const url = URL.createObjectURL(dataBlob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `demo-result-${callId}-${Date.now()}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   };
 
   const stopCall = () => {
@@ -462,23 +562,74 @@ export default function DemoPage() {
         </div>
       </div>
 
+      {/* Progress Indicator */}
+      {isCallActive && (
+        <div className="fixed top-16 left-0 right-0 z-40 bg-gray-800 text-white px-4 py-2">
+          <div className="flex items-center gap-4">
+            <div className="flex-1 bg-gray-700 rounded-full h-2">
+              <div 
+                className="bg-blue-500 h-2 rounded-full transition-all duration-300"
+                style={{ width: `${progress}%` }}
+              />
+            </div>
+            <span className="text-xs font-medium">{Math.round(progress)}%</span>
+          </div>
+        </div>
+      )}
+
       {/* Control Buttons - Floating */}
       <div className="fixed bottom-4 left-4 flex gap-2 z-50">
         {!isCallActive && !callEnded && (
           <button
             onClick={startCall}
-            className="px-4 py-2 bg-green-600 text-white rounded-lg font-semibold hover:bg-green-700 shadow-lg"
+            disabled={demoTranscript.length === 0}
+            className="px-4 py-2 bg-green-600 text-white rounded-lg font-semibold hover:bg-green-700 shadow-lg disabled:bg-gray-400 disabled:cursor-not-allowed"
           >
             ▶ Start Call
           </button>
         )}
         {isCallActive && (
-          <button
-            onClick={stopCall}
-            className="px-4 py-2 bg-red-600 text-white rounded-lg font-semibold hover:bg-red-700 shadow-lg"
-          >
-            ⏹ Stop Call
-          </button>
+          <>
+            {isPaused ? (
+              <button
+                onClick={resumeCall}
+                className="px-4 py-2 bg-blue-600 text-white rounded-lg font-semibold hover:bg-blue-700 shadow-lg"
+              >
+                ▶ Resume
+              </button>
+            ) : (
+              <button
+                onClick={pauseCall}
+                className="px-4 py-2 bg-yellow-600 text-white rounded-lg font-semibold hover:bg-yellow-700 shadow-lg"
+              >
+                ⏸ Pause
+              </button>
+            )}
+            <button
+              onClick={stopCall}
+              className="px-4 py-2 bg-red-600 text-white rounded-lg font-semibold hover:bg-red-700 shadow-lg"
+            >
+              ⏹ Stop Call
+            </button>
+          </>
+        )}
+        {callEnded && (
+          <>
+            <button
+              onClick={resetCall}
+              className="px-4 py-2 bg-gray-600 text-white rounded-lg font-semibold hover:bg-gray-700 shadow-lg"
+            >
+              🔄 Reset
+            </button>
+            {demoResult && (
+              <button
+                onClick={exportDemoResult}
+                className="px-4 py-2 bg-purple-600 text-white rounded-lg font-semibold hover:bg-purple-700 shadow-lg"
+              >
+                📥 Export JSON
+              </button>
+            )}
+          </>
         )}
       </div>
 
