@@ -36,6 +36,7 @@ interface DeepgramMetrics {
   connectionsCreated: number;
   connectionsReused: number;
   connectionsClosed: number;
+  connectionsReconnects: number; // Track reconnection attempts
   audioChunksSent: number;
   transcriptsReceived: number;
   emptyTranscriptsReceived: number;
@@ -45,6 +46,12 @@ interface DeepgramMetrics {
   keepAliveFailures: number;
   averageChunkSizeMs: number;
   averageLatencyMs: number;
+  // New metrics for monitoring
+  connectionOpenMs: number[]; // Track connection open times
+  transcriptTimeoutCount: number; // Count of transcript timeouts
+  partialEmptyCount: number; // Count of empty partial transcripts
+  firstInterimLatencyMs: number[]; // Track first interim transcript latency
+  sendsBlockedNotReady: number; // Sends blocked due to socket not ready
 }
 
 export class DeepgramProvider implements AsrProvider {
@@ -57,6 +64,7 @@ export class DeepgramProvider implements AsrProvider {
     connectionsCreated: 0,
     connectionsReused: 0,
     connectionsClosed: 0,
+    connectionsReconnects: 0,
     audioChunksSent: 0,
     transcriptsReceived: 0,
     emptyTranscriptsReceived: 0,
@@ -66,6 +74,11 @@ export class DeepgramProvider implements AsrProvider {
     keepAliveFailures: 0,
     averageChunkSizeMs: 0,
     averageLatencyMs: 0,
+    connectionOpenMs: [],
+    transcriptTimeoutCount: 0,
+    partialEmptyCount: 0,
+    firstInterimLatencyMs: [],
+    sendsBlockedNotReady: 0,
   };
 
   constructor(apiKey?: string) {
@@ -361,8 +374,13 @@ export class DeepgramProvider implements AsrProvider {
       };
 
       // Set up event handlers
+      const connectionStartTime = Date.now();
       connection.on(LiveTranscriptionEvents.Open, () => {
-        console.info(`[DeepgramProvider] ✅ Connection opened for ${interactionId}`);
+        const connectionOpenTime = Date.now() - connectionStartTime;
+        this.metrics.connectionOpenMs.push(connectionOpenTime);
+        console.info(`[DeepgramProvider] ✅ Connection opened for ${interactionId}`, {
+          connectionOpenTimeMs: connectionOpenTime,
+        });
         state.isReady = true;
         
         // Try to access socket again if not found initially (socket might only be available after Open)
@@ -664,6 +682,11 @@ export class DeepgramProvider implements AsrProvider {
             const emptyRate = this.metrics.transcriptsReceived > 0 
               ? ((this.metrics.emptyTranscriptsReceived / this.metrics.transcriptsReceived) * 100).toFixed(1) + '%'
               : '0%';
+            
+            // Track empty partial metric
+            if (!isFinal) {
+              this.metrics.partialEmptyCount++;
+            }
             
             // COMPREHENSIVE FLOW TRACKING: Log empty transcript
             if (isFinal || parseFloat(emptyRate) > 50) {
@@ -1137,7 +1160,38 @@ export class DeepgramProvider implements AsrProvider {
         });
         console.info(`[DeepgramProvider] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
         
+        // CRITICAL FIX: Strict socket gating - only send when socket is OPEN
+        // Verify socket readyState === 1 (OPEN) before sending
+        const socketReady = state.socket?.readyState === 1;
+        const connectionReady = state.isReady && !!state.connection;
+        
+        if (!socketReady || !connectionReady) {
+          const errorMsg = `Cannot send audio: socket not ready (socketReadyState: ${state.socket?.readyState ?? 'unknown'}, isReady: ${state.isReady})`;
+          console.error(`[DeepgramProvider] ❌ ${errorMsg}`, {
+            interactionId,
+            seq,
+            socketReadyState: state.socket?.readyState ?? 'unknown',
+            connectionReadyState,
+            isReady: state.isReady,
+            hasConnection: !!state.connection,
+            hasSocket: !!state.socket,
+          });
+          
+          // Track metric for sends blocked due to socket not ready
+          this.metrics.errors++;
+          this.metrics.sendsBlockedNotReady++;
+          
+          // Buffer for later (will be sent when socket becomes ready)
+          // For now, throw error to trigger retry logic
+          throw new Error(errorMsg);
+        }
+        
         try {
+          // CRITICAL: Verify connection.send is still available and socket is still ready
+          if (state.socket?.readyState !== 1) {
+            throw new Error(`Socket closed during send preparation (readyState: ${state.socket?.readyState})`);
+          }
+          
           state.connection.send(audioData);
           const sendDuration = Date.now() - sendStartTime;
           
@@ -1223,6 +1277,9 @@ export class DeepgramProvider implements AsrProvider {
             const timeoutDuration = Date.now() - timeoutStartTime;
             const pendingSend = state.pendingSends?.find(s => s.seq === seq);
             const timeSinceSend = pendingSend ? (Date.now() - pendingSend.sendTime) + 'ms' : 'unknown';
+            
+            // Track timeout metric
+            this.metrics.transcriptTimeoutCount++;
             
             console.warn(`\n${'='.repeat(80)}`);
             console.warn(`[DeepgramProvider] ⚠️ STEP 2 TIMEOUT: No transcript received from Deepgram`);
