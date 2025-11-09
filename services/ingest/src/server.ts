@@ -161,18 +161,41 @@ class IngestionServer {
     this.server.on('request', (req: any, res: any) => {
       // Log all incoming requests (but only once per request to avoid spam)
       if (!req._logged) {
-        console.info('[server] HTTP request received', {
-          method: req.method,
-          url: req.url,
-          headers: {
-            'user-agent': req.headers['user-agent']?.substring(0, 50) || 'unknown',
-            'upgrade': req.headers.upgrade || 'none',
-            'connection': req.headers.connection || 'none',
-            'authorization': req.headers.authorization ? 'present' : 'missing',
-            'origin': req.headers.origin || 'none',
-          },
-          remoteAddress: req.socket?.remoteAddress || 'unknown',
-        });
+        // Check if this is a WebSocket upgrade attempt
+        const isWebSocketUpgrade = req.headers.upgrade === 'websocket' || 
+                                   req.headers.connection?.toLowerCase().includes('upgrade');
+        
+        if (isWebSocketUpgrade) {
+          console.info('[server] 🔌 WebSocket upgrade attempt detected in HTTP request', {
+            method: req.method,
+            url: req.url,
+            headers: {
+              'user-agent': req.headers['user-agent']?.substring(0, 50) || 'unknown',
+              'upgrade': req.headers.upgrade || 'none',
+              'connection': req.headers.connection || 'none',
+              'authorization': req.headers.authorization ? 'present' : 'missing',
+              'origin': req.headers.origin || 'none',
+              'sec-websocket-key': req.headers['sec-websocket-key'] ? 'present' : 'missing',
+              'sec-websocket-version': req.headers['sec-websocket-version'] || 'none',
+            },
+            remoteAddress: req.socket?.remoteAddress || 'unknown',
+            remotePort: req.socket?.remotePort || 'unknown',
+          });
+        } else if (req.url !== '/health') {
+          // Only log non-health-check requests to reduce noise
+          console.info('[server] HTTP request received', {
+            method: req.method,
+            url: req.url,
+            headers: {
+              'user-agent': req.headers['user-agent']?.substring(0, 50) || 'unknown',
+              'upgrade': req.headers.upgrade || 'none',
+              'connection': req.headers.connection || 'none',
+              'authorization': req.headers.authorization ? 'present' : 'missing',
+              'origin': req.headers.origin || 'none',
+            },
+            remoteAddress: req.socket?.remoteAddress || 'unknown',
+          });
+        }
         req._logged = true;
       }
     });
@@ -211,15 +234,20 @@ class IngestionServer {
       path: '/v1/ingest',
       verifyClient: (info, callback) => {
         // Log ALL WebSocket upgrade attempts for debugging
-        console.info('[server] WebSocket upgrade request received', {
+        console.info('[server] 🔌 WebSocket upgrade request received', {
           url: info.req.url,
           method: info.req.method,
           headers: {
             authorization: info.req.headers.authorization ? 'present' : 'missing',
             'user-agent': info.req.headers['user-agent']?.substring(0, 50) || 'unknown',
             origin: info.req.headers.origin || 'none',
+            upgrade: info.req.headers.upgrade || 'none',
+            connection: info.req.headers.connection || 'none',
+            'sec-websocket-key': info.req.headers['sec-websocket-key'] ? 'present' : 'missing',
+            'sec-websocket-version': info.req.headers['sec-websocket-version'] || 'none',
           },
           remoteAddress: info.req.socket?.remoteAddress || 'unknown',
+          remotePort: info.req.socket?.remotePort || 'unknown',
         });
         
         // Check if this is Exotel (no JWT or Basic Auth) or our protocol (JWT)
