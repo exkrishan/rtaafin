@@ -418,34 +418,67 @@ class AsrWorker {
         
         // CRITICAL: Also check if buffer age is too high (stale buffer)
         // If buffer hasn't been processed in a while, force process to prevent Deepgram timeout
+        // BUT: Still require minimum chunk size - don't send tiny chunks even if stale
         const MAX_BUFFER_AGE_MS = 500; // Force process if buffer is older than 500ms
         const isBufferStale = timeSinceLastContinuousSend >= MAX_BUFFER_AGE_MS;
         
+        // CRITICAL FIX: Stale buffer should only force send if we have minimum audio
+        // Sending tiny chunks (20ms) to Deepgram causes timeouts - better to wait for more audio
         const shouldProcess = 
-          isBufferStale || // Force process if buffer is stale (prevents Deepgram timeout)
-          (timeSinceLastContinuousSend >= CONTINUOUS_CHUNK_DURATION_MS && currentAudioDurationMs >= MIN_CONTINUOUS_AUDIO_MS) || // Time-based: 100ms elapsed + 20ms audio
+          (isBufferStale && currentAudioDurationMs >= MIN_CONTINUOUS_AUDIO_MS) || // Stale buffer: only if we have minimum audio (100ms)
+          (timeSinceLastContinuousSend >= CONTINUOUS_CHUNK_DURATION_MS && currentAudioDurationMs >= MIN_CONTINUOUS_AUDIO_MS) || // Time-based: 100ms elapsed + 100ms audio
           (timeSinceLastContinuousSend >= MIN_CONTINUOUS_TIME_MS && currentAudioDurationMs >= CONTINUOUS_CHUNK_DURATION_MS) || // Audio-based: 50ms elapsed + 100ms audio
           currentAudioDurationMs >= MAX_CHUNK_DURATION_MS; // Force send if too large
         
-        if (shouldProcess && currentAudioDurationMs > 0) {
+        // CRITICAL: Never send chunks smaller than minimum, even if buffer is stale
+        // This prevents Deepgram timeouts from tiny chunks
+        if (shouldProcess && currentAudioDurationMs >= MIN_CONTINUOUS_AUDIO_MS) {
           buffer.isProcessing = true;
           try {
+            // Store buffer state before processing to check if anything was sent
+            const chunksBeforeProcessing = buffer.chunks.length;
+            const audioDurationBeforeProcessing = currentAudioDurationMs;
+            
             await this.processBuffer(buffer);
-            buffer.lastProcessed = Date.now();
-            // Update lastContinuousSendTime to track continuous streaming (doesn't reset on buffer clear)
-            buffer.lastContinuousSendTime = Date.now();
-            console.info(`[ASRWorker] ✅ Sent continuous chunk for ${interaction_id}`, {
-              timeSinceLastSend: timeSinceLastContinuousSend,
-              audioDuration: currentAudioDurationMs.toFixed(0),
-              chunksCount: buffer.chunks.length,
-            });
+            
+            // Only log success if buffer was actually processed (chunks were cleared)
+            // processBuffer returns early if buffer is too small, so chunks won't be cleared
+            if (buffer.chunks.length < chunksBeforeProcessing) {
+              buffer.lastProcessed = Date.now();
+              // Update lastContinuousSendTime to track continuous streaming (doesn't reset on buffer clear)
+              buffer.lastContinuousSendTime = Date.now();
+              console.info(`[ASRWorker] ✅ Sent continuous chunk for ${interaction_id}`, {
+                timeSinceLastSend: timeSinceLastContinuousSend,
+                audioDuration: audioDurationBeforeProcessing.toFixed(0),
+                chunksCount: chunksBeforeProcessing,
+                chunksRemaining: buffer.chunks.length,
+              });
+            } else {
+              // Buffer was too small, processBuffer returned early
+              console.debug(`[ASRWorker] ⏸️ Processing skipped - buffer too small (${audioDurationBeforeProcessing.toFixed(0)}ms < ${MIN_CONTINUOUS_AUDIO_MS}ms)`, {
+                interaction_id,
+                audioDuration: audioDurationBeforeProcessing.toFixed(0),
+                minimumRequired: MIN_CONTINUOUS_AUDIO_MS,
+              });
+            }
           } finally {
             buffer.isProcessing = false;
           }
         } else {
           // Log why we're not processing (for debugging)
-          // CRITICAL: Log warning if buffer is getting stale
-          if (timeSinceLastContinuousSend > 1000) {
+          // CRITICAL: Log warning if buffer is getting stale but still too small
+          if (isBufferStale && currentAudioDurationMs < MIN_CONTINUOUS_AUDIO_MS) {
+            console.warn(`[ASRWorker] ⚠️ Buffer is stale but too small to send (${timeSinceLastContinuousSend}ms since last send, only ${currentAudioDurationMs.toFixed(0)}ms audio)`, {
+              interaction_id,
+              timeSinceLastContinuousSend,
+              bufferAge,
+              currentAudioDurationMs: currentAudioDurationMs.toFixed(0),
+              minimumRequired: MIN_CONTINUOUS_AUDIO_MS,
+              chunksCount: buffer.chunks.length,
+              needsAudio: (MIN_CONTINUOUS_AUDIO_MS - currentAudioDurationMs).toFixed(0) + 'ms',
+              note: 'Waiting for more audio before sending to prevent Deepgram timeout from tiny chunks',
+            });
+          } else if (timeSinceLastContinuousSend > 1000) {
             console.warn(`[ASRWorker] ⚠️ Buffer getting stale (${timeSinceLastContinuousSend}ms since last send)`, {
               interaction_id,
               timeSinceLastContinuousSend,
@@ -453,7 +486,7 @@ class AsrWorker {
               currentAudioDurationMs: currentAudioDurationMs.toFixed(0),
               chunksCount: buffer.chunks.length,
               needsTime: Math.max(0, CONTINUOUS_CHUNK_DURATION_MS - timeSinceLastContinuousSend),
-              needsAudio: Math.max(0, CONTINUOUS_CHUNK_DURATION_MS - currentAudioDurationMs),
+              needsAudio: Math.max(0, MIN_CONTINUOUS_AUDIO_MS - currentAudioDurationMs),
               maxChunkSize: MAX_CHUNK_DURATION_MS,
             });
           } else {
