@@ -504,6 +504,17 @@ export class RedisStreamsAdapter implements PubSubAdapter {
             readPosition = '>';
           }
 
+          // Log read attempt (but not every time to avoid spam)
+          if (subscription.firstRead || Math.random() < 0.01) { // Log 1% of reads after first read
+            console.info(`[RedisStreamsAdapter] 📖 Attempting to read from ${topic}`, {
+              topic,
+              readPosition,
+              isFirstRead: subscription.firstRead,
+              consumerGroup,
+              consumerName,
+            });
+          }
+
           // XREADGROUP GROUP group consumer COUNT count BLOCK blockms STREAMS key [key ...] id [id ...]
           const results = await redis.xreadgroup(
             'GROUP',
@@ -517,6 +528,16 @@ export class RedisStreamsAdapter implements PubSubAdapter {
             topic,
             readPosition
           ) as [string, [string, string[]][]][] | null;
+          
+          // Log read result
+          if (subscription.firstRead || (results && results.length > 0 && results[0][1] && results[0][1].length > 0)) {
+            console.info(`[RedisStreamsAdapter] 📥 Read result from ${topic}`, {
+              topic,
+              hasResults: !!results,
+              messagesCount: results && results.length > 0 && results[0][1] ? results[0][1].length : 0,
+              readPosition,
+            });
+          }
 
           if (results && results.length > 0) {
             const [streamName, messages] = results[0];
