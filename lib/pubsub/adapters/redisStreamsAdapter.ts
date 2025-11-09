@@ -26,6 +26,8 @@ interface RedisSubscription {
   handler: (msg: MessageEnvelope) => Promise<void>;
   redis: RedisInstance;
   running: boolean;
+  firstRead: boolean; // Track if this is the first read for this subscription
+  lastReadId: string; // Track last read message ID
 }
 
 // Singleton pattern: Reuse Redis connections per URL to prevent max clients error
@@ -327,6 +329,8 @@ export class RedisStreamsAdapter implements PubSubAdapter {
       handler,
       redis: subscriptionRedis,
       running: true,
+      firstRead: true, // Mark as first read to catch existing messages
+      lastReadId: '0', // Start from beginning
     };
 
     this.subscriptions.set(id, subscription);
@@ -375,24 +379,47 @@ export class RedisStreamsAdapter implements PubSubAdapter {
     const consume = async () => {
       while (subscription.running) {
         try {
+          // Determine read position:
+          // - First read: Use '0' to read from beginning (catch any existing messages)
+          // - Subsequent reads: Use '>' to read only new messages
+          // - If we have a lastReadId, use it to continue from where we left off
+          let readPosition: string;
+          if (subscription.firstRead) {
+            // First read: start from beginning to catch any existing messages
+            readPosition = '0';
+            console.info(`[RedisStreamsAdapter] First read for ${topic}, reading from beginning (position: 0) to catch existing messages`);
+          } else if (subscription.lastReadId && subscription.lastReadId !== '0') {
+            // Continue from last read position
+            readPosition = subscription.lastReadId;
+          } else {
+            // Read new messages only
+            readPosition = '>';
+          }
+
           // XREADGROUP GROUP group consumer COUNT count BLOCK blockms STREAMS key [key ...] id [id ...]
-          // Use '>' to read new messages, or '0' to read pending messages
           const results = await redis.xreadgroup(
             'GROUP',
             consumerGroup,
             consumerName,
             'COUNT',
-            1,
+            10, // Read up to 10 messages at a time for efficiency
             'BLOCK',
             1000, // Block for 1 second
             'STREAMS',
             topic,
-            '>' // Read new messages
+            readPosition
           ) as [string, [string, string[]][]][] | null;
 
           if (results && results.length > 0) {
             const [streamName, messages] = results[0];
             if (messages && messages.length > 0) {
+              // Mark that we've done at least one read
+              if (subscription.firstRead) {
+                subscription.firstRead = false;
+                console.info(`[RedisStreamsAdapter] ✅ First read completed for ${topic}, found ${messages.length} message(s). Switching to '>' for new messages only.`);
+              }
+
+              let processedCount = 0;
               for (const messageEntry of messages) {
                 const [msgId, fields] = messageEntry;
                 try {
@@ -404,6 +431,9 @@ export class RedisStreamsAdapter implements PubSubAdapter {
                     // Auto-ACK after successful handler execution to prevent redelivery
                     try {
                       await redis.xack(topic, consumerGroup, msgId);
+                      processedCount++;
+                      // Update last read ID to continue from here
+                      subscription.lastReadId = msgId;
                     } catch (ackError: unknown) {
                       console.warn(`[RedisStreamsAdapter] Failed to ACK message ${msgId}:`, ackError);
                     }
@@ -413,6 +443,22 @@ export class RedisStreamsAdapter implements PubSubAdapter {
                   // Don't ack on error - message will be retried
                 }
               }
+
+              if (processedCount > 0) {
+                console.info(`[RedisStreamsAdapter] ✅ Processed ${processedCount} message(s) from ${topic}`);
+              }
+            } else {
+              // No messages this time - if it was first read, switch to '>' for next time
+              if (subscription.firstRead) {
+                subscription.firstRead = false;
+                console.info(`[RedisStreamsAdapter] First read for ${topic} found no existing messages. Switching to '>' for new messages only.`);
+              }
+            }
+          } else {
+            // No results - if it was first read, switch to '>' for next time
+            if (subscription.firstRead) {
+              subscription.firstRead = false;
+              console.info(`[RedisStreamsAdapter] First read for ${topic} found no messages. Switching to '>' for new messages only.`);
             }
           }
         } catch (error: unknown) {
