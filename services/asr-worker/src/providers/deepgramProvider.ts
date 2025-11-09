@@ -79,8 +79,9 @@ export class DeepgramProvider implements AsrProvider {
       if (state) {
       // Connection exists, check if it's still valid
       // CRITICAL: Also check if WebSocket is actually open (readyState === 1)
-      const socketOpen = state.socket && 
-        (state.socket.readyState === 1 || state.socket.readyState === WebSocket.OPEN);
+      // Note: In Node.js, WebSocket.OPEN is not available, so we check for readyState === 1 directly
+      // readyState values: 0=CONNECTING, 1=OPEN, 2=CLOSING, 3=CLOSED
+      const socketOpen = state.socket && state.socket.readyState === 1;
       
       if (state.isReady && state.connection && socketOpen) {
         this.metrics.connectionsReused++;
