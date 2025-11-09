@@ -4,7 +4,6 @@ import { useState, useRef, useEffect } from 'react';
 import TranscriptPanel from '@/components/TranscriptPanel';
 import AutoDispositionModal, { Suggestion } from '@/components/AutoDispositionModal';
 import AgentAssistPanelV2, { KBArticle, DispositionData, Customer } from '@/components/AgentAssistPanelV2';
-import type { Customer } from '@/components/CustomerDetailsHeader';
 import ToastContainer from '@/components/ToastContainer';
 
 interface DemoTranscriptLine {
@@ -337,88 +336,84 @@ export default function DemoPage() {
         </div>
       )}
 
-      {/* 2-column grid layout - Transcript + Call Details, Agent Assist is right-docked */}
-      <div className={`grid grid-cols-1 md:grid-cols-[320px_1fr] gap-6 h-screen p-6 pr-[376px] ${isCallActive ? 'pt-16' : ''}`}>
-        {/* Left Column: Transcript */}
-        <div className="relative">
-          <div className="card h-full flex flex-col">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-lg font-semibold text-gray-900">Transcript</h2>
-              {!isCallActive && !callEnded && (
+      {/* Single column layout - Customer Info in center, Agent Assist is right-docked */}
+      <div className={`flex flex-col h-screen p-6 pr-[376px] ${isCallActive ? 'pt-16' : ''}`}>
+        {/* Top Controls */}
+        <div className="mb-4 flex items-center justify-between">
+          <h1 className="text-xl font-semibold text-gray-900">Agent Desktop</h1>
+          {!isCallActive && !callEnded && (
+            <button
+              onClick={startCall}
+              disabled={demoTranscript.length === 0}
+              className="px-4 py-2 bg-green-600 text-white text-sm font-medium rounded-md hover:bg-green-700 shadow disabled:bg-gray-400 disabled:cursor-not-allowed"
+            >
+              ▶ Start Call
+            </button>
+          )}
+          {isCallActive && (
+            <div className="flex gap-2">
+              {isPaused ? (
                 <button
-                  onClick={startCall}
-                  disabled={demoTranscript.length === 0}
-                  className="px-3 py-1.5 bg-green-600 text-white text-sm font-medium rounded-md hover:bg-green-700 shadow disabled:bg-gray-400 disabled:cursor-not-allowed"
+                  onClick={resumeCall}
+                  className="px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-md hover:bg-blue-700"
                 >
-                  ▶ Start Call
+                  ▶ Resume
+                </button>
+              ) : (
+                <button
+                  onClick={pauseCall}
+                  className="px-4 py-2 bg-yellow-600 text-white text-sm font-medium rounded-md hover:bg-yellow-700"
+                >
+                  ⏸ Pause
                 </button>
               )}
-              {isCallActive && (
-                <div className="flex gap-2">
-                  {isPaused ? (
-                    <button
-                      onClick={resumeCall}
-                      className="px-3 py-1.5 bg-blue-600 text-white text-sm font-medium rounded-md hover:bg-blue-700"
-                    >
-                      ▶ Resume
-                    </button>
-                  ) : (
-                    <button
-                      onClick={pauseCall}
-                      className="px-3 py-1.5 bg-yellow-600 text-white text-sm font-medium rounded-md hover:bg-yellow-700"
-                    >
-                      ⏸ Pause
-                    </button>
-                  )}
-                  <button
-                    onClick={stopCall}
-                    className="px-3 py-1.5 bg-red-600 text-white text-sm font-medium rounded-md hover:bg-red-700"
-                  >
-                    ⏹ Stop
-                  </button>
-                </div>
-              )}
-              {callEnded && (
-                <div className="flex gap-2">
-                  <button
-                    onClick={resetCall}
-                    className="px-3 py-1.5 bg-gray-600 text-white text-sm font-medium rounded-md hover:bg-gray-700"
-                  >
-                    🔄 Reset
-                  </button>
-                  {demoResult && (
-                    <button
-                      onClick={exportDemoResult}
-                      className="px-3 py-1.5 bg-purple-600 text-white text-sm font-medium rounded-md hover:bg-purple-700"
-                    >
-                      📥 Export
-                    </button>
-                  )}
-                </div>
+              <button
+                onClick={stopCall}
+                className="px-4 py-2 bg-red-600 text-white text-sm font-medium rounded-md hover:bg-red-700"
+              >
+                ⏹ Stop
+              </button>
+            </div>
+          )}
+          {callEnded && (
+            <div className="flex gap-2">
+              <button
+                onClick={resetCall}
+                className="px-4 py-2 bg-gray-600 text-white text-sm font-medium rounded-md hover:bg-gray-700"
+              >
+                🔄 Reset
+              </button>
+              {demoResult && (
+                <button
+                  onClick={exportDemoResult}
+                  className="px-4 py-2 bg-purple-600 text-white text-sm font-medium rounded-md hover:bg-purple-700"
+                >
+                  📥 Export
+                </button>
               )}
             </div>
-            <div className="flex-1 overflow-hidden">
-              <TranscriptPanel
-                callId={callId}
-                tenantId={tenantId}
-                onOpenDisposition={(data) => {
-                  setDispositionData(data);
-                  setDispositionOpen(true);
-                }}
-              />
-            </div>
-          </div>
+          )}
         </div>
 
-        {/* Center Column: Customer Info - Now handled by Agent Assist Panel */}
-        <div className="overflow-y-auto">
-          <div className="card">
-            <h2 className="text-lg font-semibold text-gray-900 mb-4">Call Details</h2>
-            <div className="space-y-4">
-              <div className="p-4 bg-gray-50 rounded-lg">
-                <p className="text-sm text-gray-600">
-                  Customer information is now displayed in the Agent Assist panel on the right.
-                </p>
+        {/* Center Column: Customer Info - Main focus like Universal Agent Desktop */}
+        <div className="flex-1 overflow-y-auto">
+          <div className="card h-full flex flex-col">
+            <CustomerDetailsHeader
+              customer={mockCustomer}
+              callDuration={isCallActive ? '00:00' : '00:00'}
+              callId={callId}
+              onOpenCRM={() => {
+                console.log('[Demo] Open CRM clicked');
+                window.open('https://crm.example.com/customer/cust-789', '_blank');
+              }}
+              onOpenCaseHistory={() => {
+                console.log('[Demo] Open Case History clicked');
+                window.open('https://crm.example.com/cases/cust-789', '_blank');
+              }}
+            />
+            <div className="flex-1 p-6">
+              <div className="text-center text-gray-500">
+                <p className="text-sm">Customer information displayed above. Transcript and KB suggestions in Agent Assist panel on the right.</p>
               </div>
             </div>
           </div>
@@ -437,13 +432,15 @@ export default function DemoPage() {
           }}
           triggerKBSearch={async (query, context) => {
             console.log('[Demo] KB search triggered:', { query, context });
-            // Mock KB search results
+            // Mock KB search results with intent detection basis
             return [
               {
                 id: 'kb-1',
                 title: 'Card Replacement Process',
                 snippet: 'For card replacement requests, verify customer identity and check fraud status...',
                 confidence: 0.85,
+                intent: 'credit_card_replacement',
+                intentConfidence: 0.92,
                 url: 'https://kb.example.com/card-replacement',
               },
             ];

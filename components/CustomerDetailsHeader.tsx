@@ -72,39 +72,48 @@ export default function CustomerDetailsHeader({
 
   return (
     <div className="bg-white border-b border-gray-200 relative" ref={flyoutRef}>
-      {/* Main Header */}
-      <div className="p-4">
-        <div className="flex items-center gap-3">
-          {/* Avatar */}
-          <div className="w-10 h-10 rounded-full bg-blue-600 flex items-center justify-center text-white font-semibold text-sm flex-shrink-0">
+      {/* Main Header - Centered like Universal Agent Desktop */}
+      <div className="p-6">
+        <div className="flex flex-col items-center gap-4">
+          {/* Large Avatar - Centered */}
+          <div className="w-24 h-24 rounded-full bg-blue-600 flex items-center justify-center text-white font-semibold text-2xl flex-shrink-0">
             {getInitials(customer.name)}
           </div>
-
-          {/* Customer Info */}
-          <div className="flex-1 min-w-0">
+          
+          {/* Customer Name */}
+          <div className="text-center">
             <button
               onClick={() => setFlyoutOpen(!flyoutOpen)}
-              className="text-left w-full hover:opacity-80 transition-opacity focus:outline-none focus:ring-2 focus:ring-blue-500 rounded"
+              className="text-xl font-semibold text-gray-900 hover:opacity-80 transition-opacity focus:outline-none focus:ring-2 focus:ring-blue-500 rounded"
               aria-label={`Customer details for ${customer.name}`}
               aria-expanded={flyoutOpen}
             >
-              <div className="font-semibold text-gray-900 text-sm truncate">
-                {customer.name}
-              </div>
-              <div className="text-xs text-gray-600 mt-0.5">
-                {maskPhone(customer.masked_phone)}
-                {customer.account && ` • ${customer.account}`}
-              </div>
+              {customer.name}
             </button>
           </div>
-
+          
+          {/* Customer Info Row */}
+          <div className="flex items-center gap-3 justify-center">
+            <div className="text-sm text-gray-600">
+              {maskPhone(customer.masked_phone)}
+            </div>
+            {customer.account && (
+              <>
+                <span className="text-gray-400">•</span>
+                <div className="text-sm text-gray-600">
+                  {customer.account}
+                </div>
+              </>
+            )}
+          </div>
+          
           {/* Tags */}
           {customer.tags && customer.tags.length > 0 && (
-            <div className="flex gap-1 flex-shrink-0">
+            <div className="flex gap-2 justify-center">
               {customer.tags.slice(0, 2).map((tag, i) => (
                 <span
                   key={i}
-                  className="px-2 py-0.5 bg-blue-50 text-blue-700 text-xs font-medium rounded"
+                  className="px-3 py-1 bg-blue-50 text-blue-700 text-sm font-medium rounded"
                 >
                   {tag}
                 </span>
@@ -114,7 +123,7 @@ export default function CustomerDetailsHeader({
         </div>
 
         {/* Status Row */}
-        <div className="flex items-center gap-4 mt-3 text-xs text-gray-500">
+        <div className="flex items-center gap-4 mt-4 justify-center text-xs text-gray-500">
           <div className="flex items-center gap-1">
             <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />

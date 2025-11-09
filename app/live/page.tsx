@@ -257,41 +257,40 @@ export default function LivePage() {
         </p>
       </div>
 
-      {/* 2-column grid layout - Transcript + Call Details, Agent Assist is right-docked */}
-      <div className="grid grid-cols-1 md:grid-cols-[320px_1fr] gap-6 h-[calc(100vh-120px)] p-6 pr-[376px]">
-        {/* Left Column: Transcript */}
-        <div className="relative">
+      {/* Single column layout - Customer Info in center, Agent Assist is right-docked */}
+      <div className="flex flex-col h-[calc(100vh-120px)] p-6 pr-[376px]">
+        {/* Center Column: Customer Info - Main focus like Universal Agent Desktop */}
+        <div className="flex-1 overflow-y-auto">
           <div className="card h-full flex flex-col">
-            <h2 className="text-lg font-semibold text-gray-900 mb-4">Transcript</h2>
-            <div className="flex-1 overflow-hidden">
+            <CustomerDetailsHeader
+              customer={mockCustomer}
+              callDuration="00:00"
+              callId={callId || undefined}
+              onOpenCRM={() => {
+                console.log('[Live] Open CRM clicked');
+                window.open(`https://crm.example.com/customer/${mockCustomer.id}`, '_blank');
+              }}
+              onOpenCaseHistory={() => {
+                console.log('[Live] Open Case History clicked');
+                window.open(`https://crm.example.com/cases/${mockCustomer.id}`, '_blank');
+              }}
+            />
+            <div className="flex-1 p-6">
               {callId ? (
-                <TranscriptPanel
-                  callId={callId}
-                  tenantId={tenantId}
-                  onOpenDisposition={(data) => {
-                    setDispositionData(data);
-                    setDispositionOpen(true);
-                  }}
-                />
+                <div className="text-center text-gray-500">
+                  <p className="text-sm">Customer information displayed above. Transcript and KB suggestions in Agent Assist panel on the right.</p>
+                </div>
               ) : (
                 <div className="flex items-center justify-center h-full text-gray-500">
-                  <p className="text-sm">Enter an Interaction ID above to start receiving transcripts</p>
+                  <div className="text-center">
+                    <svg className="w-16 h-16 mx-auto mb-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+                    </svg>
+                    <p className="text-sm">No Customer Exists</p>
+                    <p className="text-xs mt-2">Please check the customer in CRM App.</p>
+                  </div>
                 </div>
               )}
-            </div>
-          </div>
-        </div>
-
-        {/* Center Column: Call Details - Customer info now in Agent Assist Panel */}
-        <div className="overflow-y-auto">
-          <div className="card">
-            <h2 className="text-lg font-semibold text-gray-900 mb-4">Call Details</h2>
-            <div className="space-y-4">
-              <div className="p-4 bg-gray-50 rounded-lg">
-                <p className="text-sm text-gray-600">
-                  Customer information is now displayed in the Agent Assist panel on the right.
-                </p>
-              </div>
             </div>
           </div>
         </div>

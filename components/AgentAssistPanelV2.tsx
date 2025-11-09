@@ -14,6 +14,8 @@ export interface KBArticle {
   url?: string;
   confidence?: number;
   relevance?: number;
+  intent?: string; // Intent detection basis (e.g., "credit_card_block", "account_balance")
+  intentConfidence?: number; // Confidence of the intent detection
 }
 
 export interface TranscriptUtterance {
@@ -160,16 +162,26 @@ export default function AgentAssistPanelV2({
       try {
         const data = JSON.parse(event.data);
         if (data.articles && Array.isArray(data.articles)) {
+          // Attach intent information to articles
+          const articlesWithIntent = data.articles.map((article: KBArticle) => ({
+            ...article,
+            intent: data.intent || article.intent, // Use intent from event or article
+            intentConfidence: data.confidence || article.intentConfidence, // Use confidence from event or article
+          }));
+          
           setKbArticles(prev => {
             const existingIds = new Set(prev.map(a => a.id));
-            const newArticles = data.articles.filter((a: KBArticle) => !existingIds.has(a.id));
+            const newArticles = articlesWithIntent.filter((a: KBArticle) => !existingIds.has(a.id));
             return [...newArticles, ...prev];
           });
-          data.articles.forEach((article: KBArticle) => {
+          
+          articlesWithIntent.forEach((article: KBArticle) => {
             emitTelemetry?.('kb_suggestion_shown', {
               interaction_id: interactionId,
               article_id: article.id,
               confidence: article.confidence || article.relevance || 0,
+              intent: article.intent,
+              intentConfidence: article.intentConfidence,
               rank: 0,
               latency_ms: 1500,
             });
@@ -577,9 +589,16 @@ export default function AgentAssistPanelV2({
                         >
                           <div className="flex items-start justify-between mb-2">
                             <h4 className="text-sm font-semibold text-gray-900 flex-1">{article.title}</h4>
-                            <span className={`px-2 py-0.5 rounded text-xs font-medium ${getConfidenceColor(confidence)}`}>
-                              {formatConfidence(confidence)}
-                            </span>
+                            <div className="flex items-center gap-2">
+                              {article.intent && (
+                                <span className="px-2 py-0.5 bg-blue-50 text-blue-700 text-xs font-medium rounded" title={`Intent: ${article.intent}`}>
+                                  {article.intent.replace(/_/g, ' ')}
+                                </span>
+                              )}
+                              <span className={`px-2 py-0.5 rounded text-xs font-medium ${getConfidenceColor(confidence)}`}>
+                                {formatConfidence(confidence)}
+                              </span>
+                            </div>
                           </div>
                           {article.snippet && (
                             <p className="text-xs text-gray-600 mb-2 line-clamp-2">{article.snippet}</p>
