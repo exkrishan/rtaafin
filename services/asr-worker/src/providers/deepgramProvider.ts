@@ -1282,23 +1282,51 @@ export class DeepgramProvider implements AsrProvider {
         });
         console.info(`[DeepgramProvider] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
         
-        // CRITICAL FIX: Verify connection is ready, then attempt to send
-        // Strategy: Use Deepgram SDK's connection.send() directly - it should handle the underlying WebSocket
-        // We don't need to check socket.readyState if connection is ready
+        // CRITICAL FIX: Verify connection is ready, then wait for socket to be OPEN
+        // The Deepgram SDK's Open event can fire before the underlying WebSocket is fully OPEN
+        // We need to wait for socket.readyState === 1 before sending
         const connectionReady = stateToUse.isReady && !!stateToUse.connection;
         
         if (!connectionReady) {
           throw new Error(`Connection not ready for ${interactionId} (isReady: ${stateToUse.isReady}, hasConnection: ${!!stateToUse.connection})`);
         }
         
-        // Log socket state for debugging, but don't block on it
-        const socketReady = stateToUse.socket?.readyState === 1;
-        if (!socketReady && stateToUse.socket) {
-          console.debug(`[DeepgramProvider] Socket readyState is ${stateToUse.socket.readyState} for ${interactionId}, but connection is ready - proceeding with send`, {
-            seq,
-            socketReadyState: stateToUse.socket.readyState,
-            note: 'Using Deepgram SDK connection.send() which should handle this',
+        // Wait for underlying WebSocket to be OPEN (readyState === 1)
+        // This addresses the race condition where Open event fires but socket is still CONNECTING
+        if (stateToUse.socket && stateToUse.socket.readyState !== 1) {
+          console.debug(`[DeepgramProvider] ⏳ Waiting for socket to be OPEN for ${interactionId} (current state: ${stateToUse.socket.readyState})`);
+          await new Promise<void>((resolve, reject) => {
+            const timeout = setTimeout(() => {
+              clearInterval(checkSocket);
+              reject(new Error(`Socket did not become ready within 3000ms for ${interactionId} (socketReadyState: ${stateToUse.socket?.readyState}, isReady: ${stateToUse.isReady})`));
+            }, 3000);
+            
+            const checkSocket = setInterval(() => {
+              // Re-fetch state to ensure we have the latest
+              const currentState = this.connections.get(interactionId);
+              if (!currentState || !currentState.socket) {
+                clearInterval(checkSocket);
+                clearTimeout(timeout);
+                reject(new Error(`Connection or socket was deleted while waiting for ${interactionId}`));
+                return;
+              }
+              
+              if (currentState.socket.readyState === 1) {
+                clearInterval(checkSocket);
+                clearTimeout(timeout);
+                console.debug(`[DeepgramProvider] ✅ Socket is now OPEN for ${interactionId}`);
+                resolve();
+              }
+            }, 50); // Check every 50ms
           });
+          
+          // Re-fetch state after wait (socket might have changed)
+          const stateAfterWait = this.connections.get(interactionId);
+          if (!stateAfterWait || !stateAfterWait.isReady || !stateAfterWait.connection) {
+            throw new Error(`Connection invalid after socket wait for ${interactionId}`);
+          }
+          // Update stateToUse to use the latest state
+          Object.assign(stateToUse, stateAfterWait);
         }
         
         try {
@@ -1311,18 +1339,28 @@ export class DeepgramProvider implements AsrProvider {
             // Flush queue first, then send current chunk
             for (const queuedAudio of queue) {
               try {
-                stateToUse.connection.send(queuedAudio.audio instanceof Uint8Array ? queuedAudio.audio : new Uint8Array(queuedAudio.audio));
-                this.metrics.audioChunksSent++;
-                stateToUse.lastSendTime = Date.now();
-                console.debug(`[DeepgramProvider] ✅ Flushed queued chunk seq ${queuedAudio.seq} for ${interactionId}`);
+                // Verify socket is still ready before flushing
+                if (stateToUse.socket?.readyState === 1) {
+                  stateToUse.connection.send(queuedAudio.audio instanceof Uint8Array ? queuedAudio.audio : new Uint8Array(queuedAudio.audio));
+                  this.metrics.audioChunksSent++;
+                  stateToUse.lastSendTime = Date.now();
+                  console.debug(`[DeepgramProvider] ✅ Flushed queued chunk seq ${queuedAudio.seq} for ${interactionId}`);
+                } else {
+                  console.warn(`[DeepgramProvider] ⚠️ Skipping queued chunk seq ${queuedAudio.seq} - socket not ready (readyState: ${stateToUse.socket?.readyState})`);
+                }
               } catch (error: any) {
                 console.error(`[DeepgramProvider] ❌ Failed to flush queued chunk seq ${queuedAudio.seq}:`, error);
               }
             }
           }
           
+          // Verify socket is ready one more time before sending
+          if (stateToUse.socket?.readyState !== 1) {
+            throw new Error(`Socket not ready for ${interactionId} (socketReadyState: ${stateToUse.socket?.readyState}, isReady: ${stateToUse.isReady})`);
+          }
+          
           // Send audio via Deepgram SDK connection.send()
-          // The SDK should handle the underlying WebSocket state
+          // Socket is confirmed to be OPEN (readyState === 1) at this point
           stateToUse.connection.send(audioData);
           const sendDuration = Date.now() - sendStartTime;
           
