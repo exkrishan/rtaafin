@@ -1,337 +1,136 @@
-# 🔍 Exotel Connection Debugging Guide
+# Exotel Connection Debugging Guide
 
 ## Problem
-Exotel call started but **no logs appear** in Render. Service is running but WebSocket connection isn't being established.
+- **ASR Worker** is receiving JSON errors (old messages from Redis)
+- **Ingest Service** shows NO logs when calls are active
+- **Frontend** shows empty transcripts
 
----
+## Root Cause Analysis
 
-## ✅ Quick Checks
+### The Issue
+Exotel is **NOT connecting** to the Ingest service. If Exotel were connecting, we would see:
+- `[server] HTTP request received` (for WebSocket upgrade)
+- `[server] WebSocket upgrade request received`
+- `[exotel] New Exotel WebSocket connection`
 
-### 1. Verify Exotel WebSocket URL Configuration
+Since we see **NONE** of these logs, Exotel is not attempting to connect.
 
-In Exotel dashboard, ensure:
-- **WebSocket URL:** `wss://rtaa-ingest.onrender.com/v1/ingest`
-- **Protocol:** `wss://` (secure WebSocket)
-- **Path:** `/v1/ingest` (must match exactly)
+### Why This Happens
+1. **Exotel Stream URL Not Configured**: Exotel needs to be configured with the WebSocket stream URL
+2. **Wrong URL**: Exotel might be pointing to a different service/URL
+3. **Network/Firewall**: Connection might be blocked
+4. **Exotel Webhook Configuration**: The webhook/stream URL might not be set in Exotel dashboard
 
-### 2. Check Render Environment Variables
+## Required Exotel Configuration
 
-Go to Render Dashboard → Environment tab, verify:
-- ✅ `SUPPORT_EXOTEL=true` is set
-- ✅ `REDIS_URL` is configured
-- ✅ `PUBSUB_ADAPTER=redis_streams`
-
-### 3. Test WebSocket Endpoint Manually
-
-```bash
-# Test if WebSocket endpoint is accessible
-curl -i -N \
-  -H "Connection: Upgrade" \
-  -H "Upgrade: websocket" \
-  -H "Sec-WebSocket-Version: 13" \
-  -H "Sec-WebSocket-Key: test" \
-  https://rtaa-ingest.onrender.com/v1/ingest
+### WebSocket Stream URL
+Exotel needs to be configured to stream audio to:
+```
+wss://rtaa-ingest.onrender.com/v1/ingest
 ```
 
-**Expected:** HTTP 101 Switching Protocols (if working)
-
----
-
-## 📋 What to Look For in Logs
-
-After the enhanced logging is deployed, you should see:
-
-### ✅ Successful Connection
+**OR** (if using HTTP instead of WSS):
 ```
-[server] WebSocket upgrade request received { url: '/v1/ingest', ... }
-[server] ✅ Exotel WebSocket upgrade request accepted
-[exotel] New Exotel WebSocket connection
-[exotel] Processing binary frames with default config
-[exotel] Published binary audio frame { seq: 100, ... }
+ws://rtaa-ingest.onrender.com/v1/ingest
 ```
 
-### ❌ Connection Rejected
-```
-[server] WebSocket upgrade request received { ... }
-[server] ❌ Authentication failed: ...
-```
+### How to Configure in Exotel
+1. Log into Exotel Dashboard
+2. Go to **Settings** → **Webhooks** or **Streaming**
+3. Find **Media Stream URL** or **WebSocket Stream URL**
+4. Set it to: `wss://rtaa-ingest.onrender.com/v1/ingest`
+5. Save configuration
 
-### ⚠️ No Connection Attempt
-- **No logs at all** = Exotel isn't connecting
-- Check Exotel dashboard configuration
-- Verify WebSocket URL is correct
-- Check Exotel's connection logs (if available)
+### Authentication
+The Ingest service accepts Exotel connections with:
+- **IP Whitelisting** (if configured)
+- **Basic Auth** (if configured)
+- **No Auth** (if `SUPPORT_EXOTEL=true` - currently enabled)
 
----
+## Verification Steps
 
-## 🔧 Common Issues
-
-### Issue 1: Wrong WebSocket URL
-**Symptom:** No connection logs at all
-
-**Solution:**
-- Verify URL in Exotel: `wss://rtaa-ingest.onrender.com/v1/ingest`
-- Check for typos (http vs https, wrong path)
-- Ensure no trailing slash
-
-### Issue 2: SUPPORT_EXOTEL Not Set
-**Symptom:** Connection rejected with 401
-
-**Solution:**
-- Set `SUPPORT_EXOTEL=true` in Render
-- Redeploy service
-- Check logs show `supportExotel: true`
-
-### Issue 3: Firewall/Network Issue
-**Symptom:** Connection timeout
-
-**Solution:**
-- Check if Exotel's IP is whitelisted (if required)
-- Verify Render service is accessible
-- Test health endpoint: `curl https://rtaa-ingest.onrender.com/health`
-
-### Issue 4: Exotel Not Sending Connection
-**Symptom:** No logs, service is healthy
-
-**Solution:**
-- Check Exotel dashboard for connection errors
-- Verify Exotel's WebSocket configuration
-- Check Exotel's logs/events for connection attempts
-
----
-
-## 🧪 Step-by-Step Debugging
-
-### Step 1: Verify Service is Running
+### 1. Check Ingest Service is Reachable
 ```bash
 curl https://rtaa-ingest.onrender.com/health
 ```
-Should return: `{"status":"healthy",...}`
 
-### Step 2: Check Render Logs
-1. Go to Render Dashboard
-2. Select `rtaa-ingest` service
-3. Click "Logs" tab
-4. Look for:
-   - `✅ Ingestion server listening on port 10000`
-   - `supportExotel: true`
-   - Any `WebSocket upgrade request` messages
+Expected response:
+```json
+{"status":"ok","service":"ingest","pubsub":true,"timestamp":"..."}
+```
 
-### Step 3: Test WebSocket Manually
-Use `wscat` or browser console to test:
+### 2. Check WebSocket Endpoint
 ```bash
+# Test WebSocket connection (requires wscat or similar)
 wscat -c wss://rtaa-ingest.onrender.com/v1/ingest
 ```
 
-### Step 4: Check Exotel Configuration
-- Verify WebSocket URL in Exotel dashboard
-- Check Exotel's connection logs
-- Verify Exotel is actually attempting to connect
+### 3. Check Exotel Dashboard
+- Verify the **Stream URL** is set correctly
+- Check if there are any connection errors in Exotel logs
+- Verify the call is actually using the stream/webhook
 
-### Step 5: Review Enhanced Logs
-After redeploy, check for:
-- `[server] WebSocket upgrade request received` - Shows connection attempt
-- `[server] ✅ Exotel WebSocket upgrade request accepted` - Connection accepted
-- `[exotel] New Exotel WebSocket connection` - Handler initialized
-
----
-
-## 📊 Expected Log Flow
-
-### Normal Flow
+### 4. Monitor Ingest Service Logs
+After configuring Exotel, make a test call and look for:
 ```
-1. [server] ✅ Ingestion server listening on port 10000
-2. [server] supportExotel: true
-3. [server] WebSocket upgrade request received { url: '/v1/ingest', ... }
-4. [server] ✅ Exotel WebSocket upgrade request accepted
-5. [exotel] New Exotel WebSocket connection
-6. [exotel] Processing binary frames with default config
-7. [exotel] Published binary audio frame { seq: 100, ... }
+[server] HTTP request received
+[server] WebSocket upgrade request received
+[exotel] New Exotel WebSocket connection
+[exotel] Start event received
+[exotel] 🔍 Raw media event received
 ```
 
-### If No Logs Appear
-- Exotel isn't connecting to the WebSocket endpoint
-- Check Exotel dashboard configuration
-- Verify WebSocket URL is correct
-- Check Exotel's connection logs
+## Current Status
 
----
+### What's Working
+- ✅ Ingest service is running and healthy
+- ✅ ASR Worker is running and processing messages
+- ✅ Frontend is running and consuming transcripts
+- ✅ Redis pub/sub is connected
 
-## 🔗 Related Documentation
+### What's NOT Working
+- ❌ Exotel is not connecting to Ingest service
+- ❌ No audio is being ingested (hence empty transcripts)
+- ❌ Old messages in Redis contain JSON instead of audio (from previous misconfiguration)
 
-- `EXOTEL_WEBSOCKET_URL.md` - WebSocket URL configuration
-- `FIX_EXOTEL_CONNECTION.md` - Enabling Exotel support
-- `WEBSOCKET_TESTING_GUIDE.md` - Testing WebSocket connections
+## Next Steps
 
----
+1. **Configure Exotel Stream URL**:
+   - Set Exotel's media stream URL to: `wss://rtaa-ingest.onrender.com/v1/ingest`
+   - Save and test with a new call
 
-**After enhanced logging is deployed, check Render logs for detailed connection information!**
+2. **Verify Connection**:
+   - Make a test call
+   - Check Ingest service logs for connection attempts
+   - Should see `[server] HTTP request received` and `[exotel] New Exotel WebSocket connection`
 
+3. **Monitor for Errors**:
+   - Once connected, check for JSON errors in Ingest logs
+   - The validation code will catch if Exotel sends JSON instead of audio
+   - Fix any protocol mismatches
 
-## Problem
-Exotel call started but **no logs appear** in Render. Service is running but WebSocket connection isn't being established.
+4. **Clear Old Messages** (Optional):
+   - Old messages in Redis will continue to error
+   - They won't affect new calls once Exotel is properly configured
+   - Can be cleared manually if needed
 
----
+## Expected Logs After Fix
 
-## ✅ Quick Checks
+When Exotel connects successfully, you should see:
 
-### 1. Verify Exotel WebSocket URL Configuration
-
-In Exotel dashboard, ensure:
-- **WebSocket URL:** `wss://rtaa-ingest.onrender.com/v1/ingest`
-- **Protocol:** `wss://` (secure WebSocket)
-- **Path:** `/v1/ingest` (must match exactly)
-
-### 2. Check Render Environment Variables
-
-Go to Render Dashboard → Environment tab, verify:
-- ✅ `SUPPORT_EXOTEL=true` is set
-- ✅ `REDIS_URL` is configured
-- ✅ `PUBSUB_ADAPTER=redis_streams`
-
-### 3. Test WebSocket Endpoint Manually
-
-```bash
-# Test if WebSocket endpoint is accessible
-curl -i -N \
-  -H "Connection: Upgrade" \
-  -H "Upgrade: websocket" \
-  -H "Sec-WebSocket-Version: 13" \
-  -H "Sec-WebSocket-Key: test" \
-  https://rtaa-ingest.onrender.com/v1/ingest
 ```
-
-**Expected:** HTTP 101 Switching Protocols (if working)
-
----
-
-## 📋 What to Look For in Logs
-
-After the enhanced logging is deployed, you should see:
-
-### ✅ Successful Connection
-```
-[server] WebSocket upgrade request received { url: '/v1/ingest', ... }
+[server] HTTP request received { method: 'GET', url: '/v1/ingest', upgrade: 'websocket', ... }
+[server] WebSocket upgrade request received { ... }
 [server] ✅ Exotel WebSocket upgrade request accepted
 [exotel] New Exotel WebSocket connection
-[exotel] Processing binary frames with default config
-[exotel] Published binary audio frame { seq: 100, ... }
+[exotel] Start event received { stream_sid: '...', call_sid: '...', ... }
+[exotel] 🔍 Raw media event received { ... }
+[exotel] ✅ First audio frame decoded successfully { ... }
 ```
 
-### ❌ Connection Rejected
+If you see JSON errors instead:
 ```
-[server] WebSocket upgrade request received { ... }
-[server] ❌ Authentication failed: ...
-```
-
-### ⚠️ No Connection Attempt
-- **No logs at all** = Exotel isn't connecting
-- Check Exotel dashboard configuration
-- Verify WebSocket URL is correct
-- Check Exotel's connection logs (if available)
-
----
-
-## 🔧 Common Issues
-
-### Issue 1: Wrong WebSocket URL
-**Symptom:** No connection logs at all
-
-**Solution:**
-- Verify URL in Exotel: `wss://rtaa-ingest.onrender.com/v1/ingest`
-- Check for typos (http vs https, wrong path)
-- Ensure no trailing slash
-
-### Issue 2: SUPPORT_EXOTEL Not Set
-**Symptom:** Connection rejected with 401
-
-**Solution:**
-- Set `SUPPORT_EXOTEL=true` in Render
-- Redeploy service
-- Check logs show `supportExotel: true`
-
-### Issue 3: Firewall/Network Issue
-**Symptom:** Connection timeout
-
-**Solution:**
-- Check if Exotel's IP is whitelisted (if required)
-- Verify Render service is accessible
-- Test health endpoint: `curl https://rtaa-ingest.onrender.com/health`
-
-### Issue 4: Exotel Not Sending Connection
-**Symptom:** No logs, service is healthy
-
-**Solution:**
-- Check Exotel dashboard for connection errors
-- Verify Exotel's WebSocket configuration
-- Check Exotel's logs/events for connection attempts
-
----
-
-## 🧪 Step-by-Step Debugging
-
-### Step 1: Verify Service is Running
-```bash
-curl https://rtaa-ingest.onrender.com/health
-```
-Should return: `{"status":"healthy",...}`
-
-### Step 2: Check Render Logs
-1. Go to Render Dashboard
-2. Select `rtaa-ingest` service
-3. Click "Logs" tab
-4. Look for:
-   - `✅ Ingestion server listening on port 10000`
-   - `supportExotel: true`
-   - Any `WebSocket upgrade request` messages
-
-### Step 3: Test WebSocket Manually
-Use `wscat` or browser console to test:
-```bash
-wscat -c wss://rtaa-ingest.onrender.com/v1/ingest
+[exotel] ❌ CRITICAL: Decoded audio buffer contains JSON text!
 ```
 
-### Step 4: Check Exotel Configuration
-- Verify WebSocket URL in Exotel dashboard
-- Check Exotel's connection logs
-- Verify Exotel is actually attempting to connect
-
-### Step 5: Review Enhanced Logs
-After redeploy, check for:
-- `[server] WebSocket upgrade request received` - Shows connection attempt
-- `[server] ✅ Exotel WebSocket upgrade request accepted` - Connection accepted
-- `[exotel] New Exotel WebSocket connection` - Handler initialized
-
----
-
-## 📊 Expected Log Flow
-
-### Normal Flow
-```
-1. [server] ✅ Ingestion server listening on port 10000
-2. [server] supportExotel: true
-3. [server] WebSocket upgrade request received { url: '/v1/ingest', ... }
-4. [server] ✅ Exotel WebSocket upgrade request accepted
-5. [exotel] New Exotel WebSocket connection
-6. [exotel] Processing binary frames with default config
-7. [exotel] Published binary audio frame { seq: 100, ... }
-```
-
-### If No Logs Appear
-- Exotel isn't connecting to the WebSocket endpoint
-- Check Exotel dashboard configuration
-- Verify WebSocket URL is correct
-- Check Exotel's connection logs
-
----
-
-## 🔗 Related Documentation
-
-- `EXOTEL_WEBSOCKET_URL.md` - WebSocket URL configuration
-- `FIX_EXOTEL_CONNECTION.md` - Enabling Exotel support
-- `WEBSOCKET_TESTING_GUIDE.md` - Testing WebSocket connections
-
----
-
-**After enhanced logging is deployed, check Render logs for detailed connection information!**
-
+This means Exotel is sending JSON in the payload - we'll need to fix the Exotel handler to extract audio correctly.

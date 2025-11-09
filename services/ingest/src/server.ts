@@ -157,6 +157,26 @@ class IngestionServer {
     // ============================================
     // HTTP Routes
     // ============================================
+    // Log ALL HTTP requests for debugging
+    this.server.on('request', (req: any, res: any) => {
+      // Log all incoming requests (but only once per request to avoid spam)
+      if (!req._logged) {
+        console.info('[server] HTTP request received', {
+          method: req.method,
+          url: req.url,
+          headers: {
+            'user-agent': req.headers['user-agent']?.substring(0, 50) || 'unknown',
+            'upgrade': req.headers.upgrade || 'none',
+            'connection': req.headers.connection || 'none',
+            'authorization': req.headers.authorization ? 'present' : 'missing',
+            'origin': req.headers.origin || 'none',
+          },
+          remoteAddress: req.socket?.remoteAddress || 'unknown',
+        });
+        req._logged = true;
+      }
+    });
+    
     // Health check endpoint (required for cloud deployment)
     this.server.on('request', (req: any, res: any) => {
       if (req.url === '/health') {
