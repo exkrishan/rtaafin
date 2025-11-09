@@ -325,17 +325,25 @@ export class ExotelHandler {
 
       // Publish to pub/sub
       this.pubsub.publish(frame).then(() => {
-        // Log every 10th frame
-        if (state.seq % 10 === 0) {
-          console.info('[exotel] Published audio frame', {
+        // Log first frame and every 10th frame
+        if (state.seq === 1 || state.seq % 10 === 0) {
+          console.info('[exotel] ✅ Published audio frame', {
             stream_sid: state.streamSid,
             call_sid: state.callSid,
             seq: state.seq,
             chunk: media.chunk,
+            interaction_id: frame.interaction_id,
+            tenant_id: frame.tenant_id,
+            audio_size: frame.audio.length,
           });
         }
       }).catch((error) => {
-        console.error('[exotel] Failed to publish frame:', error);
+        console.error('[exotel] ❌ CRITICAL: Failed to publish frame:', {
+          error: error.message,
+          stream_sid: state.streamSid,
+          call_sid: state.callSid,
+          seq: state.seq,
+        });
       });
     } catch (error: any) {
       console.error('[exotel] ❌ Failed to decode base64 audio payload:', {

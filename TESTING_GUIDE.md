@@ -1,280 +1,265 @@
-# 🧪 Complete Testing Guide - Step by Step
+# 🧪 Complete Testing Guide - Deepgram Integration
 
-## Prerequisites
-
-1. **Next.js Running Locally:**
-   ```bash
-   # Check if running
-   curl http://localhost:3000/api/health
-   
-   # If not running, start it:
-   ./start-dev.sh
-   # or
-   npm run dev
-   ```
-
-2. **Transcript Consumer Active:**
-   ```bash
-   curl http://localhost:3000/api/transcripts/status
-   ```
-   Should show: `"isRunning": true`
+**Date:** 2025-11-09  
+**Status:** All fixes deployed ✅
 
 ---
 
-## Step 1: Test UI Locally (Verify UI Works)
+## Quick Test (Automated)
 
-1. **Open Test UI:**
-   ```
-   http://localhost:3000/test-transcripts
-   ```
+### Run the Test Script
 
-2. **Test Manual Injection:**
-   - Enter interaction ID: `test-123`
-   - Click: **"Send Test Transcript"** (green button)
-   - ✅ Transcript should appear immediately
-   - This confirms the UI works
-
----
-
-## Step 2: Make a NEW Call from Exotel
-
-⚠️ **IMPORTANT:** Make a **NEW** call, not the old one!
-
-- Start a fresh call from Exotel
-- Get the **NEW interaction ID** from:
-  - Exotel dashboard, OR
-  - Render ASR worker logs (look for new `call-*` ID)
-- Example: `call-1762531234567` (new ID, not `call-1762530768573`)
-
-**Why NEW call?**
-- Old call (`call-1762530768573`) has cached empty state
-- New call will use fresh mock provider state with the fix
-
----
-
-## Step 3: Subscribe in Test UI
-
-1. **Open Test UI:**
-   ```
-   http://localhost:3000/test-transcripts
-   ```
-
-2. **Enter the NEW Interaction ID:**
-   - Paste the interaction ID from Step 2
-   - Example: `call-1762531234567`
-
-3. **Click: "Subscribe to Transcripts"** (blue button)
-   - Status should show: `✅ Subscribed to transcripts`
-   - Green "Subscribed" badge should appear at top right
-
----
-
-## Step 4: Watch for Transcripts
-
-- Transcripts should appear **automatically** in the list below
-- Should see **actual text** (not empty or `[EMPTY]`)
-- Watch the count increase: `Transcripts (1)`, `Transcripts (2)`, etc.
-- Each transcript shows:
-  - Type: `partial` or `final`
-  - Sequence number
-  - **Text content** (should have words!)
-  - Timestamp
-
----
-
-## Step 5: Verify in Logs
-
-### Render ASR Worker Logs
-
-**✅ GOOD (New Call):**
+```bash
+cd /Users/kirti.krishnan/Desktop/Projects/rtaafin
+node test-deepgram-integration.js
 ```
-[ASRWorker] Published partial transcript {
-  interaction_id: 'call-1762531234567',
-  text: 'Hello',
-  textLength: 5,
-  seq: 1,
-  provider: 'mock'
+
+### Expected Results
+
+**✅ Test 1: Health Endpoints**
+- Both services should return `status: "healthy"` or `status: "ok"`
+- Ingest service should show `pubsub: true`
+- ASR Worker should show `provider: "deepgram"`
+
+**✅ Test 2: WebSocket Connection**
+- Connection should open successfully
+- Start event should be sent
+- 5 media chunks (100ms total audio) should be sent
+- Stop event should be sent
+- Connection should close cleanly
+
+**✅ Test 3: ASR Worker Metrics (CRITICAL)**
+After 10-30 seconds, metrics should show:
+```json
+{
+  "audioChunksSent": 5,           // ✅ Should be 5
+  "connectionsCreated": 1,        // ✅ Should be 1
+  "transcriptsReceived": 0-5,     // ✅ May be 0-5 (depends on audio content)
+  "errors": 0,                    // ✅ Should be 0
+  "averageChunkSizeMs": "20ms"    // ✅ Should be ~20ms
 }
 ```
 
-**❌ BAD (Old Call - Expected):**
+---
+
+## Manual Testing Steps
+
+### Step 1: Verify Services Are Live
+
+```bash
+# Check Ingest Service
+curl https://rtaa-ingest.onrender.com/health | jq
+
+# Check ASR Worker
+curl https://rtaa-asr-worker.onrender.com/health | jq
 ```
-[ASRWorker] Published partial transcript {
-  interaction_id: 'call-1762530768573',
-  text: '',
-  textLength: 0,
-  seq: 4
+
+**Expected:**
+- Both return `200 OK`
+- Status is `healthy` or `ok`
+
+### Step 2: Run Integration Test
+
+```bash
+cd /Users/kirti.krishnan/Desktop/Projects/rtaafin
+node test-deepgram-integration.js
+```
+
+### Step 3: Wait and Check Metrics
+
+```bash
+# Wait 15 seconds
+sleep 15
+
+# Check metrics
+curl -s https://rtaa-asr-worker.onrender.com/health | jq '.deepgramMetrics'
+```
+
+**Expected:**
+- `audioChunksSent` should be **5** (not 0, not null)
+- `connectionsCreated` should be **1** (not 0, not null)
+- `transcriptsReceived` may be 0-5 (depends on audio content)
+
+### Step 4: Check Render Logs
+
+**ASR Worker Logs - Look for:**
+```
+[RedisStreamsAdapter] ✅ Reset existing consumer group asr-worker for audio_stream to position 0
+[RedisStreamsAdapter] 🔍 First read for audio_stream, reading from beginning (position: 0)
+[RedisStreamsAdapter] ✅ First read completed for audio_stream, found 5 message(s)
+[RedisStreamsAdapter] ✅ Processed 5 message(s) from audio_stream
+[ASRWorker] 📥 Received audio chunk: { interaction_id: '...', seq: 1, ... }
+[DeepgramProvider] ✅ Connection opened for ...
+[DeepgramProvider] 📤 Sending audio chunk: { interactionId: '...', seq: 1, ... }
+```
+
+**Ingest Service Logs - Look for:**
+```
+[pubsub] ✅ Pub/Sub adapter initialized: { adapter: 'redis_streams', topic: 'audio_stream' }
+[exotel] Published audio frame
+[server] Published audio frame
+```
+
+---
+
+## Success Criteria
+
+### ✅ Test 3 is PASSING if:
+
+1. **Metrics are non-zero:**
+   - `audioChunksSent >= 5`
+   - `connectionsCreated >= 1`
+   - `transcriptsReceived >= 0` (may be 0 for silence)
+
+2. **ASR Worker logs show:**
+   - Consumer group reset happening
+   - First read finding messages
+   - Audio chunks being received
+   - Deepgram connection being created
+
+3. **No errors in logs:**
+   - No Redis connection errors
+   - No consumer group errors
+   - No Deepgram connection errors
+
+---
+
+## Troubleshooting
+
+### Issue: Metrics Still Zero
+
+**Check 1: Consumer Group Reset**
+Look for this in ASR Worker logs:
+```
+[RedisStreamsAdapter] ✅ Reset existing consumer group asr-worker for audio_stream to position 0
+```
+
+**If missing:**
+- Consumer group might not exist yet (first time)
+- Or reset might be failing silently
+
+**Check 2: First Read Finding Messages**
+Look for this in ASR Worker logs:
+```
+[RedisStreamsAdapter] ✅ First read completed for audio_stream, found X message(s)
+```
+
+**If X is 0:**
+- Messages might be published after first read completes
+- Timing issue - try running test again
+
+**Check 3: Messages Being Published**
+Look for this in Ingest Service logs:
+```
+[exotel] Published audio frame
+```
+
+**If missing:**
+- Ingest service might not be publishing
+- Check Ingest service health
+
+### Issue: Deepgram Connection Errors
+
+**Check logs for:**
+```
+[DeepgramProvider] ❌ Cannot send audio: socket not ready
+[DeepgramProvider] ❌ CRITICAL: Connection closed due to timeout (1011)
+```
+
+**If present:**
+- Deepgram connection issues (separate from Redis Streams fix)
+- Check Deepgram API key
+- Check network connectivity
+
+### Issue: No Logs at All
+
+**Check:**
+1. Services are actually deployed and running
+2. Logs are being streamed in Render dashboard
+3. Services are using latest code (check deployment timestamps)
+
+---
+
+## Advanced Testing
+
+### Test with Real Exotel Stream
+
+1. Configure Exotel to stream to: `wss://rtaa-ingest.onrender.com/v1/ingest`
+2. Make a test call
+3. Monitor ASR Worker logs for:
+   - Audio chunks being received
+   - Deepgram transcripts being generated
+   - Transcripts being published
+
+### Test Multiple Calls
+
+1. Run test script multiple times
+2. Check that each call gets processed
+3. Verify metrics accumulate correctly
+4. Check for any memory leaks or connection issues
+
+---
+
+## What Success Looks Like
+
+### Complete Success Flow:
+
+1. **Test script sends audio** ✅
+2. **Ingest service receives and publishes** ✅
+3. **ASR Worker consumer group resets to position 0** ✅
+4. **ASR Worker first read finds messages** ✅
+5. **ASR Worker processes audio chunks** ✅
+6. **Deepgram connection created** ✅
+7. **Audio sent to Deepgram** ✅
+8. **Transcripts received (if audio has speech)** ✅
+9. **Metrics updated** ✅
+
+### Final Metrics Should Show:
+
+```json
+{
+  "audioChunksSent": 5,
+  "connectionsCreated": 1,
+  "transcriptsReceived": 0-5,
+  "errors": 0,
+  "averageChunkSizeMs": "20ms"
 }
-⚠️ WARNING: Published transcript with EMPTY text!
-```
-
-### Next.js Terminal Logs
-
-**✅ GOOD:**
-```
-[TranscriptConsumer] Received transcript message {
-  interaction_id: 'call-1762531234567',
-  type: 'partial',
-  seq: 1,
-  textLength: 5,
-  textPreview: 'Hello'
-}
-[TranscriptConsumer] ✅ Forwarded transcript successfully {
-  intent: 'credit_card_issue',
-  articlesCount: 3
-}
-```
-
-**❌ BAD (Old Call):**
-```
-[TranscriptConsumer] ⚠️ Received transcript with EMPTY text (allowing through for debugging)
-[TranscriptConsumer] Received transcript message {
-  textLength: 0,
-  textPreview: ''
-}
-```
-
-### Browser Console (F12)
-
-**✅ GOOD:**
-```
-[TestUI] Received SSE event: { type: 'transcript_line', text: 'Hello', seq: 1 }
 ```
 
 ---
 
-## ✅ Success Indicators
+## Next Steps After Successful Test
 
-### In Render ASR Worker:
-- ✅ `text: 'Hello'` (actual text, not empty)
-- ✅ `textLength: 5` (or higher)
-- ✅ No `⚠️ WARNING: Published transcript with EMPTY text!` for new calls
-
-### In Next.js Terminal:
-- ✅ `textLength: 5` (or higher)
-- ✅ `✅ Forwarded transcript successfully`
-- ✅ `intent: 'credit_card_issue'` (or similar)
-- ✅ `articlesCount: 3` (or similar)
-
-### In Test UI:
-- ✅ Transcripts appear in the list
-- ✅ Text shows actual words: `"Hello"`, `"Hello, I"`, etc.
-- ✅ Count increases: `Transcripts (1)`, `Transcripts (2)`, etc.
-- ✅ Green "Subscribed" badge visible
+1. ✅ **Verify end-to-end flow** - Test with real Exotel stream
+2. ✅ **Monitor production** - Watch for any issues in real calls
+3. ✅ **Check metrics** - Ensure metrics are being collected correctly
+4. ✅ **Review logs** - Look for any warnings or errors
 
 ---
 
-## ❌ Troubleshooting
+## Quick Reference
 
-### No Transcripts Appearing in UI
+**Test Command:**
+```bash
+node test-deepgram-integration.js
+```
 
-1. **Check Transcript Consumer:**
-   ```bash
-   curl http://localhost:3000/api/transcripts/status
-   ```
-   Should show: `"isRunning": true`
+**Check Metrics:**
+```bash
+curl -s https://rtaa-asr-worker.onrender.com/health | jq '.deepgramMetrics'
+```
 
-2. **Check Subscription:**
-   - Look for green "Subscribed" badge in UI
-   - Check browser console (F12) for SSE connection
-   - Should see: `[TestUI] Received SSE event`
+**Check Health:**
+```bash
+curl -s https://rtaa-ingest.onrender.com/health | jq
+curl -s https://rtaa-asr-worker.onrender.com/health | jq
+```
 
-3. **Check Next.js Logs:**
-   - Should see: `[TranscriptConsumer] Received transcript message`
-   - Should see: `[TranscriptConsumer] ✅ Forwarded transcript successfully`
-
-4. **Check ASR Worker:**
-   - Check Render ASR worker logs
-   - Should see: `[ASRWorker] Published partial transcript`
-   - Verify it's a **NEW call** (not old one)
-
-5. **Verify It's a NEW Call:**
-   - Old call (`call-1762530768573`) will show empty text
-   - Need a **fresh call** to test the fix
-
-### Still Seeing Empty Text
-
-- **If it's the old call:** This is expected - make a NEW call
-- **If it's a new call:** Check Render logs for:
-  - `⚠️ WARNING: Published transcript with EMPTY text!`
-  - `[MockProvider] ⚠️ CRITICAL: Generated EMPTY text!`
-  - This will help debug the mock provider
-
-### UI Not Loading
-
-- Check Next.js is running: `curl http://localhost:3000/api/health`
-- Check browser console for errors
-- Try refreshing the page
+**Expected Wait Time:**
+- 10-30 seconds after sending audio for metrics to update
+- First read happens immediately on subscription
+- Deepgram connection takes 500-1000ms
 
 ---
 
-## 🎯 Quick Test Checklist
-
-- [ ] Next.js running on port 3000
-- [ ] Test UI opens: `http://localhost:3000/test-transcripts`
-- [ ] "Send Test Transcript" works (UI verified)
-- [ ] Made a **NEW** call from Exotel
-- [ ] Got new interaction ID
-- [ ] Subscribed to new interaction ID in UI
-- [ ] Transcripts appear with actual text
-- [ ] Render logs show `textLength > 0` for new call
-- [ ] Next.js logs show successful forwarding
-
----
-
-## 📞 Support
-
-If issues persist:
-1. Check all logs (Render, Next.js, Browser console)
-2. Verify it's a NEW call (not old cached one)
-3. Check transcript consumer status
-4. Verify ASR worker is processing audio
-
----
-
-**🎉 Ready to test! Follow the steps above and you should see transcripts with text!**
-
-   - Old call (`call-1762530768573`) will show empty text
-   - Need a **fresh call** to test the fix
-
-### Still Seeing Empty Text
-
-- **If it's the old call:** This is expected - make a NEW call
-- **If it's a new call:** Check Render logs for:
-  - `⚠️ WARNING: Published transcript with EMPTY text!`
-  - `[MockProvider] ⚠️ CRITICAL: Generated EMPTY text!`
-  - This will help debug the mock provider
-
-### UI Not Loading
-
-- Check Next.js is running: `curl http://localhost:3000/api/health`
-- Check browser console for errors
-- Try refreshing the page
-
----
-
-## 🎯 Quick Test Checklist
-
-- [ ] Next.js running on port 3000
-- [ ] Test UI opens: `http://localhost:3000/test-transcripts`
-- [ ] "Send Test Transcript" works (UI verified)
-- [ ] Made a **NEW** call from Exotel
-- [ ] Got new interaction ID
-- [ ] Subscribed to new interaction ID in UI
-- [ ] Transcripts appear with actual text
-- [ ] Render logs show `textLength > 0` for new call
-- [ ] Next.js logs show successful forwarding
-
----
-
-## 📞 Support
-
-If issues persist:
-1. Check all logs (Render, Next.js, Browser console)
-2. Verify it's a NEW call (not old cached one)
-3. Check transcript consumer status
-4. Verify ASR worker is processing audio
-
----
-
-**🎉 Ready to test! Follow the steps above and you should see transcripts with text!**
+**Status:** Ready for testing! 🚀

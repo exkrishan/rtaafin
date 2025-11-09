@@ -335,8 +335,12 @@ export class RedisStreamsAdapter implements PubSubAdapter {
 
     this.subscriptions.set(id, subscription);
 
+    console.info(`[RedisStreamsAdapter] ✅ Subscription created for topic: ${topic}, consumerGroup: ${this.consumerGroup}, consumerName: ${subscription.consumerName}`);
+
     // Start consuming messages
     this.startConsumer(subscription);
+    
+    console.info(`[RedisStreamsAdapter] 🚀 Consumer started for topic: ${topic}`);
 
     return {
       id,
@@ -348,6 +352,13 @@ export class RedisStreamsAdapter implements PubSubAdapter {
   }
 
   private async ensureConsumerGroup(topic: string, groupName: string): Promise<void> {
+    console.info(`[RedisStreamsAdapter] 🔧 Ensuring consumer group exists: ${groupName} for topic: ${topic}`);
+    
+    if (!this.redis) {
+      console.error(`[RedisStreamsAdapter] ❌ CRITICAL: Redis client is null when ensuring consumer group for ${topic}`);
+      throw new Error('Redis client not initialized');
+    }
+    
     try {
       // Try to create consumer group starting from 0 (beginning of stream)
       await this.redis.xgroup('CREATE', topic, groupName, '0', 'MKSTREAM');
@@ -355,7 +366,10 @@ export class RedisStreamsAdapter implements PubSubAdapter {
     } catch (error: unknown) {
       // BUSYGROUP means group already exists - reset its position to 0
       const errorMessage = error instanceof Error ? error.message : String(error);
+      console.info(`[RedisStreamsAdapter] ℹ️ Consumer group creation result for ${topic}: ${errorMessage}`);
+      
       if (errorMessage.includes('BUSYGROUP')) {
+        console.info(`[RedisStreamsAdapter] 🔄 Consumer group ${groupName} already exists for ${topic}, resetting position to 0...`);
         // Group exists - reset its read position to 0 to catch all messages
         try {
           await this.redis.xgroup('SETID', topic, groupName, '0');
@@ -393,6 +407,8 @@ export class RedisStreamsAdapter implements PubSubAdapter {
 
   private async startConsumer(subscription: RedisSubscription): Promise<void> {
     const { topic, consumerGroup, consumerName, handler, redis } = subscription;
+
+    console.info(`[RedisStreamsAdapter] 🔄 Starting consumer for topic: ${topic}, consumerGroup: ${consumerGroup}, consumerName: ${consumerName}`);
 
     const consume = async () => {
       // On first read, check for pending messages (delivered but not ACKed)

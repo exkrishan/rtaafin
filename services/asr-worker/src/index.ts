@@ -992,7 +992,9 @@ class AsrWorker {
 }
 
 // Start worker
+console.info('[ASRWorker] 🚀 Starting ASR Worker service...');
 const worker = new AsrWorker();
+console.info('[ASRWorker] ✅ ASR Worker instance created, calling start()...');
 worker.start().catch((error) => {
   console.error('[ASRWorker] Failed to start:', error);
   process.exit(1);
