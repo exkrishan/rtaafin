@@ -211,14 +211,33 @@ export class ExotelHandler {
       
       // If first bytes look like JSON (starts with '{' or '['), it's wrong
       if (firstBytes[0] === 0x7b || firstBytes[0] === 0x5b) { // '{' or '['
-        console.error('[exotel] ❌ CRITICAL: Decoded audio buffer contains JSON text!', {
-          stream_sid: state.streamSid,
-          call_sid: state.callSid,
-          first_bytes_hex: firstBytesHex,
-          first_bytes_ascii: firstBytesAscii,
-          buffer_length: audioBuffer.length,
-          payload_length: media.payload.length,
-        });
+        // Try to parse as JSON to see what Exotel is actually sending
+        try {
+          const jsonText = audioBuffer.toString('utf8');
+          const parsedJson = JSON.parse(jsonText);
+          console.error('[exotel] ❌ CRITICAL: Decoded audio buffer contains JSON text!', {
+            stream_sid: state.streamSid,
+            call_sid: state.callSid,
+            first_bytes_hex: firstBytesHex,
+            first_bytes_ascii: firstBytesAscii,
+            buffer_length: audioBuffer.length,
+            payload_length: media.payload.length,
+            parsed_json_keys: Object.keys(parsedJson),
+            parsed_json_event: parsedJson.event,
+            parsed_json_structure: JSON.stringify(parsedJson).substring(0, 500),
+            note: 'Exotel is sending base64-encoded JSON instead of base64-encoded audio. This is a protocol mismatch.',
+          });
+        } catch (parseError) {
+          console.error('[exotel] ❌ CRITICAL: Decoded audio buffer contains JSON text (but not valid JSON)!', {
+            stream_sid: state.streamSid,
+            call_sid: state.callSid,
+            first_bytes_hex: firstBytesHex,
+            first_bytes_ascii: firstBytesAscii,
+            buffer_length: audioBuffer.length,
+            payload_length: media.payload.length,
+            buffer_preview: audioBuffer.toString('utf8').substring(0, 200),
+          });
+        }
         return;
       }
 
