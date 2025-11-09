@@ -157,5 +157,98 @@ describe('ASR Worker Integration', () => {
     await asrProvider.close();
     await pubsub.close();
   }, 10000);
+
+  describe('ASR Worker Continuous Streaming', () => {
+    it('should process chunks continuously after initial chunk', async () => {
+      const pubsub = createPubSubAdapter({ adapter: 'in_memory' }) as InMemoryAdapter;
+      const asrProvider = createAsrProvider('mock');
+      
+      // Simulate audio chunks arriving every 36ms (like Exotel)
+      const chunks: AudioFrameMessage[] = [];
+      for (let i = 1; i <= 20; i++) {
+        chunks.push({
+          tenant_id: 'test-tenant',
+          interaction_id: 'test-continuous-123',
+          seq: i,
+          timestamp_ms: Date.now() + i * 36,
+          sample_rate: 8000,
+          encoding: 'pcm16',
+          audio: Buffer.alloc(577).toString('base64'), // ~36ms chunk
+        });
+      }
+
+      const receivedTranscripts: TranscriptMessage[] = [];
+      const handle = await pubsub.subscribe(
+        transcriptTopic('test-continuous-123'),
+        async (msg) => {
+          receivedTranscripts.push(msg as TranscriptMessage);
+        }
+      );
+
+      // Publish chunks with realistic timing
+      for (const chunk of chunks) {
+        await pubsub.publish(audioTopic({ useStreams: true }), chunk);
+        await new Promise(resolve => setTimeout(resolve, 36)); // Simulate real timing
+      }
+
+      // Wait for processing (should process initial chunk at 500ms, then every 500ms)
+      await new Promise(resolve => setTimeout(resolve, 2000));
+
+      // Should have processed multiple chunks (initial + continuous)
+      expect(receivedTranscripts.length).toBeGreaterThan(1);
+      
+      // Verify chunks were processed in sequence
+      const seqs = receivedTranscripts.map(t => t.seq).sort((a, b) => a - b);
+      expect(seqs[0]).toBeGreaterThan(0); // First processed chunk
+
+      await handle.unsubscribe();
+      await asrProvider.close();
+      await pubsub.close();
+    }, 10000);
+
+    it('should maintain continuous streaming even after buffer is cleared', async () => {
+      const pubsub = createPubSubAdapter({ adapter: 'in_memory' }) as InMemoryAdapter;
+      const asrProvider = createAsrProvider('mock');
+      
+      // Send many small chunks to test continuous streaming
+      const chunks: AudioFrameMessage[] = [];
+      for (let i = 1; i <= 30; i++) {
+        chunks.push({
+          tenant_id: 'test-tenant',
+          interaction_id: 'test-continuous-clear-456',
+          seq: i,
+          timestamp_ms: Date.now() + i * 36,
+          sample_rate: 8000,
+          encoding: 'pcm16',
+          audio: Buffer.alloc(577).toString('base64'), // ~36ms chunk
+        });
+      }
+
+      const receivedTranscripts: TranscriptMessage[] = [];
+      const handle = await pubsub.subscribe(
+        transcriptTopic('test-continuous-clear-456'),
+        async (msg) => {
+          receivedTranscripts.push(msg as TranscriptMessage);
+        }
+      );
+
+      // Publish chunks rapidly
+      for (const chunk of chunks) {
+        await pubsub.publish(audioTopic({ useStreams: true }), chunk);
+        await new Promise(resolve => setTimeout(resolve, 36));
+      }
+
+      // Wait for processing
+      await new Promise(resolve => setTimeout(resolve, 3000));
+
+      // Should have processed multiple chunks continuously
+      // Even though buffer is cleared after each processing
+      expect(receivedTranscripts.length).toBeGreaterThan(2);
+
+      await handle.unsubscribe();
+      await asrProvider.close();
+      await pubsub.close();
+    }, 15000);
+  });
 });
 

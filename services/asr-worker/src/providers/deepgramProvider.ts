@@ -19,6 +19,8 @@ interface ConnectionState {
 export class DeepgramProvider implements AsrProvider {
   private client: ReturnType<typeof createClient>;
   private connections: Map<string, ConnectionState> = new Map();
+  // Promise-based locking to prevent duplicate connection creation
+  private connectionCreationLocks: Map<string, Promise<ConnectionState>> = new Map();
 
   constructor(apiKey?: string) {
     const key = apiKey || process.env.DEEPGRAM_API_KEY;
@@ -34,7 +36,7 @@ export class DeepgramProvider implements AsrProvider {
     interactionId: string,
     sampleRate: number
   ): Promise<ConnectionState> {
-    // Check if connection already exists (prevent duplicate connections)
+    // Check if connection already exists and is ready (prevent duplicate connections)
     let state = this.connections.get(interactionId);
     
     if (state) {
@@ -64,8 +66,35 @@ export class DeepgramProvider implements AsrProvider {
       }
     }
 
-    if (!state) {
-      console.info(`[DeepgramProvider] Creating new connection for ${interactionId}`);
+    // CRITICAL: Check if another call is already creating a connection for this interactionId
+    // This prevents race conditions where multiple calls try to create connections simultaneously
+    const existingLock = this.connectionCreationLocks.get(interactionId);
+    if (existingLock) {
+      console.debug(`[DeepgramProvider] Waiting for connection creation in progress for ${interactionId}`);
+      try {
+        // Wait for the other call to finish creating the connection
+        // If it succeeds, we'll get the same connection state
+        // If it fails, the promise will reject and we'll handle it below
+        return await existingLock;
+      } catch (error: any) {
+        // If the other call failed, we can try to create our own
+        // But first check again if a connection was created (maybe it succeeded after the error)
+        state = this.connections.get(interactionId);
+        if (state && state.isReady) {
+          console.info(`[DeepgramProvider] Connection was created by another call for ${interactionId}`);
+          return state;
+        }
+        // Connection creation failed, continue to create our own
+        console.warn(`[DeepgramProvider] Previous connection creation failed for ${interactionId}, creating new one:`, error.message);
+        this.connectionCreationLocks.delete(interactionId); // Remove failed lock
+      }
+    }
+
+    // Create a promise that will resolve when connection is ready
+    // This promise is stored in the lock map so concurrent calls can wait for it
+    const connectionPromise = (async (): Promise<ConnectionState> => {
+      try {
+        console.info(`[DeepgramProvider] Creating new connection for ${interactionId}`);
       
       // Create new live connection
       const connectionConfig = {
@@ -84,6 +113,9 @@ export class DeepgramProvider implements AsrProvider {
       });
       
       const connection = this.client.listen.live(connectionConfig);
+      
+      // Type assertion to access dynamic properties on connection object
+      const connectionAny = connection as any;
 
       // Access underlying WebSocket for text frames (KeepAlive)
       // The Deepgram SDK connection object may expose the socket in different ways
@@ -125,37 +157,37 @@ export class DeepgramProvider implements AsrProvider {
         return null;
       };
       
-      // Try direct socket access patterns
-      if (connection._socket && isWebSocket(connection._socket)) {
-        socket = connection._socket;
-      } else if (connection.socket && isWebSocket(connection.socket)) {
-        socket = connection.socket;
+      // Try direct socket access patterns (using type assertion)
+      if (connectionAny._socket && isWebSocket(connectionAny._socket)) {
+        socket = connectionAny._socket;
+      } else if (connectionAny.socket && isWebSocket(connectionAny.socket)) {
+        socket = connectionAny.socket;
       } 
       // Try through 'conn' property (seen in connection object keys)
-      else if (connection.conn?._socket && isWebSocket(connection.conn._socket)) {
-        socket = connection.conn._socket;
-      } else if (connection.conn?.socket && isWebSocket(connection.conn.socket)) {
-        socket = connection.conn.socket;
-      } else if (connection.conn && isWebSocket(connection.conn)) {
+      else if (connectionAny.conn?._socket && isWebSocket(connectionAny.conn._socket)) {
+        socket = connectionAny.conn._socket;
+      } else if (connectionAny.conn?.socket && isWebSocket(connectionAny.conn.socket)) {
+        socket = connectionAny.conn.socket;
+      } else if (connectionAny.conn && isWebSocket(connectionAny.conn)) {
         // conn might be the WebSocket itself
-        socket = connection.conn;
+        socket = connectionAny.conn;
       }
       // Try through 'transport' property (seen in connection object keys)
-      else if (connection.transport?._socket && isWebSocket(connection.transport._socket)) {
-        socket = connection.transport._socket;
-      } else if (connection.transport?.socket && isWebSocket(connection.transport.socket)) {
-        socket = connection.transport.socket;
-      } else if (connection.transport && isWebSocket(connection.transport)) {
+      else if (connectionAny.transport?._socket && isWebSocket(connectionAny.transport._socket)) {
+        socket = connectionAny.transport._socket;
+      } else if (connectionAny.transport?.socket && isWebSocket(connectionAny.transport.socket)) {
+        socket = connectionAny.transport.socket;
+      } else if (connectionAny.transport && isWebSocket(connectionAny.transport)) {
         // transport might be the WebSocket itself
-        socket = connection.transport;
+        socket = connectionAny.transport;
       }
       // Try nested patterns
-      else if (connection._connection?._socket && isWebSocket(connection._connection._socket)) {
-        socket = connection._connection._socket;
-      } else if (connection._connection?.socket && isWebSocket(connection._connection.socket)) {
-        socket = connection._connection.socket;
-      } else if (typeof connection.getSocket === 'function') {
-        const candidate = connection.getSocket();
+      else if (connectionAny._connection?._socket && isWebSocket(connectionAny._connection._socket)) {
+        socket = connectionAny._connection._socket;
+      } else if (connectionAny._connection?.socket && isWebSocket(connectionAny._connection.socket)) {
+        socket = connectionAny._connection.socket;
+      } else if (typeof connectionAny.getSocket === 'function') {
+        const candidate = connectionAny.getSocket();
         if (isWebSocket(candidate)) {
           socket = candidate;
         }
@@ -172,19 +204,19 @@ export class DeepgramProvider implements AsrProvider {
 
       if (!socket) {
         console.warn(`[DeepgramProvider] ⚠️ Could not access underlying WebSocket for ${interactionId}. KeepAlive may not work.`);
-        console.warn(`[DeepgramProvider] Connection object keys:`, Object.keys(connection));
+        console.warn(`[DeepgramProvider] Connection object keys:`, Object.keys(connectionAny));
         // Log connection structure for debugging
         console.warn(`[DeepgramProvider] Connection structure:`, {
-          has_socket: !!connection.socket,
-          has_socket_underscore: !!connection._socket,
-          has_connection: !!connection._connection,
-          has_conn: !!connection.conn,
-          has_transport: !!connection.transport,
-          conn_type: connection.conn ? typeof connection.conn : 'undefined',
-          transport_type: connection.transport ? typeof connection.transport : 'undefined',
-          conn_keys: connection.conn ? Object.keys(connection.conn) : [],
-          transport_keys: connection.transport ? Object.keys(connection.transport) : [],
-          connection_keys: connection._connection ? Object.keys(connection._connection) : [],
+          has_socket: !!connectionAny.socket,
+          has_socket_underscore: !!connectionAny._socket,
+          has_connection: !!connectionAny._connection,
+          has_conn: !!connectionAny.conn,
+          has_transport: !!connectionAny.transport,
+          conn_type: connectionAny.conn ? typeof connectionAny.conn : 'undefined',
+          transport_type: connectionAny.transport ? typeof connectionAny.transport : 'undefined',
+          conn_keys: connectionAny.conn ? Object.keys(connectionAny.conn) : [],
+          transport_keys: connectionAny.transport ? Object.keys(connectionAny.transport) : [],
+          connection_keys: connectionAny._connection ? Object.keys(connectionAny._connection) : [],
         });
       } else {
         console.info(`[DeepgramProvider] ✅ Accessed underlying WebSocket for ${interactionId}`);
@@ -209,49 +241,49 @@ export class DeepgramProvider implements AsrProvider {
         if (!state.socket) {
           console.debug(`[DeepgramProvider] Socket not found initially, trying again after Open event for ${interactionId}`);
           
-          // Try all patterns again, including conn and transport
-          if (connection._socket) {
-            state.socket = connection._socket;
-          } else if (connection.socket) {
-            state.socket = connection.socket;
-          } else if (connection.conn?._socket) {
-            state.socket = connection.conn._socket;
-          } else if (connection.conn?.socket) {
-            state.socket = connection.conn.socket;
-          } else if (connection.conn && typeof connection.conn.send === 'function' && connection.conn.readyState !== undefined) {
-            state.socket = connection.conn;
-          } else if (connection.transport?._socket) {
-            state.socket = connection.transport._socket;
-          } else if (connection.transport?.socket) {
-            state.socket = connection.transport.socket;
-          } else if (connection.transport && typeof connection.transport.send === 'function' && connection.transport.readyState !== undefined) {
-            state.socket = connection.transport;
-          } else if (connection._connection?._socket) {
-            state.socket = connection._connection._socket;
-          } else if (connection._connection?.socket) {
-            state.socket = connection._connection.socket;
-          } else if (typeof connection.getSocket === 'function') {
-            state.socket = connection.getSocket();
+          // Try all patterns again, including conn and transport (using type assertion)
+          if (connectionAny._socket) {
+            state.socket = connectionAny._socket;
+          } else if (connectionAny.socket) {
+            state.socket = connectionAny.socket;
+          } else if (connectionAny.conn?._socket) {
+            state.socket = connectionAny.conn._socket;
+          } else if (connectionAny.conn?.socket) {
+            state.socket = connectionAny.conn.socket;
+          } else if (connectionAny.conn && typeof connectionAny.conn.send === 'function' && connectionAny.conn.readyState !== undefined) {
+            state.socket = connectionAny.conn;
+          } else if (connectionAny.transport?._socket) {
+            state.socket = connectionAny.transport._socket;
+          } else if (connectionAny.transport?.socket) {
+            state.socket = connectionAny.transport.socket;
+          } else if (connectionAny.transport && typeof connectionAny.transport.send === 'function' && connectionAny.transport.readyState !== undefined) {
+            state.socket = connectionAny.transport;
+          } else if (connectionAny._connection?._socket) {
+            state.socket = connectionAny._connection._socket;
+          } else if (connectionAny._connection?.socket) {
+            state.socket = connectionAny._connection.socket;
+          } else if (typeof connectionAny.getSocket === 'function') {
+            state.socket = connectionAny.getSocket();
           }
           
           if (state.socket) {
             console.info(`[DeepgramProvider] ✅ Accessed underlying WebSocket after Open event for ${interactionId}`);
             console.debug(`[DeepgramProvider] Socket path:`, {
-              has_conn: !!connection.conn,
-              has_transport: !!connection.transport,
-              conn_keys: connection.conn ? Object.keys(connection.conn) : [],
-              transport_keys: connection.transport ? Object.keys(connection.transport) : [],
+              has_conn: !!connectionAny.conn,
+              has_transport: !!connectionAny.transport,
+              conn_keys: connectionAny.conn ? Object.keys(connectionAny.conn) : [],
+              transport_keys: connectionAny.transport ? Object.keys(connectionAny.transport) : [],
             });
           } else {
             // Log detailed structure for debugging
             console.warn(`[DeepgramProvider] ⚠️ Socket still not found after Open event for ${interactionId}`);
             console.warn(`[DeepgramProvider] Connection structure after Open:`, {
-              has_conn: !!connection.conn,
-              has_transport: !!connection.transport,
-              conn_type: connection.conn ? typeof connection.conn : 'undefined',
-              transport_type: connection.transport ? typeof connection.transport : 'undefined',
-              conn_keys: connection.conn ? Object.keys(connection.conn) : [],
-              transport_keys: connection.transport ? Object.keys(connection.transport) : [],
+              has_conn: !!connectionAny.conn,
+              has_transport: !!connectionAny.transport,
+              conn_type: connectionAny.conn ? typeof connectionAny.conn : 'undefined',
+              transport_type: connectionAny.transport ? typeof connectionAny.transport : 'undefined',
+              conn_keys: connectionAny.conn ? Object.keys(connectionAny.conn) : [],
+              transport_keys: connectionAny.transport ? Object.keys(connectionAny.transport) : [],
             });
           }
         }
@@ -292,7 +324,7 @@ export class DeepgramProvider implements AsrProvider {
               console.warn(`[DeepgramProvider] ⚠️ Cannot send KeepAlive: underlying WebSocket not accessible for ${interactionId}`);
               // Fallback: Try connection.send() as last resort (may not work)
               try {
-                connection.send(JSON.stringify({ type: 'KeepAlive' }));
+                connectionAny.send(JSON.stringify({ type: 'KeepAlive' }));
                 console.warn(`[DeepgramProvider] ⚠️ Fallback: Sent KeepAlive via connection.send() (may not work)`);
                 return true;
               } catch (fallbackError: any) {
@@ -474,14 +506,59 @@ export class DeepgramProvider implements AsrProvider {
         this.connections.delete(interactionId);
       });
 
-      this.connections.set(interactionId, state);
+        this.connections.set(interactionId, state);
 
-      // Note: Deepgram SDK connection is already active when created via listen.live()
-      // No need to call start() - the connection is ready when Open event fires
-      console.info(`[DeepgramProvider] 🚀 Connection created for ${interactionId}, waiting for Open event...`);
-    }
+        // Note: Deepgram SDK connection is already active when created via listen.live()
+        // No need to call start() - the connection is ready when Open event fires
+        console.info(`[DeepgramProvider] 🚀 Connection created for ${interactionId}, waiting for Open event...`);
+        
+        // Wait for connection to be ready (Open event)
+        // This ensures the connection is fully established before returning
+        if (!state.isReady) {
+          await new Promise<void>((resolve, reject) => {
+            const timeout = setTimeout(() => {
+              reject(new Error(`Connection not ready after 10 seconds for ${interactionId}`));
+            }, 10000);
 
-    return state;
+            const checkReady = setInterval(() => {
+              const currentState = this.connections.get(interactionId);
+              if (currentState && currentState.isReady) {
+                clearInterval(checkReady);
+                clearTimeout(timeout);
+                resolve();
+              } else if (!currentState) {
+                // Connection was deleted (closed)
+                clearInterval(checkReady);
+                clearTimeout(timeout);
+                reject(new Error(`Connection was closed before ready for ${interactionId}`));
+              }
+            }, 100);
+          });
+        }
+
+        // Verify connection is still valid before returning
+        const finalState = this.connections.get(interactionId);
+        if (!finalState || !finalState.isReady) {
+          throw new Error(`Connection not ready after creation for ${interactionId}`);
+        }
+
+        return finalState;
+      } catch (error: any) {
+        // Clean up on error
+        this.connections.delete(interactionId);
+        console.error(`[DeepgramProvider] ❌ Failed to create connection for ${interactionId}:`, error);
+        throw error; // Re-throw so waiting calls know it failed
+      } finally {
+        // Always remove lock when done (success or failure)
+        // This allows retries if connection creation fails
+        this.connectionCreationLocks.delete(interactionId);
+      }
+    })();
+
+    // Store the promise so other concurrent calls can wait for it
+    this.connectionCreationLocks.set(interactionId, connectionPromise);
+    
+    return connectionPromise;
   }
 
   async sendAudioChunk(

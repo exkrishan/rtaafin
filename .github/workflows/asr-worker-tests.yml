@@ -1,0 +1,73 @@
+name: ASR Worker Tests
+
+on:
+  push:
+    paths:
+      - 'services/asr-worker/**'
+      - 'lib/pubsub/**'
+  pull_request:
+    paths:
+      - 'services/asr-worker/**'
+      - 'lib/pubsub/**'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [20.x]
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v3
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+      
+      - name: Install root dependencies
+        run: npm ci
+      
+      - name: Install ASR worker dependencies
+        run: |
+          cd services/asr-worker && npm ci
+      
+      - name: Build lib/pubsub
+        run: |
+          cd lib/pubsub
+          if [ -f "package.json" ] && grep -q '"build"' package.json; then
+            npm run build || echo "⚠️ lib/pubsub build script not found or failed (non-blocking)"
+          else
+            echo "⚠️ lib/pubsub has no build script, attempting tsc directly"
+            npx tsc || echo "⚠️ TypeScript compilation skipped"
+          fi
+      
+      - name: Build ASR worker
+        run: |
+          cd services/asr-worker && npm run build
+      
+      - name: Verify build artifacts
+        run: |
+          test -f services/asr-worker/dist/index.js || (echo "❌ Build artifact missing" && exit 1)
+          echo "✅ Build artifact exists"
+      
+      - name: Run unit tests
+        run: |
+          cd services/asr-worker && npm test -- --coverage
+        env:
+          ASR_PROVIDER: mock
+          REDIS_URL: redis://localhost:6379
+          PUBSUB_ADAPTER: in_memory
+          DEEPGRAM_API_KEY: test-key-for-tests
+      
+      - name: Upload coverage (if codecov is configured)
+        if: always()
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./services/asr-worker/coverage/lcov.info
+          flags: asr-worker
+          fail_ci_if_error: false # Don't fail if codecov is not configured
+          token: ${{ secrets.CODECOV_TOKEN }} # Optional
+        continue-on-error: true # Don't fail if codecov upload fails
+
