@@ -377,17 +377,72 @@ export class RedisStreamsAdapter implements PubSubAdapter {
     const { topic, consumerGroup, consumerName, handler, redis } = subscription;
 
     const consume = async () => {
+      // On first read, check for pending messages (delivered but not ACKed)
+      // This handles the case where consumer group already exists
+      if (subscription.firstRead) {
+        try {
+          // Check for pending messages (delivered but not ACKed) for this consumer group
+          const pending = await redis.xpending(topic, consumerGroup, '-', '+', 100, consumerName);
+          if (pending && Array.isArray(pending) && pending.length > 0) {
+            console.info(`[RedisStreamsAdapter] Found ${pending.length} pending message(s) for ${topic} in consumer group ${consumerGroup}, processing them first`);
+            // Process pending messages
+            for (const pendingMsg of pending) {
+              // pendingMsg format: [msgId, consumer, idleTime, deliveryCount]
+              if (Array.isArray(pendingMsg) && pendingMsg.length >= 1) {
+                const msgId = pendingMsg[0] as string;
+                try {
+                  // Claim the pending message (with 0 min idle time to claim immediately)
+                  const claimed = await redis.xclaim(topic, consumerGroup, consumerName, 0, msgId) as [string, [string, string[]][]][] | null;
+                  if (claimed && claimed.length > 0) {
+                    const [streamName, messages] = claimed[0];
+                    if (messages && messages.length > 0) {
+                      for (const messageEntry of messages) {
+                        const [claimedMsgId, fields] = messageEntry;
+                        try {
+                          const dataIndex = fields.findIndex((f: string) => f === 'data');
+                          if (dataIndex >= 0 && dataIndex + 1 < fields.length) {
+                            const envelope = JSON.parse(fields[dataIndex + 1]) as MessageEnvelope;
+                            await handler(envelope);
+                            await redis.xack(topic, consumerGroup, claimedMsgId);
+                            subscription.lastReadId = claimedMsgId;
+                            console.info(`[RedisStreamsAdapter] ✅ Processed pending message ${claimedMsgId} from ${topic}`);
+                          }
+                        } catch (error: unknown) {
+                          console.error(`[RedisStreamsAdapter] Error processing pending message ${claimedMsgId}:`, error);
+                        }
+                      }
+                    }
+                  }
+                } catch (claimError: unknown) {
+                  console.warn(`[RedisStreamsAdapter] Failed to claim pending message ${msgId}:`, claimError);
+                }
+              }
+            }
+          }
+        } catch (pendingError: unknown) {
+          // If pending check fails (e.g., group doesn't exist or no pending), continue with normal read
+          const errorMessage = pendingError instanceof Error ? pendingError.message : String(pendingError);
+          if (!errorMessage.includes('NOGROUP') && !errorMessage.includes('no such key')) {
+            console.warn(`[RedisStreamsAdapter] Failed to check pending messages for ${topic}:`, errorMessage);
+          }
+        }
+      }
+
       while (subscription.running) {
         try {
           // Determine read position:
           // - First read: Use '0' to read from beginning (catch any existing messages)
+          //   Note: With XREADGROUP, '0' reads messages that haven't been delivered to the group yet
+          //   This works for both new and existing consumer groups
           // - Subsequent reads: Use '>' to read only new messages
           // - If we have a lastReadId, use it to continue from where we left off
           let readPosition: string;
           if (subscription.firstRead) {
             // First read: start from beginning to catch any existing messages
+            // Using '0' with XREADGROUP will read all messages that haven't been delivered to this consumer group
+            // This works even if consumer group exists - it reads undelivered messages from the beginning
             readPosition = '0';
-            console.info(`[RedisStreamsAdapter] First read for ${topic}, reading from beginning (position: 0) to catch existing messages`);
+            console.info(`[RedisStreamsAdapter] 🔍 First read for ${topic}, reading from beginning (position: 0) to catch existing undelivered messages`);
           } else if (subscription.lastReadId && subscription.lastReadId !== '0') {
             // Continue from last read position
             readPosition = subscription.lastReadId;
