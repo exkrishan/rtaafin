@@ -197,6 +197,18 @@ class AsrWorker {
         return;
       }
 
+      // Log raw audio field for first few frames to debug
+      if (msg.seq === undefined || msg.seq < 3) {
+        console.info('[ASRWorker] 🔍 Raw audio field received:', {
+          interaction_id: msg.interaction_id,
+          seq: msg.seq,
+          audio_type: typeof msg.audio,
+          audio_length: msg.audio?.length,
+          audio_preview: msg.audio?.substring(0, 100),
+          first_20_chars: msg.audio?.substring(0, 20),
+        });
+      }
+
       // CRITICAL: Check if audio field contains JSON instead of base64
       const audioPreview = msg.audio.substring(0, 20).trim();
       if (audioPreview.startsWith('{') || audioPreview.startsWith('[')) {

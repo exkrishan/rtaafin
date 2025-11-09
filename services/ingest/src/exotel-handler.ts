@@ -133,6 +133,32 @@ export class ExotelHandler {
 
     const { media } = event;
     
+    // Log raw payload and full event for first few frames to debug
+    if (state.seq < 3) {
+      console.info('[exotel] 🔍 Raw media event received:', {
+        stream_sid: state.streamSid,
+        call_sid: state.callSid,
+        seq: state.seq,
+        event_keys: Object.keys(event),
+        media_keys: Object.keys(media),
+        payload_type: typeof media.payload,
+        payload_length: media.payload?.length,
+        payload_preview: typeof media.payload === 'string' ? media.payload.substring(0, 100) : media.payload,
+        first_20_chars: typeof media.payload === 'string' ? media.payload.substring(0, 20) : 'N/A',
+        full_event_structure: JSON.stringify({
+          event: event.event,
+          sequence_number: event.sequence_number,
+          stream_sid: event.stream_sid,
+          media: {
+            chunk: media.chunk,
+            timestamp: media.timestamp,
+            payload_length: media.payload?.length,
+            payload_preview: typeof media.payload === 'string' ? media.payload.substring(0, 50) : media.payload,
+          },
+        }),
+      });
+    }
+    
     // Validate payload exists and is a string
     if (!media.payload || typeof media.payload !== 'string') {
       console.error('[exotel] ❌ Invalid media payload:', {
