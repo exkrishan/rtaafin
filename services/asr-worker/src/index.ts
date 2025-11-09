@@ -19,7 +19,12 @@ const PORT = parseInt(process.env.PORT || '3001', 10);
 // Increase buffer window to send larger chunks to Deepgram
 // Deepgram needs continuous audio streams, not tiny chunks
 // Increased to 1000ms to accumulate at least 200-500ms of audio before processing
-const BUFFER_WINDOW_MS = parseInt(process.env.BUFFER_WINDOW_MS || '1000', 10); // Increased from 500ms to 1000ms
+// Buffer window: time-based trigger for processing
+// Increased to 2000ms to accumulate more audio chunks
+const BUFFER_WINDOW_MS = parseInt(process.env.BUFFER_WINDOW_MS || '2000', 10);
+// Minimum audio duration: must have at least this much audio before processing
+// Deepgram requires minimum 200-500ms of audio for reliable transcription
+const MIN_AUDIO_DURATION_MS = parseInt(process.env.MIN_AUDIO_DURATION_MS || '500', 10);
 // Stale buffer timeout: if no new audio arrives for this duration, clean up the buffer
 // This prevents processing old audio after a call has ended
 const STALE_BUFFER_TIMEOUT_MS = parseInt(process.env.STALE_BUFFER_TIMEOUT_MS || '5000', 10); // 5 seconds
@@ -87,6 +92,7 @@ class AsrWorker {
     console.info('[ASRWorker] Initialized', {
       provider: ASR_PROVIDER,
       bufferWindowMs: BUFFER_WINDOW_MS,
+      minAudioDurationMs: MIN_AUDIO_DURATION_MS,
       port: PORT,
     });
     console.info(`[ASRWorker] Using ASR provider: ${ASR_PROVIDER}`);
@@ -164,13 +170,20 @@ class AsrWorker {
       buffer.chunks.push(audioBuffer);
       buffer.timestamps.push(frame.timestamp_ms);
 
+      // Calculate current audio duration in buffer
+      const totalSamples = buffer.chunks.reduce((sum, chunk) => sum + chunk.length, 0) / 2; // 16-bit = 2 bytes per sample
+      const currentAudioDurationMs = (totalSamples / sample_rate) * 1000;
+      
       // Log new chunk arrival to verify new audio is coming in
       console.info(`[ASRWorker] 📥 Received audio chunk:`, {
         interaction_id,
         seq,
         audioSize: audioBuffer.length,
+        chunkDurationMs: ((audioBuffer.length / 2) / sample_rate) * 1000,
         totalChunksInBuffer: buffer.chunks.length,
+        totalAudioDurationMs: currentAudioDurationMs.toFixed(0),
         bufferAge: Date.now() - buffer.lastProcessed,
+        meetsMinimum: currentAudioDurationMs >= MIN_AUDIO_DURATION_MS,
       });
 
       // Record metrics
@@ -270,6 +283,22 @@ class AsrWorker {
       // Concatenate audio chunks
       const combinedAudio = Buffer.concat(buffer.chunks);
       const seq = buffer.chunks.length;
+      
+      // Calculate total audio duration
+      const totalSamples = combinedAudio.length / 2; // 16-bit = 2 bytes per sample
+      const audioDurationMs = (totalSamples / buffer.sampleRate) * 1000;
+      
+      // CRITICAL: Only process if we have minimum audio duration
+      // Deepgram requires at least 200-500ms of audio for reliable transcription
+      if (audioDurationMs < MIN_AUDIO_DURATION_MS) {
+        console.debug(`[ASRWorker] ⏳ Buffer too small (${audioDurationMs.toFixed(0)}ms < ${MIN_AUDIO_DURATION_MS}ms), waiting for more audio`, {
+          interaction_id: buffer.interactionId,
+          chunksCount: buffer.chunks.length,
+          audioDurationMs: audioDurationMs.toFixed(0),
+          minimumRequired: MIN_AUDIO_DURATION_MS,
+        });
+        return; // Don't process yet - wait for more audio
+      }
 
       // Log audio details before sending to ASR
       console.info(`[ASRWorker] Processing audio buffer:`, {
@@ -277,8 +306,10 @@ class AsrWorker {
         seq,
         sampleRate: buffer.sampleRate,
         audioSize: combinedAudio.length,
+        audioDurationMs: audioDurationMs.toFixed(0),
         chunksCount: buffer.chunks.length,
         bufferAge: Date.now() - buffer.lastProcessed,
+        meetsMinimum: audioDurationMs >= MIN_AUDIO_DURATION_MS,
       });
 
       // Send to ASR provider

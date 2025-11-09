@@ -63,37 +63,83 @@ export class DeepgramProvider implements AsrProvider {
       // Try multiple patterns to find the WebSocket
       let socket: any = null;
       
+      // Helper function to check if object is a WebSocket
+      const isWebSocket = (obj: any): boolean => {
+        if (!obj) return false;
+        // WebSocket has send method and readyState property
+        return typeof obj.send === 'function' && 
+               typeof obj.readyState !== 'undefined' &&
+               (obj.readyState === 0 || obj.readyState === 1 || obj.readyState === 2 || obj.readyState === 3);
+      };
+      
+      // Helper function to recursively search for WebSocket
+      const findWebSocket = (obj: any, depth: number = 0, maxDepth: number = 3): any => {
+        if (depth > maxDepth || !obj || typeof obj !== 'object') return null;
+        
+        // Check if this object is a WebSocket
+        if (isWebSocket(obj)) {
+          return obj;
+        }
+        
+        // Recursively check properties
+        for (const key in obj) {
+          if (key === 'constructor' || key === 'prototype') continue;
+          try {
+            const value = obj[key];
+            if (value && typeof value === 'object') {
+              const found = findWebSocket(value, depth + 1, maxDepth);
+              if (found) return found;
+            }
+          } catch (e) {
+            // Ignore errors accessing properties
+          }
+        }
+        return null;
+      };
+      
       // Try direct socket access patterns
-      if (connection._socket) {
+      if (connection._socket && isWebSocket(connection._socket)) {
         socket = connection._socket;
-      } else if (connection.socket) {
+      } else if (connection.socket && isWebSocket(connection.socket)) {
         socket = connection.socket;
       } 
       // Try through 'conn' property (seen in connection object keys)
-      else if (connection.conn?._socket) {
+      else if (connection.conn?._socket && isWebSocket(connection.conn._socket)) {
         socket = connection.conn._socket;
-      } else if (connection.conn?.socket) {
+      } else if (connection.conn?.socket && isWebSocket(connection.conn.socket)) {
         socket = connection.conn.socket;
-      } else if (connection.conn && typeof connection.conn.send === 'function' && connection.conn.readyState !== undefined) {
+      } else if (connection.conn && isWebSocket(connection.conn)) {
         // conn might be the WebSocket itself
         socket = connection.conn;
       }
       // Try through 'transport' property (seen in connection object keys)
-      else if (connection.transport?._socket) {
+      else if (connection.transport?._socket && isWebSocket(connection.transport._socket)) {
         socket = connection.transport._socket;
-      } else if (connection.transport?.socket) {
+      } else if (connection.transport?.socket && isWebSocket(connection.transport.socket)) {
         socket = connection.transport.socket;
-      } else if (connection.transport && typeof connection.transport.send === 'function' && connection.transport.readyState !== undefined) {
+      } else if (connection.transport && isWebSocket(connection.transport)) {
         // transport might be the WebSocket itself
         socket = connection.transport;
       }
       // Try nested patterns
-      else if (connection._connection?._socket) {
+      else if (connection._connection?._socket && isWebSocket(connection._connection._socket)) {
         socket = connection._connection._socket;
-      } else if (connection._connection?.socket) {
+      } else if (connection._connection?.socket && isWebSocket(connection._connection.socket)) {
         socket = connection._connection.socket;
       } else if (typeof connection.getSocket === 'function') {
-        socket = connection.getSocket();
+        const candidate = connection.getSocket();
+        if (isWebSocket(candidate)) {
+          socket = candidate;
+        }
+      }
+      
+      // If still not found, try recursive search (slower but more thorough)
+      if (!socket) {
+        console.debug(`[DeepgramProvider] Trying recursive search for WebSocket in connection object...`);
+        socket = findWebSocket(connection);
+        if (socket) {
+          console.info(`[DeepgramProvider] ✅ Found WebSocket via recursive search for ${interactionId}`);
+        }
       }
 
       if (!socket) {
