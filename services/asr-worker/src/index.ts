@@ -19,6 +19,8 @@ const PORT = parseInt(process.env.PORT || '3001', 10);
 
 // Deepgram-optimized chunk sizing configuration
 // Deepgram recommends 20-250ms chunks for optimal real-time performance
+// CRITICAL: Minimum chunk size for reliable transcription is 100ms (not 20ms)
+// 20ms is the absolute minimum Deepgram accepts, but 100ms+ is needed for accuracy
 // Initial chunk: 200ms minimum for reliable transcription start
 const INITIAL_CHUNK_DURATION_MS = parseInt(process.env.INITIAL_CHUNK_DURATION_MS || '200', 10);
 // Continuous chunks: 100ms for real-time streaming
@@ -27,6 +29,9 @@ const CONTINUOUS_CHUNK_DURATION_MS = parseInt(process.env.CONTINUOUS_CHUNK_DURAT
 const MAX_CHUNK_DURATION_MS = parseInt(process.env.MAX_CHUNK_DURATION_MS || '250', 10);
 // Minimum audio duration before processing (reduced from 500ms to 200ms)
 const MIN_AUDIO_DURATION_MS = parseInt(process.env.MIN_AUDIO_DURATION_MS || '200', 10);
+// CRITICAL: Minimum chunk size for continuous streaming (increased from 20ms to 100ms)
+// Deepgram needs at least 100ms of contiguous audio for reliable transcription
+const ASR_CHUNK_MIN_MS = parseInt(process.env.ASR_CHUNK_MIN_MS || '100', 10);
 
 // Legacy buffer window (kept for backward compatibility, but not used for Deepgram)
 const BUFFER_WINDOW_MS = parseInt(process.env.BUFFER_WINDOW_MS || '1000', 10);
@@ -406,9 +411,10 @@ class AsrWorker {
         // 1. Enough time has passed since last continuous send (100ms) AND we have ANY audio, OR
         // 2. We have accumulated enough audio (100ms), OR
         // 3. We've accumulated too much audio (250ms max - force send), OR
-        // 4. Time-based trigger: Send every 50ms if we have at least 20ms of audio (for very small incoming chunks)
+        // 4. Time-based trigger: Send every 50ms if we have at least 100ms of audio
         const MIN_CONTINUOUS_TIME_MS = 50; // Minimum time between sends (even for tiny chunks)
-        const MIN_CONTINUOUS_AUDIO_MS = 20; // Minimum audio to send in continuous mode (Deepgram can handle this)
+        // CRITICAL FIX: Increased from 20ms to 100ms for reliable Deepgram transcription
+        const MIN_CONTINUOUS_AUDIO_MS = ASR_CHUNK_MIN_MS; // Minimum audio to send in continuous mode (100ms for reliable transcription)
         
         // CRITICAL: Also check if buffer age is too high (stale buffer)
         // If buffer hasn't been processed in a while, force process to prevent Deepgram timeout
@@ -611,10 +617,10 @@ class AsrWorker {
       
       // CRITICAL: Audio duration check depends on streaming mode
       // - Initial chunk: Require 200ms minimum (reduced from 500ms)
-      // - Continuous streaming: Accept ANY audio (20ms+) for continuous flow
-      //   Deepgram can handle small chunks in continuous mode - the key is frequency, not size
+      // - Continuous streaming: Require 100ms minimum for reliable Deepgram transcription
+      //   Deepgram can technically accept 20ms, but 100ms+ is needed for accuracy
       const requiredDuration = buffer.hasSentInitialChunk 
-        ? 20  // Continuous mode: Accept even 20ms chunks (Deepgram minimum)
+        ? ASR_CHUNK_MIN_MS  // Continuous mode: Require 100ms minimum for reliable transcription
         : INITIAL_CHUNK_DURATION_MS;    // Initial chunk: 200ms
       
       if (audioDurationMs < requiredDuration) {

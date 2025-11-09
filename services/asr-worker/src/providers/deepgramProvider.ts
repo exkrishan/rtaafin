@@ -13,6 +13,7 @@ interface ConnectionState {
   transcriptQueue: Transcript[];
   pendingResolvers: Array<(transcript: Transcript) => void>;
   lastTranscript: Transcript | null;
+  lastSendTime?: number; // Timestamp of last audio send
   keepAliveInterval?: NodeJS.Timeout;
   keepAliveSuccessCount: number;
   keepAliveFailureCount: number;
@@ -851,13 +852,16 @@ export class DeepgramProvider implements AsrProvider {
         console.info(`[DeepgramProvider] 📤 Sending audio chunk:`, {
           interactionId,
           seq,
+          bufferDurationMs: durationMs.toFixed(2),
           size: audio.length,
           sampleRate,
           samples,
           durationMs: durationMs.toFixed(0) + 'ms',
+          encoding: 'linear16',
           isReady: state.isReady,
           connectionReadyState,
           socketReadyState,
+          timeSinceLastSend: state.lastSendTime ? (Date.now() - state.lastSendTime) + 'ms' : 'first',
           hasConnection: !!state.connection,
           hasSocket: !!state.socket,
           connectionType: typeof state.connection,
@@ -880,6 +884,35 @@ export class DeepgramProvider implements AsrProvider {
         // Deepgram SDK expects Uint8Array or Buffer for binary audio
         // Convert Buffer to Uint8Array to ensure compatibility
         const audioData = audio instanceof Uint8Array ? audio : new Uint8Array(audio);
+        
+        // CRITICAL: Validate audio format is PCM16 (16-bit signed integers)
+        // Check that audio data looks like PCM16, not float32 or other formats
+        // PCM16 values should be in range [-32768, 32767] when interpreted as int16
+        if (audioData.length >= 2) {
+          // Read as little-endian signed 16-bit integers
+          // Uint8Array doesn't have readInt16LE, so we need to manually convert
+          const firstSample = (audioData[0] | (audioData[1] << 8)) << 16 >> 16; // Sign-extend to 32-bit
+          const secondSample = audioData.length >= 4 
+            ? ((audioData[2] | (audioData[3] << 8)) << 16 >> 16) 
+            : null;
+          
+          // PCM16 samples should be in valid range [-32768, 32767]
+          // Also check that it's not all zeros (silence) or all 0xFF (invalid)
+          const isLikelyPCM16 = 
+            (firstSample >= -32768 && firstSample <= 32767) &&
+            (secondSample === null || (secondSample >= -32768 && secondSample <= 32767));
+          
+          // Log warning only for first few chunks and if values are clearly invalid
+          if (!isLikelyPCM16 && seq <= 3) {
+            console.warn(`[DeepgramProvider] ⚠️ Audio format validation warning for ${interactionId}:`, {
+              seq,
+              firstSample,
+              secondSample,
+              firstBytes: Array.from(audioData.slice(0, 4)).map(b => `0x${b.toString(16).padStart(2, '0')}`),
+              note: 'Audio may not be PCM16 format. Expected 16-bit signed integers in range [-32768, 32767].',
+            });
+          }
+        }
         
         // Verify audio data is valid
         if (!audioData || audioData.length === 0) {
@@ -915,12 +948,15 @@ export class DeepgramProvider implements AsrProvider {
           // Log successful send with detailed metrics
           console.info(`[DeepgramProvider] ✅ Audio sent successfully for ${interactionId}, seq=${seq}`, {
             chunkSizeMs: chunkSizeMs.toFixed(0),
+            timeSinceLastSend: state.lastSendTime ? (Date.now() - state.lastSendTime) + 'ms' : 'first',
             averageChunkSizeMs: this.metrics.averageChunkSizeMs.toFixed(0),
             sendDurationMs: sendDuration,
             dataLength: audioData.length,
             connectionReadyState,
             socketReadyState,
           });
+          
+          state.lastSendTime = Date.now();
         } catch (sendError: any) {
           console.error(`[DeepgramProvider] ❌ Error during connection.send() for ${interactionId}:`, {
             error: sendError.message || String(sendError),
