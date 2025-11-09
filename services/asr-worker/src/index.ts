@@ -388,9 +388,12 @@ class AsrWorker {
         // CRITICAL: Use lastContinuousSendTime which doesn't reset when buffer is cleared
         // This ensures continuous streaming works even after buffer is cleared
         
-        // Initialize lastContinuousSendTime if not set (should be set after first chunk)
+        // CRITICAL FIX: Initialize lastContinuousSendTime to buffer creation time if not set
+        // This prevents the age calculation from being wrong when buffer is old
         if (buffer.lastContinuousSendTime === 0) {
-          buffer.lastContinuousSendTime = Date.now();
+          // Use lastProcessed (buffer creation time) instead of current time
+          // This ensures timeSinceLastContinuousSend is calculated correctly
+          buffer.lastContinuousSendTime = buffer.lastProcessed;
         }
         
         // Calculate time since last continuous send (this doesn't reset on buffer clear)
@@ -407,7 +410,13 @@ class AsrWorker {
         const MIN_CONTINUOUS_TIME_MS = 50; // Minimum time between sends (even for tiny chunks)
         const MIN_CONTINUOUS_AUDIO_MS = 20; // Minimum audio to send in continuous mode (Deepgram can handle this)
         
+        // CRITICAL: Also check if buffer age is too high (stale buffer)
+        // If buffer hasn't been processed in a while, force process to prevent Deepgram timeout
+        const MAX_BUFFER_AGE_MS = 500; // Force process if buffer is older than 500ms
+        const isBufferStale = timeSinceLastContinuousSend >= MAX_BUFFER_AGE_MS;
+        
         const shouldProcess = 
+          isBufferStale || // Force process if buffer is stale (prevents Deepgram timeout)
           (timeSinceLastContinuousSend >= CONTINUOUS_CHUNK_DURATION_MS && currentAudioDurationMs >= MIN_CONTINUOUS_AUDIO_MS) || // Time-based: 100ms elapsed + 20ms audio
           (timeSinceLastContinuousSend >= MIN_CONTINUOUS_TIME_MS && currentAudioDurationMs >= CONTINUOUS_CHUNK_DURATION_MS) || // Audio-based: 50ms elapsed + 100ms audio
           currentAudioDurationMs >= MAX_CHUNK_DURATION_MS; // Force send if too large
@@ -429,16 +438,30 @@ class AsrWorker {
           }
         } else {
           // Log why we're not processing (for debugging)
-          console.debug(`[ASRWorker] ⏸️ Continuous streaming: waiting`, {
-            interaction_id,
-            timeSinceLastContinuousSend,
-            bufferAge,
-            currentAudioDurationMs: currentAudioDurationMs.toFixed(0),
-            chunksCount: buffer.chunks.length,
-            needsTime: Math.max(0, CONTINUOUS_CHUNK_DURATION_MS - timeSinceLastContinuousSend),
-            needsAudio: Math.max(0, CONTINUOUS_CHUNK_DURATION_MS - currentAudioDurationMs),
-            maxChunkSize: MAX_CHUNK_DURATION_MS,
-          });
+          // CRITICAL: Log warning if buffer is getting stale
+          if (timeSinceLastContinuousSend > 1000) {
+            console.warn(`[ASRWorker] ⚠️ Buffer getting stale (${timeSinceLastContinuousSend}ms since last send)`, {
+              interaction_id,
+              timeSinceLastContinuousSend,
+              bufferAge,
+              currentAudioDurationMs: currentAudioDurationMs.toFixed(0),
+              chunksCount: buffer.chunks.length,
+              needsTime: Math.max(0, CONTINUOUS_CHUNK_DURATION_MS - timeSinceLastContinuousSend),
+              needsAudio: Math.max(0, CONTINUOUS_CHUNK_DURATION_MS - currentAudioDurationMs),
+              maxChunkSize: MAX_CHUNK_DURATION_MS,
+            });
+          } else {
+            console.debug(`[ASRWorker] ⏸️ Continuous streaming: waiting`, {
+              interaction_id,
+              timeSinceLastContinuousSend,
+              bufferAge,
+              currentAudioDurationMs: currentAudioDurationMs.toFixed(0),
+              chunksCount: buffer.chunks.length,
+              needsTime: Math.max(0, CONTINUOUS_CHUNK_DURATION_MS - timeSinceLastContinuousSend),
+              needsAudio: Math.max(0, CONTINUOUS_CHUNK_DURATION_MS - currentAudioDurationMs),
+              maxChunkSize: MAX_CHUNK_DURATION_MS,
+            });
+          }
         }
       }
     } catch (error: any) {

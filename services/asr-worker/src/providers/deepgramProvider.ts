@@ -165,14 +165,17 @@ export class DeepgramProvider implements AsrProvider {
         console.info(`[DeepgramProvider] Creating new connection for ${interactionId}`);
       
       // Create new live connection with configurable parameters
+      // CRITICAL: Deepgram requires specific configuration for telephony audio (8kHz)
+      // Note: Deepgram supports 8kHz sample rate, but default is 24kHz
+      // For telephony (8kHz), we must explicitly set sample_rate
       const connectionConfig = {
         model: process.env.DEEPGRAM_MODEL || 'nova-2',
         language: process.env.DEEPGRAM_LANGUAGE || 'en-US',
         smart_format: process.env.DEEPGRAM_SMART_FORMAT !== 'false', // Default true
         interim_results: process.env.DEEPGRAM_INTERIM_RESULTS !== 'false', // Default true
-        sample_rate: sampleRate,
-        encoding: 'linear16',
-        channels: 1,
+        sample_rate: sampleRate, // CRITICAL: Must match actual audio sample rate (8kHz for telephony)
+        encoding: 'linear16', // 16-bit PCM, little-endian (required for raw audio)
+        channels: 1, // Mono audio (required for telephony)
       };
       
       console.info(`[DeepgramProvider] Connection config:`, {
@@ -563,14 +566,49 @@ export class DeepgramProvider implements AsrProvider {
             this.metrics.emptyTranscriptsReceived++;
             
             // Log empty transcripts to debug why Deepgram isn't returning text
-            console.warn(`[DeepgramProvider] ⚠️ Empty transcript received from Deepgram for ${interactionId}`, {
-              isFinal,
-              hasChannel: !!data.channel,
-              hasAlternatives: !!data.channel?.alternatives,
-              alternativesCount: data.channel?.alternatives?.length || 0,
-              emptyTranscriptRate: ((this.metrics.emptyTranscriptsReceived / this.metrics.transcriptsReceived) * 100).toFixed(1) + '%',
-              rawData: JSON.stringify(data).substring(0, 200), // First 200 chars for debugging
-            });
+            // CRITICAL: Empty transcripts can indicate:
+            // 1. Audio is silence (no speech detected)
+            // 2. Audio format is incorrect (Deepgram can't decode)
+            // 3. Audio chunks are too small/infrequent
+            // 4. Sample rate mismatch
+            const emptyRate = this.metrics.transcriptsReceived > 0 
+              ? ((this.metrics.emptyTranscriptsReceived / this.metrics.transcriptsReceived) * 100).toFixed(1) + '%'
+              : '0%';
+            
+            // Only log warning if empty transcript rate is high (>50%) or if this is a final transcript
+            if (isFinal || parseFloat(emptyRate) > 50) {
+              console.warn(`[DeepgramProvider] ⚠️ Empty transcript received from Deepgram for ${interactionId}`, {
+                isFinal,
+                hasChannel: !!data.channel,
+                hasAlternatives: !!data.channel?.alternatives,
+                alternativesCount: data.channel?.alternatives?.length || 0,
+                emptyTranscriptRate: emptyRate,
+                totalTranscripts: this.metrics.transcriptsReceived,
+                totalEmpty: this.metrics.emptyTranscriptsReceived,
+                rawData: JSON.stringify(data).substring(0, 500), // First 500 chars for debugging
+                note: isFinal ? 'Final transcript is empty - this may indicate silence or format issues' : 'Partial transcript is empty - may be normal for silence',
+              });
+            } else {
+              // Log at debug level for normal empty partials (silence is normal)
+              console.debug(`[DeepgramProvider] Empty partial transcript (silence) for ${interactionId}`, {
+                emptyTranscriptRate: emptyRate,
+              });
+            }
+            
+            // Still resolve pending promises with empty transcript to prevent timeouts
+            const emptyTranscript: Transcript = {
+              type: isFinal ? 'final' : 'partial',
+              text: '',
+              isFinal: isFinal as any,
+            };
+            
+            state.lastTranscript = emptyTranscript;
+            
+            // Resolve any pending promises with empty transcript
+            if (state.pendingResolvers.length > 0) {
+              const resolver = state.pendingResolvers.shift()!;
+              resolver(emptyTranscript);
+            }
           }
         } catch (error: any) {
           console.error(`[DeepgramProvider] Error processing transcript for ${interactionId}:`, error);
