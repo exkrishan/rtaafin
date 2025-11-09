@@ -351,24 +351,42 @@ export class RedisStreamsAdapter implements PubSubAdapter {
     try {
       // Try to create consumer group starting from 0 (beginning of stream)
       await this.redis.xgroup('CREATE', topic, groupName, '0', 'MKSTREAM');
+      console.info(`[RedisStreamsAdapter] ✅ Created new consumer group ${groupName} for ${topic} from position 0`);
     } catch (error: unknown) {
-      // BUSYGROUP means group already exists - that's fine
+      // BUSYGROUP means group already exists - reset its position to 0
       const errorMessage = error instanceof Error ? error.message : String(error);
       if (errorMessage.includes('BUSYGROUP')) {
-        // Group exists, continue
+        // Group exists - reset its read position to 0 to catch all messages
+        try {
+          await this.redis.xgroup('SETID', topic, groupName, '0');
+          console.info(`[RedisStreamsAdapter] ✅ Reset existing consumer group ${groupName} for ${topic} to position 0`);
+        } catch (setIdError: unknown) {
+          const setIdErrorMessage = setIdError instanceof Error ? setIdError.message : String(setIdError);
+          console.warn(`[RedisStreamsAdapter] ⚠️ Failed to reset consumer group position for ${topic}: ${setIdErrorMessage}`);
+          // Continue anyway - we'll handle pending messages in startConsumer
+        }
         return;
       }
       // Other errors might mean stream doesn't exist yet, try without MKSTREAM
       try {
         await this.redis.xgroup('CREATE', topic, groupName, '0');
+        console.info(`[RedisStreamsAdapter] ✅ Created consumer group ${groupName} for ${topic} from position 0 (stream existed)`);
       } catch (err2: unknown) {
         const err2Message = err2 instanceof Error ? err2.message : String(err2);
         if (err2Message.includes('BUSYGROUP')) {
-          // Group exists, continue
+          // Group exists - reset its read position to 0
+          try {
+            await this.redis.xgroup('SETID', topic, groupName, '0');
+            console.info(`[RedisStreamsAdapter] ✅ Reset existing consumer group ${groupName} for ${topic} to position 0`);
+          } catch (setIdError2: unknown) {
+            const setIdError2Message = setIdError2 instanceof Error ? setIdError2.message : String(setIdError2);
+            console.warn(`[RedisStreamsAdapter] ⚠️ Failed to reset consumer group position for ${topic}: ${setIdError2Message}`);
+          }
           return;
         }
         // If stream doesn't exist, it will be created on first XADD
         // We can ignore this error
+        console.debug(`[RedisStreamsAdapter] Stream ${topic} doesn't exist yet, will be created on first publish`);
       }
     }
   }
