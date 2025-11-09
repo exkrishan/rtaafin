@@ -403,14 +403,6 @@ export default function AgentAssistPanelV2({
         </button>
       </div>
 
-      {/* Customer Details Header */}
-      <CustomerDetailsHeader
-        customer={customer}
-        callDuration={callDuration}
-        callId={interactionId}
-        onOpenCRM={onOpenCRM}
-        onOpenCaseHistory={onOpenCaseHistory}
-      />
 
       {/* WebSocket Status Banner */}
       {!wsConnected && (
@@ -430,8 +422,8 @@ export default function AgentAssistPanelV2({
         </div>
       )}
 
-      {/* Content Area */}
-      <div className="flex-1 overflow-y-auto">
+      {/* Content Area - Flex container for 70/30 split */}
+      <div className="flex-1 flex flex-col overflow-hidden">
         {/* Post-Call Disposition View */}
         {!isCallActive && (isLoadingDisposition || dispositionData) ? (
           <div className="p-4 space-y-4">
@@ -522,9 +514,9 @@ export default function AgentAssistPanelV2({
             ) : null}
           </div>
         ) : (
-          <div className="space-y-0">
+          <div className="flex flex-col h-full">
             {/* Manual KB Search - Always Visible */}
-            <div className="p-3 border-b border-gray-200">
+            <div className="p-3 border-b border-gray-200 flex-shrink-0">
               <div className="relative">
                 <input
                   type="text"
@@ -551,31 +543,18 @@ export default function AgentAssistPanelV2({
               </div>
             </div>
 
-            {/* KB Suggestions Accordion */}
-            <div className="border-b border-gray-200">
-              <button
-                onClick={() => setKbSuggestionsOpen(!kbSuggestionsOpen)}
-                className="w-full px-3 py-2 flex items-center justify-between hover:bg-gray-50 transition-colors"
-                aria-expanded={kbSuggestionsOpen}
-              >
+            {/* KB Suggestions Section - 70% of remaining space */}
+            <div className="flex flex-col flex-[0.7] border-b border-gray-200 min-h-0">
+              <div className="px-3 py-2 border-b border-gray-200 flex-shrink-0">
                 <span className="text-sm font-medium text-gray-900">Knowledge Base Suggestions</span>
-                <svg
-                  className={`w-4 h-4 text-gray-500 transition-transform ${kbSuggestionsOpen ? 'transform rotate-180' : ''}`}
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                </svg>
-              </button>
-              {kbSuggestionsOpen && (
-                <div className="px-3 pb-3 space-y-2 max-h-64 overflow-y-auto">
-                  {kbArticles.length === 0 ? (
-                    <div className="text-center py-4 text-sm text-gray-500">
-                      {isSearching ? 'Searching...' : 'Looking for suggestions'}
-                    </div>
-                  ) : (
-                    kbArticles.map((article) => {
+              </div>
+              <div className="flex-1 overflow-y-auto px-3 pb-3 space-y-2">
+                {kbArticles.length === 0 ? (
+                  <div className="text-center py-4 text-sm text-gray-500">
+                    {isSearching ? 'Searching...' : 'Looking for suggestions'}
+                  </div>
+                ) : (
+                  kbArticles.map((article) => {
                       const confidence = article.confidence || article.relevance || 0;
                       const isLowConfidence = confidence < 0.7;
                       
@@ -646,52 +625,44 @@ export default function AgentAssistPanelV2({
                             )}
                           </div>
                         </div>
-                      );
-                    })
-                  )}
-                </div>
-              )}
+                    );
+                  })
+                )}
+              </div>
             </div>
 
-            {/* Progressive Transcript Accordion */}
-            <div className="border-b border-gray-200">
-              <button
-                onClick={() => setTranscriptOpen(!transcriptOpen)}
-                className="w-full px-3 py-2 flex items-center justify-between hover:bg-gray-50 transition-colors"
-                aria-expanded={transcriptOpen}
+            {/* Transcripts Section - 30% of remaining space */}
+            <div className="flex flex-col flex-[0.3] min-h-0">
+              <div className="px-3 py-2 border-b border-gray-200 flex-shrink-0">
+                <span className="text-sm font-medium text-gray-900">Transcripts</span>
+              </div>
+              <div
+                ref={transcriptContainerRef}
+                onScroll={handleTranscriptScroll}
+                className="flex-1 overflow-y-auto px-3 pb-3 space-y-2"
+                role="log"
+                aria-label="Call transcript"
               >
-                <span className="text-sm font-medium text-gray-900">Progressive Transcript</span>
-                <svg
-                  className={`w-4 h-4 text-gray-500 transition-transform ${transcriptOpen ? 'transform rotate-180' : ''}`}
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                </svg>
-              </button>
-              {transcriptOpen && (
-                <div
-                  ref={transcriptContainerRef}
-                  onScroll={handleTranscriptScroll}
-                  className="px-3 pb-3 max-h-96 overflow-y-auto space-y-3"
-                  role="log"
-                  aria-label="Call transcript"
-                >
-                  {utterances.length === 0 ? (
-                    <div className="text-center py-4 text-sm text-gray-500">Waiting for transcript...</div>
-                  ) : (
-                    utterances.map((utterance) => (
+                {utterances.length === 0 ? (
+                  <div className="text-center py-4 text-sm text-gray-500">Waiting for transcript...</div>
+                ) : (
+                  utterances.map((utterance) => {
+                    // Filter out system messages
+                    if (utterance.text.includes('Connected to realtime stream') || utterance.text.includes('clientId:')) {
+                      return null;
+                    }
+                    
+                    return (
                       <div
                         key={utterance.utterance_id}
-                        className={`p-2 rounded-lg ${
+                        className={`p-2 rounded text-sm ${
                           utterance.speaker === 'agent'
-                            ? 'bg-blue-50 ml-4'
-                            : 'bg-green-50 mr-4'
+                            ? 'bg-blue-50 ml-4 text-gray-900'
+                            : 'bg-green-50 mr-4 text-gray-900'
                         }`}
                       >
                         <div className="flex items-center justify-between mb-1">
-                          <span className="text-xs font-medium text-gray-700">
+                          <span className="text-xs font-medium text-gray-600">
                             {utterance.speaker === 'agent' ? 'Agent' : 'Customer'}
                           </span>
                           <div className="flex items-center gap-2">
@@ -719,11 +690,11 @@ export default function AgentAssistPanelV2({
                         </div>
                         <p className="text-sm text-gray-900">{utterance.text}</p>
                       </div>
-                    ))
-                  )}
-                  <div ref={transcriptEndRef} />
-                </div>
-              )}
+                    );
+                  })
+                )}
+                <div ref={transcriptEndRef} />
+              </div>
             </div>
           </div>
         )}

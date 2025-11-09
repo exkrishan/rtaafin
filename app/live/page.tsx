@@ -5,6 +5,7 @@ import TranscriptPanel from '@/components/TranscriptPanel';
 import AutoDispositionModal, { Suggestion } from '@/components/AutoDispositionModal';
 import AgentAssistPanelV2, { KBArticle, DispositionData } from '@/components/AgentAssistPanelV2';
 import CustomerDetailsHeader, { Customer } from '@/components/CustomerDetailsHeader';
+import CallControls from '@/components/CallControls';
 import ToastContainer from '@/components/ToastContainer';
 
 interface EnvCheck {
@@ -275,11 +276,18 @@ export default function LivePage() {
                 window.open(`https://crm.example.com/cases/${mockCustomer.id}`, '_blank');
               }}
             />
-            <div className="flex-1 p-6">
+            <div className="flex-1 p-6 flex flex-col items-center">
               {callId ? (
-                <div className="text-center text-gray-500">
-                  <p className="text-sm">Customer information displayed above. Transcript and KB suggestions in Agent Assist panel on the right.</p>
-                </div>
+                <CallControls
+                  onMute={() => console.log('[Live] Mute clicked')}
+                  onHold={() => console.log('[Live] Hold clicked')}
+                  onTransfer={() => console.log('[Live] Transfer clicked')}
+                  onConference={() => console.log('[Live] Conference clicked')}
+                  onKeypad={() => console.log('[Live] Keypad clicked')}
+                  onRecord={() => console.log('[Live] Record clicked')}
+                  onComplete={() => console.log('[Live] Complete clicked')}
+                  onEndCall={() => console.log('[Live] End call clicked')}
+                />
               ) : (
                 <div className="flex items-center justify-center h-full text-gray-500">
                   <div className="text-center">

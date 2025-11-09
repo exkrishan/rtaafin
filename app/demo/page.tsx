@@ -5,6 +5,7 @@ import TranscriptPanel from '@/components/TranscriptPanel';
 import AutoDispositionModal, { Suggestion } from '@/components/AutoDispositionModal';
 import AgentAssistPanelV2, { KBArticle, DispositionData, Customer } from '@/components/AgentAssistPanelV2';
 import CustomerDetailsHeader from '@/components/CustomerDetailsHeader';
+import CallControls from '@/components/CallControls';
 import ToastContainer from '@/components/ToastContainer';
 
 interface DemoTranscriptLine {
@@ -412,10 +413,20 @@ export default function DemoPage() {
                 window.open('https://crm.example.com/cases/cust-789', '_blank');
               }}
             />
-            <div className="flex-1 p-6">
-              <div className="text-center text-gray-500">
-                <p className="text-sm">Customer information displayed above. Transcript and KB suggestions in Agent Assist panel on the right.</p>
-              </div>
+            <div className="flex-1 p-6 flex flex-col items-center">
+              <CallControls
+                onMute={() => console.log('[Demo] Mute clicked')}
+                onHold={() => console.log('[Demo] Hold clicked')}
+                onTransfer={() => console.log('[Demo] Transfer clicked')}
+                onConference={() => console.log('[Demo] Conference clicked')}
+                onKeypad={() => console.log('[Demo] Keypad clicked')}
+                onRecord={() => console.log('[Demo] Record clicked')}
+                onComplete={() => console.log('[Demo] Complete clicked')}
+                onEndCall={() => {
+                  console.log('[Demo] End call clicked');
+                  stopCall();
+                }}
+              />
             </div>
           </div>
         </div>

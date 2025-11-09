@@ -122,22 +122,14 @@ export default function CustomerDetailsHeader({
           )}
         </div>
 
-        {/* Status Row */}
-        <div className="flex items-center gap-4 mt-4 justify-center text-xs text-gray-500">
-          <div className="flex items-center gap-1">
-            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-            <span>{callDuration}</span>
+        {/* Call Details Row */}
+        <div className="mt-4 text-center text-xs text-gray-600">
+          <div className="space-y-1">
+            <div>Campaign: whatsapp_chat</div>
+            <div>Call Type: Manual Dial</div>
+            <div>Queue: --</div>
+            <div>DID: NODID</div>
           </div>
-          {callId && (
-            <div className="flex items-center gap-1">
-              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 8h10M7 12h10m-7 4h7" />
-              </svg>
-              <span className="font-mono">{callId.substring(0, 8)}</span>
-            </div>
-          )}
         </div>
       </div>
 
