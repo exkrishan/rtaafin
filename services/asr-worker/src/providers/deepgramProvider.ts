@@ -78,11 +78,22 @@ export class DeepgramProvider implements AsrProvider {
     
       if (state) {
       // Connection exists, check if it's still valid
-      if (state.isReady && state.connection) {
+      // CRITICAL: Also check if WebSocket is actually open (readyState === 1)
+      const socketOpen = state.socket && 
+        (state.socket.readyState === 1 || state.socket.readyState === WebSocket.OPEN);
+      
+      if (state.isReady && state.connection && socketOpen) {
         this.metrics.connectionsReused++;
         console.debug(`[DeepgramProvider] Reusing existing connection for ${interactionId}`);
         return state;
       } else {
+        // Connection exists but not ready or socket is closed, log why
+        console.warn(`[DeepgramProvider] Connection exists but not valid for ${interactionId}`, {
+          isReady: state.isReady,
+          hasConnection: !!state.connection,
+          socketReadyState: state.socket?.readyState,
+          socketOpen: socketOpen,
+        });
         // Connection exists but not ready, wait a bit and check again
         // This handles race conditions where connection is being created
         console.warn(`[DeepgramProvider] Connection exists but not ready for ${interactionId}, waiting...`);
@@ -606,6 +617,11 @@ export class DeepgramProvider implements AsrProvider {
           fullEvent: event ? JSON.stringify(event).substring(0, 200) : 'no event data',
         });
         
+        // CRITICAL: Immediately mark connection as not ready and remove from map
+        // This prevents race conditions where audio arrives after close but before cleanup
+        state.isReady = false;
+        this.connections.delete(interactionId);
+        
         // Clear KeepAlive interval when connection closes
         if (state.keepAliveInterval) {
           clearInterval(state.keepAliveInterval);
@@ -630,8 +646,9 @@ export class DeepgramProvider implements AsrProvider {
         }
         
         // Check if we should reconnect (not a clean close, not too many attempts)
+        // NOTE: For 1011 (timeout), we still try to reconnect if we haven't exceeded attempts
+        // because the timeout might be due to temporary network issues
         const shouldReconnect = 
-          !event?.wasClean &&
           event?.code !== 1008 && // Don't reconnect on format errors
           event?.code !== 4000 && // Don't reconnect on auth errors
           state.reconnectAttempts < state.maxReconnectAttempts &&
@@ -642,10 +659,8 @@ export class DeepgramProvider implements AsrProvider {
           state.reconnectAttempts++;
           state.lastReconnectTime = Date.now();
           
-          // Remove from connections map (will be recreated)
-          this.connections.delete(interactionId);
-          
           // Schedule reconnection (don't block)
+          // Note: Connection already deleted from map above
           setTimeout(async () => {
             try {
               // Recreate connection with same parameters
@@ -655,9 +670,6 @@ export class DeepgramProvider implements AsrProvider {
               console.error(`[DeepgramProvider] ❌ Reconnection failed for ${interactionId}:`, error);
             }
           }, 1000);
-        } else {
-          // Final cleanup
-          this.connections.delete(interactionId);
         }
       });
 
