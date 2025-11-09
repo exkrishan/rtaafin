@@ -16,15 +16,20 @@ import { MetricsCollector } from './metrics';
 require('dotenv').config({ path: require('path').join(__dirname, '../../../.env.local') });
 
 const PORT = parseInt(process.env.PORT || '3001', 10);
-// Increase buffer window to send larger chunks to Deepgram
-// Deepgram needs continuous audio streams, not tiny chunks
-// Increased to 1000ms to accumulate at least 200-500ms of audio before processing
-// Buffer window: time-based trigger for processing
-// Increased to 2000ms to accumulate more audio chunks
-const BUFFER_WINDOW_MS = parseInt(process.env.BUFFER_WINDOW_MS || '2000', 10);
-// Minimum audio duration: must have at least this much audio before processing
-// Deepgram requires minimum 200-500ms of audio for reliable transcription
-const MIN_AUDIO_DURATION_MS = parseInt(process.env.MIN_AUDIO_DURATION_MS || '500', 10);
+
+// Deepgram-optimized chunk sizing configuration
+// Deepgram recommends 20-250ms chunks for optimal real-time performance
+// Initial chunk: 200ms minimum for reliable transcription start
+const INITIAL_CHUNK_DURATION_MS = parseInt(process.env.INITIAL_CHUNK_DURATION_MS || '200', 10);
+// Continuous chunks: 100ms for real-time streaming
+const CONTINUOUS_CHUNK_DURATION_MS = parseInt(process.env.CONTINUOUS_CHUNK_DURATION_MS || '100', 10);
+// Maximum chunk size: 250ms per Deepgram recommendation
+const MAX_CHUNK_DURATION_MS = parseInt(process.env.MAX_CHUNK_DURATION_MS || '250', 10);
+// Minimum audio duration before processing (reduced from 500ms to 200ms)
+const MIN_AUDIO_DURATION_MS = parseInt(process.env.MIN_AUDIO_DURATION_MS || '200', 10);
+
+// Legacy buffer window (kept for backward compatibility, but not used for Deepgram)
+const BUFFER_WINDOW_MS = parseInt(process.env.BUFFER_WINDOW_MS || '1000', 10);
 // Stale buffer timeout: if no new audio arrives for this duration, clean up the buffer
 // This prevents processing old audio after a call has ended
 const STALE_BUFFER_TIMEOUT_MS = parseInt(process.env.STALE_BUFFER_TIMEOUT_MS || '5000', 10); // 5 seconds
@@ -92,13 +97,36 @@ class AsrWorker {
           activeBuffers: this.buffers.size,
         };
         
-        // Safely check for Deepgram provider connections
+        // Safely check for Deepgram provider connections and metrics
         try {
           const providerAny = this.asrProvider as any;
           if (providerAny.connections && typeof providerAny.connections.size === 'number') {
             health.activeConnections = providerAny.connections.size;
           } else {
             health.activeConnections = 'N/A';
+          }
+          
+          // Add Deepgram metrics if available
+          if (providerAny.getMetrics && typeof providerAny.getMetrics === 'function') {
+            const deepgramMetrics = providerAny.getMetrics();
+            health.deepgramMetrics = {
+              connectionsCreated: deepgramMetrics.connectionsCreated,
+              connectionsReused: deepgramMetrics.connectionsReused,
+              connectionsClosed: deepgramMetrics.connectionsClosed,
+              audioChunksSent: deepgramMetrics.audioChunksSent,
+              transcriptsReceived: deepgramMetrics.transcriptsReceived,
+              emptyTranscriptsReceived: deepgramMetrics.emptyTranscriptsReceived,
+              emptyTranscriptRate: deepgramMetrics.transcriptsReceived > 0
+                ? ((deepgramMetrics.emptyTranscriptsReceived / deepgramMetrics.transcriptsReceived) * 100).toFixed(1) + '%'
+                : '0%',
+              errors: deepgramMetrics.errors,
+              keepAliveSuccess: deepgramMetrics.keepAliveSuccess,
+              keepAliveFailures: deepgramMetrics.keepAliveFailures,
+              keepAliveSuccessRate: (deepgramMetrics.keepAliveSuccess + deepgramMetrics.keepAliveFailures) > 0
+                ? ((deepgramMetrics.keepAliveSuccess / (deepgramMetrics.keepAliveSuccess + deepgramMetrics.keepAliveFailures)) * 100).toFixed(1) + '%'
+                : 'N/A',
+              averageChunkSizeMs: deepgramMetrics.averageChunkSizeMs.toFixed(0) + 'ms',
+            };
           }
         } catch (e) {
           health.activeConnections = 'N/A';
@@ -230,22 +258,22 @@ class AsrWorker {
       }
       
       if (!buffer.hasSentInitialChunk) {
-        // First chunk: Wait for minimum duration (500ms)
-        if (currentAudioDurationMs >= MIN_AUDIO_DURATION_MS) {
+        // First chunk: Wait for initial chunk duration (200ms, reduced from 500ms)
+        if (currentAudioDurationMs >= INITIAL_CHUNK_DURATION_MS) {
           buffer.isProcessing = true;
           try {
             await this.processBuffer(buffer);
             buffer.lastProcessed = Date.now();
+            buffer.hasSentInitialChunk = true;
+            buffer.lastContinuousSendTime = Date.now();
           } finally {
             buffer.isProcessing = false;
           }
         }
       } else {
-        // After initial chunk: Stream continuously
-        // CRITICAL FIX: Use lastContinuousSendTime which doesn't reset when buffer is cleared
+        // After initial chunk: Stream continuously with Deepgram-optimized sizing
+        // CRITICAL: Use lastContinuousSendTime which doesn't reset when buffer is cleared
         // This ensures continuous streaming works even after buffer is cleared
-        const CONTINUOUS_STREAM_INTERVAL_MS = 500; // Send every 500ms for continuous flow
-        const MIN_CONTINUOUS_CHUNK_MS = 200; // Or if we have 200ms+ accumulated
         
         // Initialize lastContinuousSendTime if not set (should be set after first chunk)
         if (buffer.lastContinuousSendTime === 0) {
@@ -256,14 +284,14 @@ class AsrWorker {
         const timeSinceLastContinuousSend = Date.now() - buffer.lastContinuousSendTime;
         
         // Process if:
-        // 1. Enough time has passed since last continuous send (500ms), OR
-        // 2. We have accumulated enough audio (200ms+), OR
-        // 3. Enough time has passed since last processing (fallback, 500ms)
-        // This ensures continuous flow even if buffer is cleared frequently
+        // 1. Enough time has passed since last continuous send (100ms for real-time), OR
+        // 2. We have accumulated enough audio (100ms), OR
+        // 3. We've accumulated too much audio (250ms max - force send)
+        // This ensures continuous flow with optimal chunk sizes (100-250ms)
         const shouldProcess = 
-          timeSinceLastContinuousSend >= CONTINUOUS_STREAM_INTERVAL_MS ||
-          currentAudioDurationMs >= MIN_CONTINUOUS_CHUNK_MS ||
-          bufferAge >= CONTINUOUS_STREAM_INTERVAL_MS;
+          timeSinceLastContinuousSend >= CONTINUOUS_CHUNK_DURATION_MS ||
+          currentAudioDurationMs >= CONTINUOUS_CHUNK_DURATION_MS ||
+          currentAudioDurationMs >= MAX_CHUNK_DURATION_MS; // Force send if too large
         
         if (shouldProcess) {
           buffer.isProcessing = true;
@@ -282,8 +310,9 @@ class AsrWorker {
             timeSinceLastContinuousSend,
             bufferAge,
             currentAudioDurationMs: currentAudioDurationMs.toFixed(0),
-            needsTime: Math.max(0, CONTINUOUS_STREAM_INTERVAL_MS - Math.max(timeSinceLastContinuousSend, bufferAge)),
-            needsAudio: Math.max(0, MIN_CONTINUOUS_CHUNK_MS - currentAudioDurationMs),
+            needsTime: Math.max(0, CONTINUOUS_CHUNK_DURATION_MS - Math.max(timeSinceLastContinuousSend, bufferAge)),
+            needsAudio: Math.max(0, CONTINUOUS_CHUNK_DURATION_MS - currentAudioDurationMs),
+            maxChunkSize: MAX_CHUNK_DURATION_MS,
           });
         }
       }
@@ -366,6 +395,22 @@ class AsrWorker {
     }, 2000); // Check every 2 seconds
   }
 
+  /**
+   * Helper method to send audio to ASR provider
+   * Extracted for reuse in chunk splitting logic
+   */
+  private async sendToAsrProvider(
+    audio: Buffer,
+    buffer: AudioBuffer,
+    seq: number
+  ): Promise<any> {
+    return await this.asrProvider.sendAudioChunk(audio, {
+      interactionId: buffer.interactionId,
+      seq,
+      sampleRate: buffer.sampleRate,
+    });
+  }
+
   private async processBuffer(buffer: AudioBuffer): Promise<void> {
     if (buffer.chunks.length === 0) {
       return;
@@ -380,13 +425,41 @@ class AsrWorker {
       const totalSamples = combinedAudio.length / 2; // 16-bit = 2 bytes per sample
       const audioDurationMs = (totalSamples / buffer.sampleRate) * 1000;
       
+      // CRITICAL: Enforce maximum chunk size (250ms per Deepgram recommendation)
+      // If buffer is too large, split into multiple chunks
+      if (audioDurationMs > MAX_CHUNK_DURATION_MS) {
+        console.warn(`[ASRWorker] ⚠️ Buffer too large (${audioDurationMs.toFixed(0)}ms > ${MAX_CHUNK_DURATION_MS}ms), splitting into chunks`, {
+          interaction_id: buffer.interactionId,
+          audioDurationMs: audioDurationMs.toFixed(0),
+          maxChunkSize: MAX_CHUNK_DURATION_MS,
+        });
+        
+        // Split into multiple chunks
+        const maxSamples = Math.floor((MAX_CHUNK_DURATION_MS * buffer.sampleRate) / 1000);
+        const maxBytes = maxSamples * 2; // 16-bit = 2 bytes per sample
+        
+        // Process first chunk
+        const firstChunk = combinedAudio.slice(0, maxBytes);
+        await this.sendToAsrProvider(firstChunk, buffer, seq);
+        
+        // Process remaining chunks if any
+        if (combinedAudio.length > maxBytes) {
+          const remainingChunk = combinedAudio.slice(maxBytes);
+          await this.sendToAsrProvider(remainingChunk, buffer, seq + 1);
+        }
+        
+        // Clear all processed chunks
+        buffer.chunks = [];
+        buffer.timestamps = [];
+        return;
+      }
+      
       // CRITICAL: Audio duration check depends on streaming mode
-      // - Initial chunk: Require 500ms minimum (for reliable transcription start)
-      // - Continuous streaming: Allow 200ms+ (to maintain continuous flow)
-      const MIN_CONTINUOUS_CHUNK_MS = 200; // Minimum for continuous streaming
+      // - Initial chunk: Require 200ms minimum (reduced from 500ms)
+      // - Continuous streaming: Allow 100ms+ (for real-time flow)
       const requiredDuration = buffer.hasSentInitialChunk 
-        ? MIN_CONTINUOUS_CHUNK_MS  // Continuous mode: 200ms+
-        : MIN_AUDIO_DURATION_MS;    // Initial chunk: 500ms
+        ? CONTINUOUS_CHUNK_DURATION_MS  // Continuous mode: 100ms+
+        : INITIAL_CHUNK_DURATION_MS;    // Initial chunk: 200ms
       
       if (audioDurationMs < requiredDuration) {
         console.debug(`[ASRWorker] ⏳ Buffer too small (${audioDurationMs.toFixed(0)}ms < ${requiredDuration}ms), waiting for more audio`, {
@@ -411,12 +484,8 @@ class AsrWorker {
         meetsMinimum: audioDurationMs >= MIN_AUDIO_DURATION_MS,
       });
 
-      // Send to ASR provider
-      const transcript = await this.asrProvider.sendAudioChunk(combinedAudio, {
-        interactionId: buffer.interactionId,
-        seq,
-        sampleRate: buffer.sampleRate,
-      });
+      // Send to ASR provider (extracted to helper for chunk splitting)
+      const transcript = await this.sendToAsrProvider(combinedAudio, buffer, seq);
 
       // Record first partial latency
       if (transcript.type === 'partial' && !transcript.isFinal) {
