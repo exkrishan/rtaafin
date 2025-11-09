@@ -481,8 +481,20 @@ export class RedisStreamsAdapter implements PubSubAdapter {
 
       console.info(`[RedisStreamsAdapter] 🔁 Entering consumer loop for ${topic}, subscription.running: ${subscription.running}`);
       
+      let loopIteration = 0;
       while (subscription.running) {
+        loopIteration++;
         try {
+          // Log every 10th iteration to confirm loop is running (every ~10 seconds)
+          if (loopIteration % 10 === 0) {
+            console.info(`[RedisStreamsAdapter] 🔄 Consumer loop iteration ${loopIteration} for ${topic}`, {
+              topic,
+              subscriptionRunning: subscription.running,
+              firstRead: subscription.firstRead,
+              lastReadId: subscription.lastReadId,
+            });
+          }
+          
           // Determine read position:
           // - First read: Use '0' to read from beginning (catch any existing messages)
           //   Note: With XREADGROUP, '0' reads messages that haven't been delivered to the group yet
