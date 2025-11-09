@@ -427,9 +427,9 @@ export class DeepgramProvider implements AsrProvider {
         });
         
         // CRITICAL FIX: Only mark as ready after confirming socket is OPEN (or will be soon)
-        // The Open event may fire before socket.readyState === 1, so we'll verify in flush logic
-        // But we can mark isReady = true here since the connection is established
-        // The actual send logic will check socket.readyState before sending
+        // The Open event has fired - connection is ready to send
+        // Trust the Deepgram SDK - if Open event fires, connection.send() will work
+        // The SDK manages its own WebSocket internally
         state.isReady = true;
         
         // Try to access socket again if not found initially (socket might only be available after Open)
@@ -557,108 +557,53 @@ export class DeepgramProvider implements AsrProvider {
           }, 200); // Retry after 200ms
         }
         
-        // CRITICAL FIX: Flush queued audio chunks with polling to wait for socket.readyState === 1
-        // The Open event may fire before the underlying WebSocket is fully OPEN
+        // CRITICAL FIX: Flush queued audio chunks immediately
+        // The Open event has fired, so isReady is true - trust the SDK and send directly
         if (state.pendingAudioQueue && state.pendingAudioQueue.length > 0) {
           console.info(`[DeepgramProvider] 📤 Flushing ${state.pendingAudioQueue.length} queued audio chunks for ${interactionId}`);
           
-          // Constants for polling
-          const MAX_ATTEMPTS = 10; // Maximum 10 attempts (~5 seconds total)
-          const INITIAL_DELAY_MS = 50; // Start with 50ms delay
-          const MAX_DELAY_MS = 500; // Cap at 500ms delay
+          const queue = state.pendingAudioQueue || [];
+          state.pendingAudioQueue = []; // Clear queue
           
-          // Poll until socket is OPEN (readyState === 1) with exponential backoff
-          const flushQueuedAudio = (attempt: number = 0): void => {
-            
-            // Calculate delay with exponential backoff
-            const delayMs = Math.min(INITIAL_DELAY_MS * Math.pow(2, attempt), MAX_DELAY_MS);
-            
-            // Check if socket is ready
-            const socketReady = state.socket?.readyState === 1;
-            const connectionReady = state.connection && typeof state.connection.send === 'function';
-            
-            if (socketReady && connectionReady) {
-              // Socket is ready - flush the queue
-              const queue = state.pendingAudioQueue || [];
-              state.pendingAudioQueue = []; // Clear queue
+          // Trust the SDK - if isReady is true, connection.send() will work
+          for (const queuedAudio of queue) {
+            try {
+              // Send directly via connection.send() - SDK handles WebSocket state
+              const audioData = queuedAudio.audio instanceof Uint8Array 
+                ? queuedAudio.audio 
+                : new Uint8Array(queuedAudio.audio);
               
-              console.info(`[DeepgramProvider] ✅ Socket is OPEN (readyState: 1), flushing ${queue.length} queued chunks for ${interactionId}`, {
-                attempt,
-                totalDelay: delayMs * attempt,
-                queueSize: queue.length,
-              });
+              state.connection.send(audioData);
+              this.metrics.audioChunksSent++;
+              state.lastSendTime = Date.now();
               
-              for (const queuedAudio of queue) {
-                try {
-                  // Send directly via connection.send (socket is ready)
-                  const audioData = queuedAudio.audio instanceof Uint8Array 
-                    ? queuedAudio.audio 
-                    : new Uint8Array(queuedAudio.audio);
-                  
-                  state.connection.send(audioData);
-                  this.metrics.audioChunksSent++;
-                  state.lastSendTime = Date.now();
-                  
-                  // Track pending send
-                  if (!state.pendingSends) {
-                    state.pendingSends = [];
-                  }
-                  state.pendingSends.push({
-                    seq: queuedAudio.seq,
-                    sendTime: Date.now(),
-                    audioSize: audioData.length,
-                    chunkSizeMs: queuedAudio.durationMs,
-                  });
-                  
-                  console.debug(`[DeepgramProvider] ✅ Flushed queued chunk seq ${queuedAudio.seq} for ${interactionId}`, {
-                    queueDelay: Date.now() - queuedAudio.queuedAt,
-                  });
-                } catch (error: any) {
-                  console.error(`[DeepgramProvider] ❌ Failed to flush queued audio chunk for ${interactionId}:`, {
-                    seq: queuedAudio.seq,
-                    error: error.message || String(error),
-                    queuedAt: new Date(queuedAudio.queuedAt).toISOString(),
-                    queueDelay: Date.now() - queuedAudio.queuedAt,
-                  });
-                }
+              // Track pending send
+              if (!state.pendingSends) {
+                state.pendingSends = [];
               }
-              
-              if (queue.length > 0) {
-                console.info(`[DeepgramProvider] ✅ Successfully flushed ${queue.length} queued audio chunks for ${interactionId}`);
-              }
-            } else if (attempt < MAX_ATTEMPTS) {
-              // Socket not ready yet - retry after delay
-              console.debug(`[DeepgramProvider] ⏳ Socket not ready yet (attempt ${attempt + 1}/${MAX_ATTEMPTS})`, {
-                interactionId,
-                socketReadyState: state.socket?.readyState ?? 'unknown',
-                hasConnection: !!state.connection,
-                hasSocket: !!state.socket,
-                delayMs,
+              state.pendingSends.push({
+                seq: queuedAudio.seq,
+                sendTime: Date.now(),
+                audioSize: audioData.length,
+                chunkSizeMs: queuedAudio.durationMs,
               });
               
-              setTimeout(() => {
-                flushQueuedAudio(attempt + 1);
-              }, delayMs);
-            } else {
-              // Max attempts reached - re-queue and log warning
-              console.warn(`[DeepgramProvider] ⚠️ Socket did not become OPEN after ${MAX_ATTEMPTS} attempts, re-queueing ${state.pendingAudioQueue?.length || 0} chunks for ${interactionId}`, {
-                interactionId,
-                socketReadyState: state.socket?.readyState ?? 'unknown',
-                hasConnection: !!state.connection,
-                hasSocket: !!state.socket,
-                totalDelay: delayMs * MAX_ATTEMPTS,
-                note: 'Audio will be sent when socket becomes OPEN or on next send attempt',
+              console.debug(`[DeepgramProvider] ✅ Flushed queued chunk seq ${queuedAudio.seq} for ${interactionId}`, {
+                queueDelay: Date.now() - queuedAudio.queuedAt,
               });
-              
-              // Keep the queue - it will be flushed on next send attempt or when socket becomes ready
-              // Don't clear the queue here - let it be flushed by the normal send flow
+            } catch (error: any) {
+              console.error(`[DeepgramProvider] ❌ Failed to flush queued audio chunk for ${interactionId}:`, {
+                seq: queuedAudio.seq,
+                error: error.message || String(error),
+                queuedAt: new Date(queuedAudio.queuedAt).toISOString(),
+                queueDelay: Date.now() - queuedAudio.queuedAt,
+              });
             }
-          };
+          }
           
-          // Start flushing with initial delay
-          setTimeout(() => {
-            flushQueuedAudio(0);
-          }, INITIAL_DELAY_MS);
+          if (queue.length > 0) {
+            console.info(`[DeepgramProvider] ✅ Successfully flushed ${queue.length} queued audio chunks for ${interactionId}`);
+          }
         }
         
         // Set up periodic KeepAlive (every 3 seconds) to prevent timeout during silence
@@ -1401,109 +1346,13 @@ export class DeepgramProvider implements AsrProvider {
         });
         console.info(`[DeepgramProvider] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
         
-        // CRITICAL FIX: Verify connection is ready, then wait for socket to be OPEN
-        // The Deepgram SDK's Open event can fire before the underlying WebSocket is fully OPEN
-        // We need to wait for socket.readyState === 1 before sending
+        // CRITICAL FIX: Trust the Deepgram SDK - if isReady is true, send directly
+        // The SDK manages its own WebSocket internally and will handle the state
+        // We don't need to check socket.readyState - the SDK's connection.send() handles it
         const connectionReady = stateToUse.isReady && !!stateToUse.connection;
         
         if (!connectionReady) {
           throw new Error(`Connection not ready for ${interactionId} (isReady: ${stateToUse.isReady}, hasConnection: ${!!stateToUse.connection})`);
-        }
-        
-        // Wait for underlying WebSocket to be OPEN (readyState === 1)
-        // This addresses the race condition where Open event fires but socket is still CONNECTING
-        if (stateToUse.socket && stateToUse.socket.readyState !== 1) {
-          console.debug(`[DeepgramProvider] ⏳ Waiting for socket to be OPEN for ${interactionId} (current state: ${stateToUse.socket.readyState})`);
-          
-          try {
-            await new Promise<void>((resolve, reject) => {
-              const timeout = setTimeout(() => {
-                clearInterval(checkSocket);
-                // Enhanced error message with connection health info
-                const currentState = this.connections.get(interactionId);
-                reject(new Error(`Socket did not become ready within 3000ms for ${interactionId} (socketReadyState: ${currentState?.socket?.readyState ?? 'unknown'}, isReady: ${currentState?.isReady ?? false}, hasConnection: ${!!currentState?.connection})`));
-              }, 3000);
-              
-              const checkSocket = setInterval(() => {
-                // Re-fetch state to ensure we have the latest
-                const currentState = this.connections.get(interactionId);
-                if (!currentState || !currentState.socket) {
-                  clearInterval(checkSocket);
-                  clearTimeout(timeout);
-                  reject(new Error(`Connection or socket was deleted while waiting for ${interactionId}`));
-                  return;
-                }
-                
-                // Check if socket is closing or closed - don't wait for these
-                if (currentState.socket.readyState === 2 || currentState.socket.readyState === 3) {
-                  clearInterval(checkSocket);
-                  clearTimeout(timeout);
-                  reject(new Error(`Socket is closing/closed (readyState: ${currentState.socket.readyState}) for ${interactionId}`));
-                  return;
-                }
-                
-                if (currentState.socket.readyState === 1) {
-                  clearInterval(checkSocket);
-                  clearTimeout(timeout);
-                  console.debug(`[DeepgramProvider] ✅ Socket is now OPEN for ${interactionId}`);
-                  resolve();
-                }
-              }, 50); // Check every 50ms
-            });
-            
-            // Re-fetch state after wait (socket might have changed)
-            const stateAfterWait = this.connections.get(interactionId);
-            if (!stateAfterWait || !stateAfterWait.isReady || !stateAfterWait.connection) {
-              throw new Error(`Connection invalid after socket wait for ${interactionId}`);
-            }
-            // Update stateToUse to use the latest state
-            Object.assign(stateToUse, stateAfterWait);
-          } catch (waitError: any) {
-            // Enhanced error handling: if socket wait fails, try to queue audio instead of failing immediately
-            console.warn(`[DeepgramProvider] ⚠️ Socket wait failed for ${interactionId}, queueing audio:`, {
-              error: waitError.message || String(waitError),
-              socketReadyState: stateToUse.socket?.readyState,
-              isReady: stateToUse.isReady,
-              hasConnection: !!stateToUse.connection,
-            });
-            
-            // Queue audio for later flush when socket becomes ready
-            if (!stateToUse.pendingAudioQueue) {
-              stateToUse.pendingAudioQueue = [];
-            }
-            
-            const bytesPerSample = 2;
-            const samples = audio.length / bytesPerSample;
-            const durationMs = (samples / sampleRate) * 1000;
-            
-            stateToUse.pendingAudioQueue.push({
-              audio: audio instanceof Uint8Array ? audio : new Uint8Array(audio),
-              seq,
-              sampleRate,
-              durationMs,
-              queuedAt: Date.now(),
-            });
-            
-            console.info(`[DeepgramProvider] ⏳ Queueing audio chunk (socket not ready)`, {
-              interactionId,
-              seq,
-              queueSize: stateToUse.pendingAudioQueue.length,
-              note: 'Audio will be flushed when socket becomes OPEN',
-            });
-            
-            // Return empty transcript promise - actual send will happen when socket is ready
-            return new Promise<Transcript>((resolve) => {
-              // Resolve with empty transcript for now - actual transcript will come after flush
-              setTimeout(() => {
-                resolve({
-                  type: 'partial',
-                  text: '',
-                  isFinal: false,
-                  confidence: 0,
-                });
-              }, 100);
-            });
-          }
         }
         
         try {
@@ -1514,30 +1363,22 @@ export class DeepgramProvider implements AsrProvider {
             stateToUse.pendingAudioQueue = []; // Clear queue
             
             // Flush queue first, then send current chunk
+            // Trust the SDK - if isReady is true, connection.send() will work
             for (const queuedAudio of queue) {
               try {
-                // Verify socket is still ready before flushing
-                if (stateToUse.socket?.readyState === 1) {
-                  stateToUse.connection.send(queuedAudio.audio instanceof Uint8Array ? queuedAudio.audio : new Uint8Array(queuedAudio.audio));
-                  this.metrics.audioChunksSent++;
-                  stateToUse.lastSendTime = Date.now();
-                  console.debug(`[DeepgramProvider] ✅ Flushed queued chunk seq ${queuedAudio.seq} for ${interactionId}`);
-                } else {
-                  console.warn(`[DeepgramProvider] ⚠️ Skipping queued chunk seq ${queuedAudio.seq} - socket not ready (readyState: ${stateToUse.socket?.readyState})`);
-                }
+                stateToUse.connection.send(queuedAudio.audio instanceof Uint8Array ? queuedAudio.audio : new Uint8Array(queuedAudio.audio));
+                this.metrics.audioChunksSent++;
+                stateToUse.lastSendTime = Date.now();
+                console.debug(`[DeepgramProvider] ✅ Flushed queued chunk seq ${queuedAudio.seq} for ${interactionId}`);
               } catch (error: any) {
                 console.error(`[DeepgramProvider] ❌ Failed to flush queued chunk seq ${queuedAudio.seq}:`, error);
               }
             }
           }
           
-          // Verify socket is ready one more time before sending
-          if (stateToUse.socket?.readyState !== 1) {
-            throw new Error(`Socket not ready for ${interactionId} (socketReadyState: ${stateToUse.socket?.readyState}, isReady: ${stateToUse.isReady})`);
-          }
-          
           // Send audio via Deepgram SDK connection.send()
-          // Socket is confirmed to be OPEN (readyState === 1) at this point
+          // Trust the SDK - if isReady is true, it's ready to send
+          // The SDK's connection.send() method handles the underlying WebSocket state internally
           stateToUse.connection.send(audioData);
           const sendDuration = Date.now() - sendStartTime;
           
