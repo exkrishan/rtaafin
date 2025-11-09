@@ -38,6 +38,7 @@ interface AudioBuffer {
   timestamps: number[];
   lastProcessed: number;
   lastChunkReceived: number; // Timestamp of last audio chunk received
+  hasSentInitialChunk: boolean; // Track if we've sent the initial 500ms chunk
 }
 
 class AsrWorker {
@@ -158,6 +159,7 @@ class AsrWorker {
           timestamps: [],
           lastProcessed: Date.now(),
           lastChunkReceived: Date.now(),
+          hasSentInitialChunk: false, // Haven't sent initial chunk yet
         };
         this.buffers.set(interaction_id, buffer);
       }
@@ -189,9 +191,20 @@ class AsrWorker {
       // Record metrics
       this.metrics.recordAudioChunk(interaction_id);
 
-      // Check if we should process the buffer
+      // CRITICAL: Deepgram streaming requires CONTINUOUS audio flow
+      // Strategy:
+      // 1. First chunk: Wait for 500ms minimum before sending (initial chunk)
+      // 2. After initial chunk: Send new chunks continuously as they arrive (streaming mode)
+      // This ensures Deepgram receives continuous audio, not one chunk then silence
+      
       const bufferAge = Date.now() - buffer.lastProcessed;
-      if (bufferAge >= BUFFER_WINDOW_MS) {
+      const shouldProcess = 
+        // If we haven't sent initial chunk, wait for minimum duration
+        (!buffer.hasSentInitialChunk && currentAudioDurationMs >= MIN_AUDIO_DURATION_MS) ||
+        // If we've sent initial chunk, process on time-based trigger (continuous streaming)
+        (buffer.hasSentInitialChunk && bufferAge >= BUFFER_WINDOW_MS);
+      
+      if (shouldProcess) {
         await this.processBuffer(buffer);
         buffer.lastProcessed = Date.now();
       }
@@ -358,19 +371,25 @@ class AsrWorker {
         });
       }
 
+      // Mark that we've sent the initial chunk (for continuous streaming)
+      buffer.hasSentInitialChunk = true;
+      
       // Clear buffer if final transcript
       if (transcript.isFinal) {
         this.buffers.delete(buffer.interactionId);
         this.metrics.resetInteraction(buffer.interactionId);
       } else {
         // Clear ALL processed chunks to prevent reprocessing
-        // The buffer will accumulate new chunks for the next window
+        // The buffer will accumulate new chunks for continuous streaming
         // This prevents infinite loop of processing same chunks
         const clearedChunksCount = buffer.chunks.length;
         buffer.chunks = [];
         buffer.timestamps = [];
         
-        console.info(`[ASRWorker] ✅ Cleared ${clearedChunksCount} chunks from buffer for ${buffer.interactionId} after processing`);
+        console.info(`[ASRWorker] ✅ Cleared ${clearedChunksCount} chunks from buffer for ${buffer.interactionId} after processing`, {
+          hasSentInitialChunk: buffer.hasSentInitialChunk,
+          note: 'Will now stream continuously as new chunks arrive',
+        });
       }
     } catch (error: any) {
       console.error('[ASRWorker] Error processing buffer:', error);
