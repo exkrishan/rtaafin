@@ -498,19 +498,42 @@ export class DeepgramProvider implements AsrProvider {
         try {
           this.metrics.transcriptsReceived++;
           
-          // Log ALL transcript events to debug
+          // CRITICAL: Log FULL transcript event structure for debugging
           console.info(`[DeepgramProvider] 📨 Transcript event received for ${interactionId}`, {
-            hasChannel: !!data.channel,
-            hasAlternatives: !!data.channel?.alternatives,
-            alternativesCount: data.channel?.alternatives?.length || 0,
-            isFinal: data.is_final || false,
-            speechFinal: data.speech_final,
-            rawDataKeys: Object.keys(data),
+            hasChannel: !!data?.channel,
+            hasAlternatives: !!data?.channel?.alternatives,
+            alternativesCount: data?.channel?.alternatives?.length ?? 0,
+            isFinal: data?.is_final ?? false,
+            speechFinal: data?.speech_final ?? false,
+            rawDataKeys: data ? Object.keys(data) : [],
+            // Log full data structure (truncated for readability)
+            fullDataPreview: data ? JSON.stringify(data).substring(0, 1000) : 'null',
           });
           
-          const transcriptText = data.channel?.alternatives?.[0]?.transcript;
-          const isFinal = data.is_final || false;
-          const confidence = data.channel?.alternatives?.[0]?.confidence || 0.9;
+          // Log each alternative transcript in detail
+          if (data?.channel?.alternatives && Array.isArray(data.channel.alternatives)) {
+            data.channel.alternatives.forEach((alt: any, idx: number) => {
+              console.info(`[DeepgramProvider] 📝 Alternative ${idx} for ${interactionId}:`, {
+                transcript: alt.transcript || '(empty)',
+                transcriptLength: alt.transcript?.length ?? 0,
+                confidence: alt.confidence,
+                words: alt.words?.length ?? 0,
+                hasWords: !!alt.words,
+                alternativeKeys: alt ? Object.keys(alt) : [],
+              });
+            });
+          } else {
+            console.warn(`[DeepgramProvider] ⚠️ No alternatives in transcript data for ${interactionId}`, {
+              dataStructure: data ? Object.keys(data) : 'null',
+              channelStructure: data?.channel ? Object.keys(data.channel) : 'null',
+              channelType: typeof data?.channel,
+              alternativesType: typeof data?.channel?.alternatives,
+            });
+          }
+          
+          const transcriptText = data?.channel?.alternatives?.[0]?.transcript;
+          const isFinal = data?.is_final ?? false;
+          const confidence = data?.channel?.alternatives?.[0]?.confidence ?? 0.9;
 
           if (transcriptText && transcriptText.trim().length > 0) {
             const transcript: Transcript = {
