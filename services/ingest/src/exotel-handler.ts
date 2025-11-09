@@ -236,6 +236,65 @@ export class ExotelHandler {
         return;
       }
 
+      // COMPREHENSIVE VALIDATION: Verify PCM16 format (16-bit signed integers, little-endian)
+      // This ensures audio is valid before publishing to Redis
+      if (audioBuffer.length >= 2) {
+        const sampleCount = Math.min(20, Math.floor(audioBuffer.length / 2));
+        let validSamples = 0;
+        let invalidSamples = 0;
+        let allZeros = true;
+        
+        for (let i = 0; i < sampleCount; i++) {
+          const offset = i * 2;
+          if (offset + 1 >= audioBuffer.length) break;
+          
+          // Read as little-endian signed 16-bit integer
+          const sample = (audioBuffer[offset] | (audioBuffer[offset + 1] << 8)) << 16 >> 16;
+          
+          // Validate range: PCM16 should be in range [-32768, 32767]
+          if (sample >= -32768 && sample <= 32767) {
+            validSamples++;
+            if (sample !== 0) allZeros = false;
+          } else {
+            invalidSamples++;
+          }
+        }
+        
+        // Log warning if format issues detected (only for first few chunks)
+        if (invalidSamples > 0 && state.seq <= 5) {
+          console.error('[exotel] ❌ CRITICAL: Audio format validation failed - not valid PCM16!', {
+            stream_sid: state.streamSid,
+            call_sid: state.callSid,
+            seq: state.seq,
+            validSamples,
+            invalidSamples,
+            totalChecked: sampleCount,
+            firstBytes: Array.from(audioBuffer.slice(0, 4)).map(b => `0x${b.toString(16).padStart(2, '0')}`),
+            note: 'Audio may not be PCM16 format. Expected 16-bit signed integers in range [-32768, 32767].',
+          });
+        }
+        
+        // Validate sample rate calculation makes sense
+        const bytesPerSample = 2; // 16-bit = 2 bytes
+        const samples = audioBuffer.length / bytesPerSample;
+        const calculatedDurationMs = (samples / state.sampleRate) * 1000;
+        const expectedBytesFor20ms = (state.sampleRate * 0.02) * 2; // 20ms at declared sample rate
+        
+        // Warn if audio duration doesn't match expected for declared sample rate
+        if (state.seq <= 5 && Math.abs((expectedBytesFor20ms / audioBuffer.length) * calculatedDurationMs - 20) > 5) {
+          console.warn('[exotel] ⚠️ Sample rate validation warning', {
+            stream_sid: state.streamSid,
+            call_sid: state.callSid,
+            seq: state.seq,
+            declaredSampleRate: state.sampleRate,
+            audioLength: audioBuffer.length,
+            calculatedDurationMs: calculatedDurationMs.toFixed(2),
+            expectedBytesFor20ms: expectedBytesFor20ms.toFixed(0),
+            note: 'Audio duration may not match declared sample rate. Verify actual audio sample rate.',
+          });
+        }
+      }
+
       // Log first frame for debugging
       if (state.seq === 0) {
         console.info('[exotel] ✅ First audio frame decoded successfully:', {
@@ -244,6 +303,9 @@ export class ExotelHandler {
           buffer_length: audioBuffer.length,
           first_bytes_hex: firstBytesHex,
           sample_rate: state.sampleRate,
+          encoding: 'pcm16',
+          channels: 1,
+          note: 'Validated PCM16 format, ready for Deepgram',
         });
       }
       

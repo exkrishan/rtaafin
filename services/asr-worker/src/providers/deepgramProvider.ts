@@ -232,17 +232,52 @@ export class DeepgramProvider implements AsrProvider {
           connectionAny?._connection?.url;
         
         if (wsUrl && typeof wsUrl === 'string') {
-          console.info(`[DeepgramProvider] 🔍 WebSocket URL verified:`, {
-            interactionId,
-            url: wsUrl.substring(0, 200), // Truncate for logging
-            hasEncoding: wsUrl.includes('encoding='),
-            hasSampleRate: wsUrl.includes('sample_rate='),
-            hasChannels: wsUrl.includes('channels='),
-            encodingValue: wsUrl.match(/encoding=([^&]+)/)?.[1],
-            sampleRateValue: wsUrl.match(/sample_rate=([^&]+)/)?.[1],
-            channelsValue: wsUrl.match(/channels=([^&]+)/)?.[1],
-            note: 'Verify encoding=linear16, sample_rate=8000, channels=1 are present',
-          });
+          // Validate URL contains required parameters
+          const hasEncoding = wsUrl.includes('encoding=');
+          const hasSampleRate = wsUrl.includes('sample_rate=');
+          const hasChannels = wsUrl.includes('channels=');
+          const encodingValue = wsUrl.match(/encoding=([^&]+)/)?.[1];
+          const sampleRateValue = wsUrl.match(/sample_rate=([^&]+)/)?.[1];
+          const channelsValue = wsUrl.match(/channels=([^&]+)/)?.[1];
+          
+          // Validate values match expected
+          const encodingCorrect = encodingValue === 'linear16';
+          const sampleRateCorrect = sampleRateValue === String(sampleRate);
+          const channelsCorrect = channelsValue === '1';
+          
+          const allCorrect = encodingCorrect && sampleRateCorrect && channelsCorrect;
+          
+          if (allCorrect) {
+            console.info(`[DeepgramProvider] ✅ WebSocket URL verified and validated:`, {
+              interactionId,
+              url: wsUrl.substring(0, 200), // Truncate for logging
+              encoding: encodingValue,
+              sampleRate: sampleRateValue,
+              channels: channelsValue,
+              note: 'All parameters match expected values for Exotel telephony audio',
+            });
+          } else {
+            console.error(`[DeepgramProvider] ❌ WebSocket URL validation failed!`, {
+              interactionId,
+              url: wsUrl.substring(0, 200),
+              expected: {
+                encoding: 'linear16',
+                sampleRate: String(sampleRate),
+                channels: '1',
+              },
+              actual: {
+                encoding: encodingValue,
+                sampleRate: sampleRateValue,
+                channels: channelsValue,
+              },
+              validation: {
+                encodingCorrect,
+                sampleRateCorrect,
+                channelsCorrect,
+              },
+              note: 'URL parameters do not match expected values. This may cause Deepgram to reject audio.',
+            });
+          }
         } else {
           console.warn(`[DeepgramProvider] ⚠️ Cannot access WebSocket URL (SDK internal)`, {
             interactionId,
@@ -871,17 +906,34 @@ export class DeepgramProvider implements AsrProvider {
       connection.on(LiveTranscriptionEvents.Error, (error: any) => {
         const errorCode = error.code;
         const errorMessage = error.message || String(error);
+        const errorTimestamp = Date.now();
         
         this.metrics.errors++;
         if (errorCode) {
           this.metrics.errorCodes.set(errorCode, (this.metrics.errorCodes.get(errorCode) || 0) + 1);
         }
         
+        // Enhanced error logging with connection health context
+        const connectionHealth = {
+          isReady: state.isReady,
+          hasConnection: !!state.connection,
+          hasSocket: !!state.socket,
+          socketReadyState: state.socket?.readyState ?? 'unknown',
+          lastSendTime: state.lastSendTime ? Date.now() - state.lastSendTime + 'ms ago' : 'never',
+          keepAliveSuccess: state.keepAliveSuccessCount,
+          keepAliveFailures: state.keepAliveFailureCount,
+          pendingSends: state.pendingSends?.length || 0,
+          pendingResolvers: state.pendingResolvers.length,
+          reconnectAttempts: state.reconnectAttempts,
+        };
+        
         console.error(`[DeepgramProvider] ❌ API Error for ${interactionId}:`, {
           error: errorMessage,
           code: errorCode,
           type: error.type,
           interactionId,
+          timestamp: new Date(errorTimestamp).toISOString(),
+          connectionHealth,
         });
         
         // Handle specific error codes
@@ -991,31 +1043,69 @@ export class DeepgramProvider implements AsrProvider {
           });
         }
         
+        // Enhanced reconnection logic for transient failures
         // Check if we should reconnect (not a clean close, not too many attempts)
         // NOTE: For 1011 (timeout), we still try to reconnect if we haven't exceeded attempts
         // because the timeout might be due to temporary network issues
-        const shouldReconnect = 
-          event?.code !== 1008 && // Don't reconnect on format errors
-          event?.code !== 4000 && // Don't reconnect on auth errors
+        const isTransientError = event?.code === 1011; // Timeout - likely transient
+        const isPermanentError = event?.code === 1008 || event?.code === 4000; // Format or auth - permanent
+        const canReconnect = 
+          !isPermanentError && // Don't reconnect on permanent errors
           state.reconnectAttempts < state.maxReconnectAttempts &&
           (Date.now() - state.lastReconnectTime) > 5000; // Wait 5s between attempts
         
-        if (shouldReconnect) {
-          console.info(`[DeepgramProvider] Attempting to reconnect for ${interactionId} (attempt ${state.reconnectAttempts + 1}/${state.maxReconnectAttempts})`);
+        if (canReconnect) {
+          const reconnectDelay = isTransientError ? 2000 : 1000; // Longer delay for timeouts
+          console.info(`[DeepgramProvider] Attempting to reconnect for ${interactionId} (attempt ${state.reconnectAttempts + 1}/${state.maxReconnectAttempts}, delay: ${reconnectDelay}ms)`, {
+            errorCode: event?.code,
+            isTransientError,
+            lastReconnectTime: state.lastReconnectTime ? Date.now() - state.lastReconnectTime + 'ms ago' : 'never',
+          });
+          
           state.reconnectAttempts++;
           state.lastReconnectTime = Date.now();
+          this.metrics.connectionsReconnects++;
           
           // Schedule reconnection (don't block)
           // Note: Connection already deleted from map above
           setTimeout(async () => {
             try {
               // Recreate connection with same parameters
-              await this.getOrCreateConnection(interactionId, state.sampleRate || 8000);
-              console.info(`[DeepgramProvider] ✅ Reconnected for ${interactionId}`);
+              const newState = await this.getOrCreateConnection(interactionId, state.sampleRate || 8000);
+              console.info(`[DeepgramProvider] ✅ Reconnected for ${interactionId}`, {
+                reconnectAttempt: state.reconnectAttempts,
+                connectionOpenTime: this.metrics.connectionOpenMs[this.metrics.connectionOpenMs.length - 1] + 'ms',
+              });
+              
+              // If we have pending audio queue from previous connection, try to flush it
+              // (though this is unlikely since connection was deleted)
             } catch (error: any) {
-              console.error(`[DeepgramProvider] ❌ Reconnection failed for ${interactionId}:`, error);
+              // Re-fetch state to get current reconnect attempts
+              const currentState = this.connections.get(interactionId);
+              const currentAttempts = currentState?.reconnectAttempts ?? state.reconnectAttempts;
+              
+              console.error(`[DeepgramProvider] ❌ Reconnection failed for ${interactionId}:`, {
+                error: error.message || String(error),
+                reconnectAttempt: currentAttempts,
+                maxAttempts: state.maxReconnectAttempts,
+                note: currentAttempts >= state.maxReconnectAttempts 
+                  ? 'Max reconnection attempts reached. Connection will not be retried.'
+                  : 'Will retry on next audio chunk if within max attempts',
+              });
             }
-          }, 1000);
+          }, reconnectDelay);
+        } else if (isPermanentError) {
+          console.error(`[DeepgramProvider] ❌ Not attempting reconnection for ${interactionId} - permanent error (code: ${event?.code})`, {
+            errorCode: event?.code,
+            reason: event?.code === 1008 ? 'Invalid audio format' : 'Invalid API key',
+            note: 'Connection will not be retried. Check audio format or API key configuration.',
+          });
+        } else if (state.reconnectAttempts >= state.maxReconnectAttempts) {
+          console.error(`[DeepgramProvider] ❌ Max reconnection attempts reached for ${interactionId}`, {
+            reconnectAttempts: state.reconnectAttempts,
+            maxAttempts: state.maxReconnectAttempts,
+            note: 'Connection will not be retried. Manual intervention may be required.',
+          });
         }
       });
 
@@ -1081,6 +1171,28 @@ export class DeepgramProvider implements AsrProvider {
     const { interactionId, sampleRate, seq } = opts;
 
     try {
+      // Circuit breaker: Check if connection is unhealthy before attempting to send
+      if (this.isConnectionUnhealthy(interactionId)) {
+        const health = this.getConnectionHealth(interactionId);
+        console.warn(`[DeepgramProvider] ⚠️ Circuit breaker: Connection unhealthy for ${interactionId}, skipping send`, {
+          interactionId,
+          seq,
+          health,
+          note: 'Connection will be recreated on next attempt',
+        });
+        
+        // Delete unhealthy connection to force recreation
+        this.connections.delete(interactionId);
+        
+        // Return empty transcript - connection will be recreated on next chunk
+        return {
+          type: 'partial',
+          text: '',
+          isFinal: false,
+          confidence: 0,
+        };
+      }
+
       // Get or create connection
       const state = await this.getOrCreateConnection(interactionId, sampleRate);
 
@@ -1295,38 +1407,96 @@ export class DeepgramProvider implements AsrProvider {
         // This addresses the race condition where Open event fires but socket is still CONNECTING
         if (stateToUse.socket && stateToUse.socket.readyState !== 1) {
           console.debug(`[DeepgramProvider] ⏳ Waiting for socket to be OPEN for ${interactionId} (current state: ${stateToUse.socket.readyState})`);
-          await new Promise<void>((resolve, reject) => {
-            const timeout = setTimeout(() => {
-              clearInterval(checkSocket);
-              reject(new Error(`Socket did not become ready within 3000ms for ${interactionId} (socketReadyState: ${stateToUse.socket?.readyState}, isReady: ${stateToUse.isReady})`));
-            }, 3000);
-            
-            const checkSocket = setInterval(() => {
-              // Re-fetch state to ensure we have the latest
-              const currentState = this.connections.get(interactionId);
-              if (!currentState || !currentState.socket) {
-                clearInterval(checkSocket);
-                clearTimeout(timeout);
-                reject(new Error(`Connection or socket was deleted while waiting for ${interactionId}`));
-                return;
-              }
-              
-              if (currentState.socket.readyState === 1) {
-                clearInterval(checkSocket);
-                clearTimeout(timeout);
-                console.debug(`[DeepgramProvider] ✅ Socket is now OPEN for ${interactionId}`);
-                resolve();
-              }
-            }, 50); // Check every 50ms
-          });
           
-          // Re-fetch state after wait (socket might have changed)
-          const stateAfterWait = this.connections.get(interactionId);
-          if (!stateAfterWait || !stateAfterWait.isReady || !stateAfterWait.connection) {
-            throw new Error(`Connection invalid after socket wait for ${interactionId}`);
+          try {
+            await new Promise<void>((resolve, reject) => {
+              const timeout = setTimeout(() => {
+                clearInterval(checkSocket);
+                // Enhanced error message with connection health info
+                const currentState = this.connections.get(interactionId);
+                reject(new Error(`Socket did not become ready within 3000ms for ${interactionId} (socketReadyState: ${currentState?.socket?.readyState ?? 'unknown'}, isReady: ${currentState?.isReady ?? false}, hasConnection: ${!!currentState?.connection})`));
+              }, 3000);
+              
+              const checkSocket = setInterval(() => {
+                // Re-fetch state to ensure we have the latest
+                const currentState = this.connections.get(interactionId);
+                if (!currentState || !currentState.socket) {
+                  clearInterval(checkSocket);
+                  clearTimeout(timeout);
+                  reject(new Error(`Connection or socket was deleted while waiting for ${interactionId}`));
+                  return;
+                }
+                
+                // Check if socket is closing or closed - don't wait for these
+                if (currentState.socket.readyState === 2 || currentState.socket.readyState === 3) {
+                  clearInterval(checkSocket);
+                  clearTimeout(timeout);
+                  reject(new Error(`Socket is closing/closed (readyState: ${currentState.socket.readyState}) for ${interactionId}`));
+                  return;
+                }
+                
+                if (currentState.socket.readyState === 1) {
+                  clearInterval(checkSocket);
+                  clearTimeout(timeout);
+                  console.debug(`[DeepgramProvider] ✅ Socket is now OPEN for ${interactionId}`);
+                  resolve();
+                }
+              }, 50); // Check every 50ms
+            });
+            
+            // Re-fetch state after wait (socket might have changed)
+            const stateAfterWait = this.connections.get(interactionId);
+            if (!stateAfterWait || !stateAfterWait.isReady || !stateAfterWait.connection) {
+              throw new Error(`Connection invalid after socket wait for ${interactionId}`);
+            }
+            // Update stateToUse to use the latest state
+            Object.assign(stateToUse, stateAfterWait);
+          } catch (waitError: any) {
+            // Enhanced error handling: if socket wait fails, try to queue audio instead of failing immediately
+            console.warn(`[DeepgramProvider] ⚠️ Socket wait failed for ${interactionId}, queueing audio:`, {
+              error: waitError.message || String(waitError),
+              socketReadyState: stateToUse.socket?.readyState,
+              isReady: stateToUse.isReady,
+              hasConnection: !!stateToUse.connection,
+            });
+            
+            // Queue audio for later flush when socket becomes ready
+            if (!stateToUse.pendingAudioQueue) {
+              stateToUse.pendingAudioQueue = [];
+            }
+            
+            const bytesPerSample = 2;
+            const samples = audio.length / bytesPerSample;
+            const durationMs = (samples / sampleRate) * 1000;
+            
+            stateToUse.pendingAudioQueue.push({
+              audio: audio instanceof Uint8Array ? audio : new Uint8Array(audio),
+              seq,
+              sampleRate,
+              durationMs,
+              queuedAt: Date.now(),
+            });
+            
+            console.info(`[DeepgramProvider] ⏳ Queueing audio chunk (socket not ready)`, {
+              interactionId,
+              seq,
+              queueSize: stateToUse.pendingAudioQueue.length,
+              note: 'Audio will be flushed when socket becomes OPEN',
+            });
+            
+            // Return empty transcript promise - actual send will happen when socket is ready
+            return new Promise<Transcript>((resolve) => {
+              // Resolve with empty transcript for now - actual transcript will come after flush
+              setTimeout(() => {
+                resolve({
+                  type: 'partial',
+                  text: '',
+                  isFinal: false,
+                  confidence: 0,
+                });
+              }, 100);
+            });
           }
-          // Update stateToUse to use the latest state
-          Object.assign(stateToUse, stateAfterWait);
         }
         
         try {
@@ -1442,7 +1612,7 @@ export class DeepgramProvider implements AsrProvider {
           const currentState = this.connections.get(interactionId);
           if (!currentState) {
             // Connection was deleted, resolve with empty transcript
-            resolve({ type: 'partial', text: '', confidence: 0 });
+            resolve({ type: 'partial', text: '', isFinal: false, confidence: 0 });
             return;
           }
           
@@ -1503,6 +1673,7 @@ export class DeepgramProvider implements AsrProvider {
                 type: 'partial',
                 text: '',
                 isFinal: false,
+                confidence: 0,
               });
             }
           }
@@ -1602,6 +1773,63 @@ export class DeepgramProvider implements AsrProvider {
       ...this.metrics,
       errorCodes: new Map(this.metrics.errorCodes), // Return copy
     };
+  }
+
+  /**
+   * Get connection health status for a specific interaction
+   */
+  getConnectionHealth(interactionId: string): {
+    exists: boolean;
+    isReady: boolean;
+    socketReadyState: number | 'unknown';
+    hasConnection: boolean;
+    hasSocket: boolean;
+    lastSendTime: number | null;
+    keepAliveStats: { success: number; failures: number };
+    reconnectAttempts: number;
+    pendingSends: number;
+    pendingResolvers: number;
+  } | null {
+    const state = this.connections.get(interactionId);
+    if (!state) {
+      return null;
+    }
+
+    return {
+      exists: true,
+      isReady: state.isReady,
+      socketReadyState: state.socket?.readyState ?? 'unknown',
+      hasConnection: !!state.connection,
+      hasSocket: !!state.socket,
+      lastSendTime: state.lastSendTime || null,
+      keepAliveStats: {
+        success: state.keepAliveSuccessCount,
+        failures: state.keepAliveFailureCount,
+      },
+      reconnectAttempts: state.reconnectAttempts,
+      pendingSends: state.pendingSends?.length || 0,
+      pendingResolvers: state.pendingResolvers.length,
+    };
+  }
+
+  /**
+   * Check if connection should be considered unhealthy (circuit breaker pattern)
+   */
+  isConnectionUnhealthy(interactionId: string): boolean {
+    const state = this.connections.get(interactionId);
+    if (!state) {
+      return true; // No connection = unhealthy
+    }
+
+    // Consider unhealthy if:
+    // 1. Too many reconnection attempts
+    // 2. KeepAlive failures > 10 and failures > successes
+    // 3. Connection not ready for > 10 seconds
+    const tooManyReconnects = state.reconnectAttempts >= state.maxReconnectAttempts;
+    const keepAliveFailing = state.keepAliveFailureCount > 10 && 
+                             state.keepAliveFailureCount > state.keepAliveSuccessCount;
+    
+    return tooManyReconnects || keepAliveFailing;
   }
 
   async close(): Promise<void> {

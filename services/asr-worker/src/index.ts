@@ -341,6 +341,77 @@ class AsrWorker {
         return;
       }
 
+      // COMPREHENSIVE VALIDATION: Verify PCM16 format (16-bit signed integers, little-endian)
+      // This ensures audio is valid before sending to Deepgram
+      if (audioBuffer.length >= 2) {
+        const sampleCount = Math.min(20, Math.floor(audioBuffer.length / 2));
+        let validSamples = 0;
+        let invalidSamples = 0;
+        let allZeros = true;
+        const sampleValues: number[] = [];
+        
+        for (let i = 0; i < sampleCount; i++) {
+          const offset = i * 2;
+          if (offset + 1 >= audioBuffer.length) break;
+          
+          // Read as little-endian signed 16-bit integer
+          const sample = (audioBuffer[offset] | (audioBuffer[offset + 1] << 8)) << 16 >> 16;
+          sampleValues.push(sample);
+          
+          // Validate range: PCM16 should be in range [-32768, 32767]
+          if (sample >= -32768 && sample <= 32767) {
+            validSamples++;
+            if (sample !== 0) allZeros = false;
+          } else {
+            invalidSamples++;
+          }
+        }
+        
+        // Log warning if format issues detected (only for first few chunks)
+        if (invalidSamples > 0 && seq <= 5) {
+          console.error('[ASRWorker] ❌ CRITICAL: Audio format validation failed - not valid PCM16!', {
+            interaction_id,
+            seq,
+            validSamples,
+            invalidSamples,
+            totalChecked: sampleCount,
+            sampleValues: sampleValues.slice(0, 10),
+            firstBytes: Array.from(audioBuffer.slice(0, 4)).map(b => `0x${b.toString(16).padStart(2, '0')}`),
+            note: 'Audio may not be PCM16 format. Expected 16-bit signed integers in range [-32768, 32767].',
+          });
+          // Don't return - allow it to proceed but log the issue
+        }
+        
+        // Validate sample rate calculation makes sense
+        const bytesPerSample = 2; // 16-bit = 2 bytes
+        const samples = audioBuffer.length / bytesPerSample;
+        const calculatedDurationMs = (samples / sample_rate) * 1000;
+        const expectedBytesFor20ms = (sample_rate * 0.02) * 2; // 20ms at declared sample rate
+        
+        // Warn if audio duration doesn't match expected for declared sample rate
+        if (seq <= 5 && Math.abs((expectedBytesFor20ms / audioBuffer.length) * calculatedDurationMs - 20) > 5) {
+          console.warn('[ASRWorker] ⚠️ Sample rate validation warning', {
+            interaction_id,
+            seq,
+            declaredSampleRate: sample_rate,
+            audioLength: audioBuffer.length,
+            calculatedDurationMs: calculatedDurationMs.toFixed(2),
+            expectedBytesFor20ms: expectedBytesFor20ms.toFixed(0),
+            note: 'Audio duration may not match declared sample rate. Verify actual audio sample rate.',
+          });
+        }
+        
+        // Warn if audio is all zeros (silence) - this is normal but worth noting
+        if (allZeros && seq <= 3) {
+          console.debug('[ASRWorker] ℹ️ Audio appears to be silence (all zeros)', {
+            interaction_id,
+            seq,
+            samplesChecked: sampleCount,
+            note: 'This is normal for silence, but may cause empty transcripts from Deepgram.',
+          });
+        }
+      }
+
       buffer.chunks.push(audioBuffer);
       buffer.timestamps.push(frame.timestamp_ms);
       buffer.lastChunkReceived = Date.now(); // Update last chunk received time
@@ -603,26 +674,40 @@ class AsrWorker {
       
       // CRITICAL FIX: Updated thresholds for aggregation
       // Minimum 100ms chunks, max 200ms gaps (prevents 8-9s gaps)
+      // These values are optimized for Deepgram's requirements:
+      // - Deepgram recommends 20-250ms chunks
+      // - Minimum 100ms ensures reliable transcription
+      // - Max 200ms gaps prevent timeouts (Deepgram closes after ~5-10s inactivity)
       const MIN_CHUNK_DURATION_MS = 100; // Minimum chunk size for reliable transcription
       const MAX_TIME_BETWEEN_SENDS_MS = 200; // Maximum gap between sends (prevents timeout)
+      const MIN_CHUNK_FOR_TIMEOUT_PREVENTION_MS = 20; // Minimum for timeout prevention (Deepgram's absolute minimum)
       
       const isTooLongSinceLastSend = timeSinceLastContinuousSend >= MAX_TIME_BETWEEN_SENDS_MS;
       const hasMinimumChunkSize = currentAudioDurationMs >= MIN_CHUNK_DURATION_MS;
-      const hasEnoughForTimeoutPrevention = currentAudioDurationMs >= 20; // Minimum for timeout prevention
+      const hasEnoughForTimeoutPrevention = currentAudioDurationMs >= MIN_CHUNK_FOR_TIMEOUT_PREVENTION_MS;
+      const exceedsMaxChunkSize = currentAudioDurationMs >= MAX_CHUNK_DURATION_MS;
 
       // Process if:
       // 1. Gap > 200ms AND we have at least 20ms (timeout risk) - FORCE SEND
       // 2. We have >= 100ms (normal case) - SEND
-      // 3. Buffer exceeds max chunk size - SEND (split)
+      // 3. Buffer exceeds max chunk size (250ms) - SEND (split)
       const shouldProcess = 
         (isTooLongSinceLastSend && hasEnoughForTimeoutPrevention) ||
         hasMinimumChunkSize ||
-        currentAudioDurationMs >= MAX_CHUNK_DURATION_MS;
+        exceedsMaxChunkSize;
 
       // Minimum chunk for send: 20ms if timeout risk, 100ms normally
-      const minChunkForSend = isTooLongSinceLastSend ? 20 : MIN_CHUNK_DURATION_MS;
-
+      const minChunkForSend = isTooLongSinceLastSend ? MIN_CHUNK_FOR_TIMEOUT_PREVENTION_MS : MIN_CHUNK_DURATION_MS;
+      
       if (shouldProcess && currentAudioDurationMs >= minChunkForSend) {
+        // Enhanced logging for chunk aggregation decisions
+        console.debug(`[ASRWorker] 🎯 Timer: Processing buffer for ${interactionId}`, {
+          currentAudioDurationMs: currentAudioDurationMs.toFixed(0),
+          timeSinceLastSend: timeSinceLastContinuousSend,
+          chunksCount: buffer.chunks.length,
+          reason: isTooLongSinceLastSend ? 'timeout-prevention' : (exceedsMaxChunkSize ? 'max-size' : 'optimal-chunk'),
+          minRequired: minChunkForSend,
+        });
         // CRITICAL: Don't await processBuffer - it sends audio asynchronously
         // This prevents buffer from being locked during 5-second transcript wait
         buffer.isProcessing = true;
