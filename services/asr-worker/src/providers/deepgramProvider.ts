@@ -1172,25 +1172,32 @@ export class DeepgramProvider implements AsrProvider {
 
     try {
       // Circuit breaker: Check if connection is unhealthy before attempting to send
-      if (this.isConnectionUnhealthy(interactionId)) {
-        const health = this.getConnectionHealth(interactionId);
-        console.warn(`[DeepgramProvider] ⚠️ Circuit breaker: Connection unhealthy for ${interactionId}, skipping send`, {
-          interactionId,
-          seq,
-          health,
-          note: 'Connection will be recreated on next attempt',
-        });
-        
-        // Delete unhealthy connection to force recreation
-        this.connections.delete(interactionId);
-        
-        // Return empty transcript - connection will be recreated on next chunk
-        return {
-          type: 'partial',
-          text: '',
-          isFinal: false,
-          confidence: 0,
-        };
+      // BUT: If no connection exists, allow creation (don't block)
+      const health = this.getConnectionHealth(interactionId);
+      if (health && health.exists) {
+        // Connection exists - check if it's unhealthy
+        if (this.isConnectionUnhealthy(interactionId)) {
+          console.warn(`[DeepgramProvider] ⚠️ Circuit breaker: Connection unhealthy for ${interactionId}, skipping send`, {
+            interactionId,
+            seq,
+            health,
+            note: 'Connection will be recreated on next attempt',
+          });
+          
+          // Delete unhealthy connection to force recreation
+          this.connections.delete(interactionId);
+          
+          // Return empty transcript - connection will be recreated on next chunk
+          return {
+            type: 'partial',
+            text: '',
+            isFinal: false,
+            confidence: 0,
+          };
+        }
+      } else {
+        // No connection exists - this is fine, we'll create one below
+        console.debug(`[DeepgramProvider] No connection exists for ${interactionId}, will create new connection`);
       }
 
       // Get or create connection
