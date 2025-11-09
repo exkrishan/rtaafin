@@ -186,6 +186,44 @@ export class DeepgramProvider implements AsrProvider {
       
       const connection = this.client.listen.live(connectionConfig);
       
+      // CRITICAL: Attempt to verify WebSocket URL contains required query params
+      // Deepgram SDK constructs URL internally, but we need to verify it's correct
+      try {
+        // Try to access the underlying WebSocket URL after connection is created
+        const connectionAny = connection as any;
+        
+        // Try multiple patterns to find the URL
+        const wsUrl = 
+          connectionAny?.url || 
+          connectionAny?.socket?.url || 
+          connectionAny?.transport?.url ||
+          connectionAny?._url ||
+          connectionAny?.conn?.url ||
+          connectionAny?._connection?.url;
+        
+        if (wsUrl && typeof wsUrl === 'string') {
+          console.info(`[DeepgramProvider] 🔍 WebSocket URL verified:`, {
+            interactionId,
+            url: wsUrl.substring(0, 200), // Truncate for logging
+            hasEncoding: wsUrl.includes('encoding='),
+            hasSampleRate: wsUrl.includes('sample_rate='),
+            hasChannels: wsUrl.includes('channels='),
+            encodingValue: wsUrl.match(/encoding=([^&]+)/)?.[1],
+            sampleRateValue: wsUrl.match(/sample_rate=([^&]+)/)?.[1],
+            channelsValue: wsUrl.match(/channels=([^&]+)/)?.[1],
+            note: 'Verify encoding=linear16, sample_rate=8000, channels=1 are present',
+          });
+        } else {
+          console.warn(`[DeepgramProvider] ⚠️ Cannot access WebSocket URL (SDK internal)`, {
+            interactionId,
+            connectionKeys: Object.keys(connectionAny || {}).slice(0, 10),
+            note: 'Relying on SDK to construct URL correctly. If issues persist, verify SDK version and docs.',
+          });
+        }
+      } catch (e) {
+        console.debug(`[DeepgramProvider] Error accessing WebSocket URL:`, e);
+      }
+      
       // Type assertion to access dynamic properties on connection object
       const connectionAny = connection as any;
 
@@ -637,6 +675,20 @@ export class DeepgramProvider implements AsrProvider {
         switch (errorCode) {
           case 1008: // DATA-0000: Invalid audio format
             console.error(`[DeepgramProvider] ❌ Invalid audio format (1008) for ${interactionId}`);
+            console.error(`[DeepgramProvider] ❌ CRITICAL: This indicates audio format mismatch!`, {
+              interactionId,
+              declaredEncoding: 'linear16',
+              declaredSampleRate: sampleRate,
+              declaredChannels: 1,
+              errorMessage: errorMessage,
+              note: 'Check: 1) Actual audio encoding matches linear16, 2) Sample rate matches 8000Hz, 3) Channels match 1 (mono), 4) WebSocket URL contains correct query params',
+            });
+            // Log recent audio send details for debugging
+            console.error(`[DeepgramProvider] Recent audio details:`, {
+              lastSendTime: state.lastSendTime ? new Date(state.lastSendTime).toISOString() : 'never',
+              audioChunksSent: this.metrics.audioChunksSent,
+              averageChunkSizeMs: this.metrics.averageChunkSizeMs.toFixed(0),
+            });
             console.error(`[DeepgramProvider] Check: encoding, sample_rate, channels match actual audio`);
             console.error(`[DeepgramProvider] Current config:`, {
               encoding: 'linear16',
@@ -844,6 +896,24 @@ export class DeepgramProvider implements AsrProvider {
         const samples = audio.length / bytesPerSample;
         const durationMs = (samples / sampleRate) * 1000;
         
+        // CRITICAL: Validate sample rate calculation makes sense
+        // If duration is way off, sample rate may be mismatched
+        const expectedBytesFor100ms = (sampleRate * 0.1) * 2; // 100ms at declared sample rate
+        const actualDurationFor100ms = (expectedBytesFor100ms / audio.length) * durationMs;
+        
+        // Warn if audio duration doesn't match expected for declared sample rate
+        // This helps detect sample rate mismatches
+        if (seq <= 3 && Math.abs(actualDurationFor100ms - 100) > 20) {
+          console.warn(`[DeepgramProvider] ⚠️ Sample rate validation warning for ${interactionId}`, {
+            seq,
+            declaredSampleRate: sampleRate,
+            audioLength: audio.length,
+            calculatedDurationMs: durationMs.toFixed(2),
+            expectedBytesFor100ms: expectedBytesFor100ms.toFixed(0),
+            note: 'Audio duration may not match declared sample rate. Verify actual audio sample rate.',
+          });
+        }
+        
         // CRITICAL: Verify connection state before sending
         const connectionAny = state.connection as any;
         const connectionReadyState = connectionAny?.getReadyState?.() ?? connectionAny?.readyState ?? 'unknown';
@@ -885,31 +955,52 @@ export class DeepgramProvider implements AsrProvider {
         // Convert Buffer to Uint8Array to ensure compatibility
         const audioData = audio instanceof Uint8Array ? audio : new Uint8Array(audio);
         
-        // CRITICAL: Validate audio format is PCM16 (16-bit signed integers)
-        // Check that audio data looks like PCM16, not float32 or other formats
-        // PCM16 values should be in range [-32768, 32767] when interpreted as int16
+        // CRITICAL: Comprehensive PCM16 format validation
+        // Validate that audio is truly PCM16 (16-bit signed integers, little-endian)
         if (audioData.length >= 2) {
-          // Read as little-endian signed 16-bit integers
-          // Uint8Array doesn't have readInt16LE, so we need to manually convert
-          const firstSample = (audioData[0] | (audioData[1] << 8)) << 16 >> 16; // Sign-extend to 32-bit
-          const secondSample = audioData.length >= 4 
-            ? ((audioData[2] | (audioData[3] << 8)) << 16 >> 16) 
-            : null;
+          // Check multiple samples across the buffer (not just first 2)
+          const sampleCount = Math.min(10, Math.floor(audioData.length / 2));
+          let validSamples = 0;
+          let invalidSamples = 0;
+          let allZeros = true;
+          const sampleValues: number[] = [];
           
-          // PCM16 samples should be in valid range [-32768, 32767]
-          // Also check that it's not all zeros (silence) or all 0xFF (invalid)
-          const isLikelyPCM16 = 
-            (firstSample >= -32768 && firstSample <= 32767) &&
-            (secondSample === null || (secondSample >= -32768 && secondSample <= 32767));
+          for (let i = 0; i < sampleCount; i++) {
+            const offset = i * 2;
+            if (offset + 1 >= audioData.length) break;
+            
+            // Read as little-endian signed 16-bit integer
+            const sample = (audioData[offset] | (audioData[offset + 1] << 8)) << 16 >> 16;
+            sampleValues.push(sample);
+            
+            // Validate range
+            if (sample >= -32768 && sample <= 32767) {
+              validSamples++;
+              if (sample !== 0) allZeros = false;
+            } else {
+              invalidSamples++;
+            }
+          }
           
-          // Log warning only for first few chunks and if values are clearly invalid
-          if (!isLikelyPCM16 && seq <= 3) {
-            console.warn(`[DeepgramProvider] ⚠️ Audio format validation warning for ${interactionId}:`, {
+          // Log warning if format issues detected
+          if (invalidSamples > 0 && seq <= 3) {
+            console.error(`[DeepgramProvider] ❌ CRITICAL: Audio format validation failed for ${interactionId}`, {
               seq,
-              firstSample,
-              secondSample,
+              validSamples,
+              invalidSamples,
+              totalChecked: sampleCount,
+              sampleValues: sampleValues.slice(0, 5),
               firstBytes: Array.from(audioData.slice(0, 4)).map(b => `0x${b.toString(16).padStart(2, '0')}`),
               note: 'Audio may not be PCM16 format. Expected 16-bit signed integers in range [-32768, 32767].',
+            });
+          }
+          
+          // Warn if audio is all zeros (silence)
+          if (allZeros && seq <= 3) {
+            console.warn(`[DeepgramProvider] ⚠️ Audio appears to be silence (all zeros) for ${interactionId}`, {
+              seq,
+              samplesChecked: sampleCount,
+              note: 'This is normal for silence, but may cause empty transcripts.',
             });
           }
         }

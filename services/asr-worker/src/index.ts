@@ -377,13 +377,29 @@ class AsrWorker {
       
         if (!buffer.hasSentInitialChunk) {
         // First chunk: Wait for initial chunk duration (200ms, reduced from 500ms)
-        if (currentAudioDurationMs >= INITIAL_CHUNK_DURATION_MS) {
+        // CRITICAL: Also check time since buffer creation to prevent long delays
+        // If audio arrives slowly, don't wait forever - send after 1 second max
+        const timeSinceBufferCreation = Date.now() - buffer.lastProcessed;
+        const MAX_INITIAL_WAIT_MS = 1000; // Send first chunk within 1 second max
+        const hasEnoughAudio = currentAudioDurationMs >= INITIAL_CHUNK_DURATION_MS;
+        const hasWaitedTooLong = timeSinceBufferCreation >= MAX_INITIAL_WAIT_MS;
+        
+        // Send if we have enough audio OR if we've waited too long (prevent timeout)
+        if (hasEnoughAudio || (hasWaitedTooLong && currentAudioDurationMs >= 20)) {
           buffer.isProcessing = true;
           try {
-            await this.processBuffer(buffer, false); // Initial chunk - no timeout risk yet
+            // If we're sending early due to timeout risk, allow smaller chunks
+            await this.processBuffer(buffer, hasWaitedTooLong);
             buffer.lastProcessed = Date.now();
             buffer.hasSentInitialChunk = true;
             buffer.lastContinuousSendTime = Date.now();
+            if (hasWaitedTooLong) {
+              console.warn(`[ASRWorker] ⚠️ First chunk sent early (${currentAudioDurationMs.toFixed(0)}ms) due to timeout risk (${timeSinceBufferCreation}ms wait)`, {
+                interaction_id,
+                audioDuration: currentAudioDurationMs.toFixed(0),
+                waitTime: timeSinceBufferCreation,
+              });
+            }
           } finally {
             buffer.isProcessing = false;
           }
