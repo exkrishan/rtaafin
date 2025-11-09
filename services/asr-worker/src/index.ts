@@ -375,12 +375,12 @@ class AsrWorker {
         return;
       }
       
-      if (!buffer.hasSentInitialChunk) {
+        if (!buffer.hasSentInitialChunk) {
         // First chunk: Wait for initial chunk duration (200ms, reduced from 500ms)
         if (currentAudioDurationMs >= INITIAL_CHUNK_DURATION_MS) {
           buffer.isProcessing = true;
           try {
-            await this.processBuffer(buffer);
+            await this.processBuffer(buffer, false); // Initial chunk - no timeout risk yet
             buffer.lastProcessed = Date.now();
             buffer.hasSentInitialChunk = true;
             buffer.lastContinuousSendTime = Date.now();
