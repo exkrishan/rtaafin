@@ -382,7 +382,9 @@ export class RedisStreamsAdapter implements PubSubAdapter {
       if (subscription.firstRead) {
         try {
           // Check for pending messages (delivered but not ACKed) for this consumer group
-          const pending = await redis.xpending(topic, consumerGroup, '-', '+', 100, consumerName);
+          // XPENDING key group [start] [end] [count] [consumer]
+          // First check all pending messages, then filter by consumer if needed
+          const pending = await redis.xpending(topic, consumerGroup, '-', '+', 100);
           if (pending && Array.isArray(pending) && pending.length > 0) {
             console.info(`[RedisStreamsAdapter] Found ${pending.length} pending message(s) for ${topic} in consumer group ${consumerGroup}, processing them first`);
             // Process pending messages
