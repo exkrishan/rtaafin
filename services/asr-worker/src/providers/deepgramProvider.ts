@@ -1278,28 +1278,19 @@ export class DeepgramProvider implements AsrProvider {
         });
         console.info(`[DeepgramProvider] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
         
-        // CRITICAL FIX: Queue audio if socket is not ready, flush when socket opens
-        // Verify socket readyState === 1 (OPEN) before sending
+        // CRITICAL FIX: Wait for socket to be ready before sending (with timeout)
+        // The Open event may fire before the underlying WebSocket is fully OPEN
+        // We'll poll for socket.readyState === 1 with a reasonable timeout
         const socketReady = state.socket?.readyState === 1;
         const connectionReady = state.isReady && !!state.connection;
         
         if (!socketReady || !connectionReady) {
-          // Queue audio for later (will be sent when socket becomes ready)
-          if (!state.pendingAudioQueue) {
-            state.pendingAudioQueue = [];
-          }
+          // Wait for socket to become ready (with timeout)
+          const SOCKET_READY_TIMEOUT_MS = 3000; // 3 seconds max wait
+          const POLL_INTERVAL_MS = 50; // Check every 50ms
+          const startWaitTime = Date.now();
           
-          const queuedAudio: QueuedAudio = {
-            audio: audioData,
-            seq,
-            sampleRate,
-            durationMs,
-            queuedAt: Date.now(),
-          };
-          
-          state.pendingAudioQueue.push(queuedAudio);
-          
-          console.warn(`[DeepgramProvider] ⏳ Queueing audio chunk (socket not ready)`, {
+          console.warn(`[DeepgramProvider] ⏳ Socket not ready, waiting for OPEN state...`, {
             interactionId,
             seq,
             socketReadyState: state.socket?.readyState ?? 'unknown',
@@ -1307,16 +1298,46 @@ export class DeepgramProvider implements AsrProvider {
             isReady: state.isReady,
             hasConnection: !!state.connection,
             hasSocket: !!state.socket,
-            queueSize: state.pendingAudioQueue.length,
-            note: 'Audio will be sent when socket becomes OPEN (readyState === 1)',
+            timeoutMs: SOCKET_READY_TIMEOUT_MS,
           });
           
           // Track metric for sends blocked due to socket not ready
           this.metrics.sendsBlockedNotReady++;
           
-          // Don't throw error - audio is queued and will be sent when ready
-          // Return early to prevent sending attempt
-          return;
+          // Poll for socket to become ready
+          await new Promise<void>((resolve, reject) => {
+            const checkInterval = setInterval(() => {
+              const elapsed = Date.now() - startWaitTime;
+              const nowSocketReady = state.socket?.readyState === 1;
+              const nowConnectionReady = state.isReady && !!state.connection;
+              
+              if (nowSocketReady && nowConnectionReady) {
+                clearInterval(checkInterval);
+                console.info(`[DeepgramProvider] ✅ Socket became ready after ${elapsed}ms for ${interactionId}`, {
+                  seq,
+                  waitTimeMs: elapsed,
+                });
+                resolve();
+              } else if (elapsed >= SOCKET_READY_TIMEOUT_MS) {
+                clearInterval(checkInterval);
+                const error = new Error(`Socket did not become ready within ${SOCKET_READY_TIMEOUT_MS}ms for ${interactionId} (socketReadyState: ${state.socket?.readyState ?? 'unknown'}, isReady: ${state.isReady})`);
+                console.error(`[DeepgramProvider] ❌ ${error.message}`, {
+                  seq,
+                  socketReadyState: state.socket?.readyState ?? 'unknown',
+                  connectionReadyState,
+                  isReady: state.isReady,
+                  hasConnection: !!state.connection,
+                  hasSocket: !!state.socket,
+                });
+                reject(error);
+              }
+            }, POLL_INTERVAL_MS);
+          });
+          
+          // After waiting, verify socket is still ready (it might have closed)
+          if (state.socket?.readyState !== 1 || !state.connection) {
+            throw new Error(`Socket not ready after wait for ${interactionId} (socketReadyState: ${state.socket?.readyState ?? 'unknown'})`);
+          }
         }
         
         try {
