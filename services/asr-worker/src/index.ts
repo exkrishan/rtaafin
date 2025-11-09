@@ -434,7 +434,7 @@ class AsrWorker {
           currentAudioDurationMs >= MAX_CHUNK_DURATION_MS; // Force send if too large
         
         // CRITICAL: Send if we should process and have at least 20ms (Deepgram minimum)
-        // Allow smaller chunks (50ms) if it's been too long since last send to prevent timeout
+        // Allow smaller chunks (20ms) if it's been too long since last send to prevent timeout
         const minChunkForSend = isTooLongSinceLastSend ? 20 : MIN_CONTINUOUS_AUDIO_MS; // Allow 20ms if timeout risk
         if (shouldProcess && currentAudioDurationMs >= minChunkForSend) {
           buffer.isProcessing = true;
@@ -443,7 +443,8 @@ class AsrWorker {
             const chunksBeforeProcessing = buffer.chunks.length;
             const audioDurationBeforeProcessing = currentAudioDurationMs;
             
-            await this.processBuffer(buffer);
+            // CRITICAL: Pass timeout risk flag to processBuffer so it can accept smaller chunks
+            await this.processBuffer(buffer, isTooLongSinceLastSend);
             
             // Only log success if buffer was actually processed (chunks were cleared)
             // processBuffer returns early if buffer is too small, so chunks won't be cleared
@@ -609,7 +610,7 @@ class AsrWorker {
     });
   }
 
-  private async processBuffer(buffer: AudioBuffer): Promise<void> {
+  private async processBuffer(buffer: AudioBuffer, isTimeoutRisk: boolean = false): Promise<void> {
     if (buffer.chunks.length === 0) {
       return;
     }
@@ -652,13 +653,13 @@ class AsrWorker {
         return;
       }
       
-      // CRITICAL: Audio duration check depends on streaming mode
-      // - Initial chunk: Require 200ms minimum (reduced from 500ms)
-      // - Continuous streaming: Allow 50ms minimum (reduced from 100ms for more frequent sends)
-      //   Deepgram can handle 50ms chunks if sent frequently (every 200-500ms)
-      //   Better to send 50ms every 500ms than wait 20 seconds for 100ms
+      // CRITICAL: Audio duration check depends on streaming mode and timeout risk
+      // - Initial chunk: Require 200ms minimum
+      // - Continuous streaming: Allow 50ms minimum normally, 20ms if timeout risk
+      //   Deepgram can handle 20ms chunks if sent frequently to prevent timeout
+      //   Better to send 20ms every 500ms than wait 20 seconds for 100ms
       const requiredDuration = buffer.hasSentInitialChunk 
-        ? 50  // Continuous mode: Allow 50ms minimum for more frequent sends (prevents 20s gaps)
+        ? (isTimeoutRisk ? 20 : 50)  // Continuous mode: 20ms if timeout risk, 50ms normally
         : INITIAL_CHUNK_DURATION_MS;    // Initial chunk: 200ms
       
       if (audioDurationMs < requiredDuration) {
