@@ -61,13 +61,23 @@ export default function DemoPage() {
   // Load demo transcript from JSON file
   useEffect(() => {
     fetch('/demo_playback.json')
-      .then(res => res.json())
+      .then(res => {
+        if (!res.ok) {
+          throw new Error(`Failed to load demo_playback.json: ${res.status} ${res.statusText}`);
+        }
+        return res.json();
+      })
       .then(data => {
-        console.log('[Demo] Loaded transcript:', data.length, 'lines');
+        console.log('[Demo] ✅ Loaded transcript:', data.length, 'lines');
+        if (!Array.isArray(data) || data.length === 0) {
+          console.error('[Demo] ❌ Invalid transcript data:', data);
+          return;
+        }
         setDemoTranscript(data);
       })
       .catch(err => {
-        console.error('[Demo] Failed to load demo transcript:', err);
+        console.error('[Demo] ❌ Failed to load demo transcript:', err);
+        alert('Failed to load demo transcript. Check console for details.');
       });
   }, []);
 
@@ -112,7 +122,14 @@ export default function DemoPage() {
       transcriptIndexRef.current = index;
 
       try {
-        console.log('[Demo] Sending transcript line:', { seq: line.seq, index, text: text.substring(0, 50) });
+        console.log('[Demo] 📤 Sending transcript line:', { 
+          seq: line.seq, 
+          index, 
+          callId,
+          text: text.substring(0, 50),
+          textLength: text.length
+        });
+        
         const response = await fetch('/api/calls/ingest-transcript', {
           method: 'POST',
           headers: { 
@@ -129,13 +146,32 @@ export default function DemoPage() {
 
         if (response.ok) {
           const result = await response.json();
-          console.log('[Demo] ✅ Transcript line sent successfully:', { seq: line.seq, intent: result.intent });
+          console.log('[Demo] ✅ Transcript line sent successfully:', { 
+            seq: line.seq, 
+            intent: result.intent,
+            articlesCount: result.articles?.length || 0
+          });
         } else {
-          const error = await response.text();
-          console.error('[Demo] ❌ Failed to send transcript line:', { status: response.status, error });
+          const errorText = await response.text();
+          let errorData;
+          try {
+            errorData = JSON.parse(errorText);
+          } catch {
+            errorData = { message: errorText };
+          }
+          console.error('[Demo] ❌ Failed to send transcript line:', { 
+            status: response.status, 
+            statusText: response.statusText,
+            error: errorData
+          });
         }
-      } catch (err) {
-        console.error('[Demo] ❌ Error sending transcript line:', err);
+      } catch (err: any) {
+        console.error('[Demo] ❌ Error sending transcript line:', {
+          error: err.message || String(err),
+          stack: err.stack,
+          callId,
+          seq: line.seq
+        });
       }
 
       if (index < demoTranscript.length - 1) {

@@ -40,22 +40,38 @@ export default function TranscriptPanel({
 
   // Connect to SSE stream
   useEffect(() => {
-    if (!callId) return;
+    if (!callId) {
+      console.log('[TranscriptPanel] ⏸️ No callId, skipping SSE connection');
+      return;
+    }
 
+    console.log('[TranscriptPanel] 🔌 Connecting to SSE stream', { callId });
     const url = `/api/events/stream?callId=${encodeURIComponent(callId)}`;
+    console.log('[TranscriptPanel] SSE URL:', url);
     const eventSource = new EventSource(url);
 
     eventSourceRef.current = eventSource;
 
     eventSource.onopen = () => {
+      console.log('[TranscriptPanel] ✅ SSE connection opened', { callId });
       setIsConnected(true);
       setError(null);
     };
 
     eventSource.onerror = (err) => {
-      console.error('[TranscriptPanel] SSE error', err);
+      console.error('[TranscriptPanel] ❌ SSE error', { 
+        callId,
+        readyState: eventSource.readyState,
+        error: err
+      });
       setError('Connection error. Retrying...');
       setIsConnected(false);
+      
+      // Log readyState for debugging
+      // 0 = CONNECTING, 1 = OPEN, 2 = CLOSED
+      if (eventSource.readyState === EventSource.CLOSED) {
+        console.error('[TranscriptPanel] SSE connection closed');
+      }
     };
 
     eventSource.addEventListener('transcript_line', (event) => {
