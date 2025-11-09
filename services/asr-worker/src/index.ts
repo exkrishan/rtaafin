@@ -185,6 +185,41 @@ class AsrWorker {
 
   private async handleAudioFrame(msg: any): Promise<void> {
     try {
+      // Validate audio field exists and is a string
+      if (!msg.audio || typeof msg.audio !== 'string') {
+        console.error('[ASRWorker] ❌ Invalid audio field in message:', {
+          interaction_id: msg.interaction_id,
+          seq: msg.seq,
+          audio_type: typeof msg.audio,
+          audio_length: msg.audio?.length,
+          msg_keys: Object.keys(msg),
+        });
+        return;
+      }
+
+      // CRITICAL: Check if audio field contains JSON instead of base64
+      const audioPreview = msg.audio.substring(0, 20).trim();
+      if (audioPreview.startsWith('{') || audioPreview.startsWith('[')) {
+        console.error('[ASRWorker] ❌ CRITICAL: Audio field contains JSON text, not base64!', {
+          interaction_id: msg.interaction_id,
+          seq: msg.seq,
+          audio_preview: msg.audio.substring(0, 200),
+          full_msg: JSON.stringify(msg).substring(0, 500),
+        });
+        return;
+      }
+
+      // Validate base64 format
+      const base64Regex = /^[A-Za-z0-9+/]*={0,2}$/;
+      if (!base64Regex.test(msg.audio)) {
+        console.error('[ASRWorker] ❌ Invalid base64 format in audio field:', {
+          interaction_id: msg.interaction_id,
+          seq: msg.seq,
+          audio_preview: msg.audio.substring(0, 100),
+        });
+        return;
+      }
+
       // Parse audio frame message
       const frame: AudioFrameMessage = {
         tenant_id: msg.tenant_id,
@@ -220,7 +255,42 @@ class AsrWorker {
       buffer.lastChunkReceived = Date.now();
 
       // Decode base64 audio
-      const audioBuffer = Buffer.from(audio, 'base64');
+      let audioBuffer: Buffer;
+      try {
+        audioBuffer = Buffer.from(audio, 'base64');
+      } catch (error: any) {
+        console.error('[ASRWorker] ❌ Failed to decode base64 audio:', {
+          interaction_id,
+          seq,
+          error: error.message,
+          audio_preview: audio.substring(0, 100),
+        });
+        return;
+      }
+
+      // Validate decoded buffer is not empty and looks like audio (not JSON)
+      if (audioBuffer.length === 0) {
+        console.warn('[ASRWorker] ⚠️ Empty audio buffer decoded:', {
+          interaction_id,
+          seq,
+        });
+        return;
+      }
+
+      // Check first few bytes - should be binary audio, not JSON text
+      const firstBytes = Array.from(audioBuffer.slice(0, Math.min(8, audioBuffer.length)));
+      if (firstBytes[0] === 0x7b || firstBytes[0] === 0x5b) { // '{' or '['
+        const firstBytesHex = firstBytes.map(b => `0x${b.toString(16).padStart(2, '0')}`).join(', ');
+        console.error('[ASRWorker] ❌ CRITICAL: Decoded audio buffer contains JSON text!', {
+          interaction_id,
+          seq,
+          first_bytes_hex: firstBytesHex,
+          buffer_length: audioBuffer.length,
+          audio_field_length: audio.length,
+        });
+        return;
+      }
+
       buffer.chunks.push(audioBuffer);
       buffer.timestamps.push(frame.timestamp_ms);
 
