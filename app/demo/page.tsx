@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect } from 'react';
 import TranscriptPanel from '@/components/TranscriptPanel';
 import AutoDispositionModal, { Suggestion } from '@/components/AutoDispositionModal';
-import AgentAssistPanel from '@/components/AgentAssistPanel';
+import AgentAssistPanelV2, { KBArticle, DispositionData, Customer } from '@/components/AgentAssistPanelV2';
 import ToastContainer from '@/components/ToastContainer';
 
 interface DemoTranscriptLine {
@@ -24,21 +24,20 @@ interface DemoResult {
   };
 }
 
-// Placeholder Customer Info component
-function CustomerInfoPlaceholder() {
-  return (
-    <div className="card">
-      <h2 className="text-lg font-semibold text-gray-900 mb-4">Customer Info</h2>
-      <div className="space-y-4">
-        <div className="p-4 bg-gray-50 rounded-lg">
-          <p className="text-sm text-gray-600">
-            Customer information and interaction history would appear here.
-          </p>
-        </div>
-      </div>
-    </div>
-  );
-}
+// Mock customer data for demo
+const mockCustomer: Customer = {
+  name: 'Asha Sharma',
+  id: 'cust-789',
+  masked_phone: '+91-XXXX-1234',
+  account: 'MoneyAssure — Card Services',
+  tags: ['Premium', 'Card'],
+  email: 'asha.sharma@example.com',
+  lastInteractions: [
+    { date: '2025-10-29', summary: 'Payment issue resolved', caseId: 'CASE-1234' },
+    { date: '2025-09-12', summary: 'KYC updated', caseId: 'CASE-5678' },
+    { date: '2025-07-21', summary: 'Plan upgrade', caseId: 'CASE-9012' },
+  ],
+};
 
 export default function DemoPage() {
   const [callId] = useState(`demo-call-${Date.now()}`);
@@ -337,8 +336,8 @@ export default function DemoPage() {
         </div>
       )}
 
-      {/* 3-column grid layout - Same as Dashboard */}
-      <div className={`grid grid-cols-1 md:grid-cols-[320px_1fr] lg:grid-cols-[320px_1fr_360px] gap-6 h-screen p-6 ${isCallActive ? 'pt-16' : ''}`}>
+      {/* 2-column grid layout - Transcript + Call Details, Agent Assist is right-docked */}
+      <div className={`grid grid-cols-1 md:grid-cols-[320px_1fr] gap-6 h-screen p-6 pr-[376px] ${isCallActive ? 'pt-16' : ''}`}>
         {/* Left Column: Transcript */}
         <div className="relative">
           <div className="card h-full flex flex-col">
@@ -410,21 +409,70 @@ export default function DemoPage() {
           </div>
         </div>
 
-        {/* Center Column: Customer Info */}
+        {/* Center Column: Customer Info - Now handled by Agent Assist Panel */}
         <div className="overflow-y-auto">
-          <CustomerInfoPlaceholder />
+          <div className="card">
+            <h2 className="text-lg font-semibold text-gray-900 mb-4">Call Details</h2>
+            <div className="space-y-4">
+              <div className="p-4 bg-gray-50 rounded-lg">
+                <p className="text-sm text-gray-600">
+                  Customer information is now displayed in the Agent Assist panel on the right.
+                </p>
+              </div>
+            </div>
+          </div>
         </div>
 
-        {/* Right Column: Agent Assist Panel (hidden on <1024px) */}
-        <div className="hidden lg:block overflow-y-auto">
-          <AgentAssistPanel
-            articles={[]} // Start with empty - articles will appear when intent is detected via SSE
-            callId={callId}
-            onFeedback={(articleId, liked) => {
-              console.log('[Demo] Article feedback:', { articleId, liked });
-            }}
-          />
-        </div>
+        {/* Right Column: Agent Assist Panel V2 - Right-docked */}
+        <AgentAssistPanelV2
+          agentId="agent-demo-123"
+          tenantId={tenantId}
+          interactionId={callId}
+          customer={mockCustomer}
+          callDuration={isCallActive ? '00:00' : '00:00'}
+          isCallActive={isCallActive}
+          onTranscriptEvent={(event) => {
+            console.log('[Demo] Transcript event:', event);
+          }}
+          triggerKBSearch={async (query, context) => {
+            console.log('[Demo] KB search triggered:', { query, context });
+            // Mock KB search results
+            return [
+              {
+                id: 'kb-1',
+                title: 'Card Replacement Process',
+                snippet: 'For card replacement requests, verify customer identity and check fraud status...',
+                confidence: 0.85,
+                url: 'https://kb.example.com/card-replacement',
+              },
+            ];
+          }}
+          fetchDispositionSummary={async (interactionId) => {
+            console.log('[Demo] Fetching disposition for:', interactionId);
+            // Return mock disposition data
+            return {
+              dispositionId: 'disposition-1',
+              dispositionTitle: 'Card Replacement',
+              confidence: 0.92,
+              subDispositions: [
+                { id: 'sub-1', title: 'Fraud Related' },
+                { id: 'sub-2', title: 'Lost/Stolen' },
+              ],
+              autoNotes: 'Customer reported fraud and requested card replacement. Verified identity and initiated replacement process.',
+            };
+          }}
+          emitTelemetry={(eventName, payload) => {
+            console.log('[Demo] Telemetry:', eventName, payload);
+          }}
+          onOpenCRM={() => {
+            console.log('[Demo] Open CRM clicked');
+            window.open('https://crm.example.com/customer/cust-789', '_blank');
+          }}
+          onOpenCaseHistory={() => {
+            console.log('[Demo] Open Case History clicked');
+            window.open('https://crm.example.com/cases/cust-789', '_blank');
+          }}
+        />
       </div>
 
       {/* Disposition Modal */}

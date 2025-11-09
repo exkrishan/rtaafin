@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import TranscriptPanel from '@/components/TranscriptPanel';
 import AutoDispositionModal, { Suggestion } from '@/components/AutoDispositionModal';
-import AgentAssistPanel from '@/components/AgentAssistPanel';
+import AgentAssistPanelV2, { Customer, KBArticle, DispositionData } from '@/components/AgentAssistPanelV2';
 import ToastContainer from '@/components/ToastContainer';
 
 interface EnvCheck {
@@ -12,21 +12,20 @@ interface EnvCheck {
   required: boolean;
 }
 
-// Placeholder Customer Info component
-function CustomerInfoPlaceholder() {
-  return (
-    <div className="card">
-      <h2 className="text-lg font-semibold text-gray-900 mb-4">Customer Info</h2>
-      <div className="space-y-4">
-        <div className="p-4 bg-gray-50 rounded-lg">
-          <p className="text-sm text-gray-600">
-            Customer information and interaction history would appear here.
-          </p>
-        </div>
-      </div>
-    </div>
-  );
-}
+// Mock customer data for live (would come from API in production)
+const mockCustomer: Customer = {
+  name: 'Asha Sharma',
+  id: 'cust-789',
+  masked_phone: '+91-XXXX-1234',
+  account: 'MoneyAssure — Card Services',
+  tags: ['Premium', 'Card'],
+  email: 'asha.sharma@example.com',
+  lastInteractions: [
+    { date: '2025-10-29', summary: 'Payment issue resolved', caseId: 'CASE-1234' },
+    { date: '2025-09-12', summary: 'KYC updated', caseId: 'CASE-5678' },
+    { date: '2025-07-21', summary: 'Plan upgrade', caseId: 'CASE-9012' },
+  ],
+};
 
 export default function LivePage() {
   const [callId, setCallId] = useState<string>('');
@@ -257,8 +256,8 @@ export default function LivePage() {
         </p>
       </div>
 
-      {/* 3-column grid layout - Same as Dashboard and Demo */}
-      <div className="grid grid-cols-1 md:grid-cols-[320px_1fr] lg:grid-cols-[320px_1fr_360px] gap-6 h-[calc(100vh-120px)] p-6">
+      {/* 2-column grid layout - Transcript + Call Details, Agent Assist is right-docked */}
+      <div className="grid grid-cols-1 md:grid-cols-[320px_1fr] gap-6 h-[calc(100vh-120px)] p-6 pr-[376px]">
         {/* Left Column: Transcript */}
         <div className="relative">
           <div className="card h-full flex flex-col">
@@ -282,21 +281,80 @@ export default function LivePage() {
           </div>
         </div>
 
-        {/* Center Column: Customer Info */}
+        {/* Center Column: Call Details - Customer info now in Agent Assist Panel */}
         <div className="overflow-y-auto">
-          <CustomerInfoPlaceholder />
+          <div className="card">
+            <h2 className="text-lg font-semibold text-gray-900 mb-4">Call Details</h2>
+            <div className="space-y-4">
+              <div className="p-4 bg-gray-50 rounded-lg">
+                <p className="text-sm text-gray-600">
+                  Customer information is now displayed in the Agent Assist panel on the right.
+                </p>
+              </div>
+            </div>
+          </div>
         </div>
 
-        {/* Right Column: Agent Assist Panel (hidden on <1024px) */}
-        <div className="hidden lg:block overflow-y-auto">
-          <AgentAssistPanel
-            articles={[]} // Start with empty - articles will appear when intent is detected via SSE
-            callId={callId}
-            onFeedback={(articleId, liked) => {
-              console.log('[Live] Article feedback:', { articleId, liked });
+        {/* Right Column: Agent Assist Panel V2 - Right-docked */}
+        {callId && (
+          <AgentAssistPanelV2
+            agentId="agent-live-123"
+            tenantId={tenantId}
+            interactionId={callId}
+            customer={mockCustomer}
+            callDuration="00:00"
+            isCallActive={true}
+            onTranscriptEvent={(event) => {
+              console.log('[Live] Transcript event:', event);
+            }}
+            triggerKBSearch={async (query, context) => {
+              console.log('[Live] KB search triggered:', { query, context });
+              // TODO: Replace with actual API call
+              try {
+                const response = await fetch(`/api/kb/search?q=${encodeURIComponent(query)}&interactionId=${context.interactionId}`);
+                const data = await response.json();
+                return data.articles || [];
+              } catch (err) {
+                console.error('[Live] KB search failed', err);
+                return [];
+              }
+            }}
+            fetchDispositionSummary={async (interactionId) => {
+              console.log('[Live] Fetching disposition for:', interactionId);
+              // TODO: Replace with actual API call
+              try {
+                const response = await fetch(`/api/calls/summary`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ callId: interactionId, tenantId }),
+                });
+                const payload = await response.json();
+                return {
+                  dispositionId: payload.dispositions?.[0]?.mappedId || 'disposition-1',
+                  dispositionTitle: payload.dispositions?.[0]?.mappedTitle || 'General Inquiry',
+                  confidence: payload.dispositions?.[0]?.score || 0.5,
+                  subDispositions: payload.dispositions?.[0]?.subDisposition ? [{ id: 'sub-1', title: payload.dispositions[0].subDisposition }] : [],
+                  autoNotes: payload.summary ? Object.values(payload.summary).filter(Boolean).join('\n\n') : 'No notes generated.',
+                };
+              } catch (err) {
+                console.error('[Live] Failed to fetch disposition', err);
+                throw err;
+              }
+            }}
+            emitTelemetry={(eventName, payload) => {
+              console.log('[Live] Telemetry:', eventName, payload);
+              // TODO: Send to telemetry service
+            }}
+            onOpenCRM={() => {
+              console.log('[Live] Open CRM clicked');
+              window.open(`https://crm.example.com/customer/${mockCustomer.id}`, '_blank');
+            }}
+            onOpenCaseHistory={() => {
+              console.log('[Live] Open Case History clicked');
+              window.open(`https://crm.example.com/cases/${mockCustomer.id}`, '_blank');
             }}
           />
-        </div>
+        )}
       </div>
 
       {/* Disposition Modal */}
