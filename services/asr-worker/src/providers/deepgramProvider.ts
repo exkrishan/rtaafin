@@ -34,7 +34,35 @@ export class DeepgramProvider implements AsrProvider {
     interactionId: string,
     sampleRate: number
   ): Promise<ConnectionState> {
+    // Check if connection already exists (prevent duplicate connections)
     let state = this.connections.get(interactionId);
+    
+    if (state) {
+      // Connection exists, check if it's still valid
+      if (state.isReady && state.connection) {
+        console.debug(`[DeepgramProvider] Reusing existing connection for ${interactionId}`);
+        return state;
+      } else {
+        // Connection exists but not ready, wait a bit and check again
+        // This handles race conditions where connection is being created
+        console.warn(`[DeepgramProvider] Connection exists but not ready for ${interactionId}, waiting...`);
+        // Wait for connection to be ready (with timeout)
+        const maxWait = 5000; // 5 seconds
+        const startTime = Date.now();
+        while (!state.isReady && (Date.now() - startTime) < maxWait) {
+          await new Promise(resolve => setTimeout(resolve, 100));
+          state = this.connections.get(interactionId);
+          if (!state) break;
+        }
+        if (state && state.isReady) {
+          console.info(`[DeepgramProvider] Connection became ready for ${interactionId}`);
+          return state;
+        }
+        // Connection still not ready or doesn't exist, create new one
+        console.warn(`[DeepgramProvider] Connection not ready after wait, creating new one for ${interactionId}`);
+        this.connections.delete(interactionId); // Remove stale connection
+      }
+    }
 
     if (!state) {
       console.info(`[DeepgramProvider] Creating new connection for ${interactionId}`);
