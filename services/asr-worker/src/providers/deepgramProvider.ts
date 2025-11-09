@@ -854,7 +854,7 @@ export class DeepgramProvider implements AsrProvider {
           seq,
           dataType: audioData.constructor.name,
           dataLength: audioData.length,
-          firstBytes: Array.from(audioData.slice(0, Math.min(8, audioData.length)))).map(b => `0x${b.toString(16).padStart(2, '0')}`)),
+          firstBytes: Array.from(audioData.slice(0, Math.min(8, audioData.length))).map(b => `0x${b.toString(16).padStart(2, '0')}`),
           isBuffer: audioData instanceof Buffer,
           isUint8Array: audioData instanceof Uint8Array,
         });
