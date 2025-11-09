@@ -615,6 +615,14 @@ class AsrWorker {
             timeSinceLastChunk: now - buffer.lastChunkReceived,
             chunksCount: buffer.chunks.length,
           });
+          
+          // CRITICAL: Clear processing timer
+          const timer = this.bufferTimers.get(interactionId);
+          if (timer) {
+            clearInterval(timer);
+            this.bufferTimers.delete(interactionId);
+          }
+          
           this.buffers.delete(interactionId);
           this.metrics.resetInteraction(interactionId);
         }
