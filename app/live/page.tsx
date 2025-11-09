@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react';
 import TranscriptPanel from '@/components/TranscriptPanel';
 import AutoDispositionModal, { Suggestion } from '@/components/AutoDispositionModal';
 import AgentAssistPanelV2, { KBArticle, DispositionData } from '@/components/AgentAssistPanelV2';
-import type { Customer } from '@/components/CustomerDetailsHeader';
+import CustomerDetailsHeader, { Customer } from '@/components/CustomerDetailsHeader';
 import ToastContainer from '@/components/ToastContainer';
 
 interface EnvCheck {
