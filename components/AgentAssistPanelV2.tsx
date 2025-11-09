@@ -129,18 +129,53 @@ export default function AgentAssistPanelV2({
     eventSource.addEventListener('transcript_line', (event) => {
       try {
         const data = JSON.parse(event.data);
+        // Skip system messages
+        if (data.text && (data.text.includes('Connected to realtime stream') || data.text.includes('clientId:') || data.callId === 'system')) {
+          return;
+        }
+        
         if (data.callId === interactionId && data.text) {
+          // Determine speaker from text prefix (Agent: or Customer:)
+          let speaker: 'agent' | 'customer' = 'customer';
+          let text = data.text;
+          
+          // Check for speaker prefix in text (case-insensitive)
+          if (text.match(/^Agent:\s*/i)) {
+            speaker = 'agent';
+            text = text.replace(/^Agent:\s*/i, '').trim();
+          } else if (text.match(/^Customer:\s*/i)) {
+            speaker = 'customer';
+            text = text.replace(/^Customer:\s*/i, '').trim();
+          } else if (data.speaker) {
+            // Fallback to data.speaker if provided
+            speaker = data.speaker.toLowerCase() === 'agent' ? 'agent' : 'customer';
+            text = text.trim();
+          }
+          
+          // Only add if we have actual text content
+          if (!text || text.length === 0) {
+            return;
+          }
+          
           const utterance: TranscriptUtterance = {
-            utterance_id: data.seq?.toString() || Date.now().toString(),
-            speaker: data.text.startsWith('Agent:') ? 'agent' : 'customer',
-            text: data.text.replace(/^(Agent|Customer):\s*/, ''),
-            confidence: 0.95, // Default if not provided
+            utterance_id: data.seq?.toString() || `${Date.now()}-${Math.random()}`,
+            speaker,
+            text: text,
+            confidence: data.confidence || 0.95,
             timestamp: data.ts || new Date().toISOString(),
             isPartial: false,
           };
+          
           setUtterances(prev => {
-            const exists = prev.some(u => u.utterance_id === utterance.utterance_id);
-            if (exists) return prev;
+            // Check for duplicates by seq or utterance_id
+            const exists = prev.some(u => 
+              u.utterance_id === utterance.utterance_id || 
+              (data.seq && u.utterance_id === data.seq.toString())
+            );
+            if (exists) {
+              console.log('[AgentAssistPanel] Skipping duplicate utterance', utterance.utterance_id);
+              return prev;
+            }
             return [...prev, utterance];
           });
           onTranscriptEvent?.(utterance);
