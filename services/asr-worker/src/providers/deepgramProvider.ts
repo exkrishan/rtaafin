@@ -76,24 +76,42 @@ export class DeepgramProvider implements AsrProvider {
     // Check if connection already exists and is ready (prevent duplicate connections)
     let state = this.connections.get(interactionId);
     
-      if (state) {
+    if (state) {
       // Connection exists, check if it's still valid
-      // CRITICAL: Also check if WebSocket is actually open (readyState === 1)
-      // Note: In Node.js, WebSocket.OPEN is not available, so we check for readyState === 1 directly
-      // readyState values: 0=CONNECTING, 1=OPEN, 2=CLOSING, 3=CLOSED
-      const socketOpen = state.socket && state.socket.readyState === 1;
+      // Note: We rely on `isReady` flag which is set when Open event fires
+      // We don't check socket.readyState here because:
+      // 1. Socket might be from a different connection object
+      // 2. Socket might not be properly initialized when stored
+      // 3. The `isReady` flag is more reliable as it's set by the Open event handler
       
-      if (state.isReady && state.connection && socketOpen) {
-        this.metrics.connectionsReused++;
-        console.debug(`[DeepgramProvider] Reusing existing connection for ${interactionId}`);
-        return state;
+      if (state.isReady && state.connection) {
+        // Additional safety check: verify connection is not closed
+        // Check socket readyState only if socket exists, but don't fail if it doesn't
+        const socketState = state.socket?.readyState;
+        const socketValid = !state.socket || socketState === 1 || socketState === 0; // OPEN or CONNECTING is OK
+        
+        if (socketValid) {
+          this.metrics.connectionsReused++;
+          console.debug(`[DeepgramProvider] Reusing existing connection for ${interactionId}`, {
+            isReady: state.isReady,
+            socketReadyState: socketState,
+          });
+          return state;
+        } else {
+          // Socket exists but is in CLOSING or CLOSED state
+          console.warn(`[DeepgramProvider] Connection exists but socket is closed for ${interactionId}`, {
+            socketReadyState: socketState,
+          });
+          // Remove invalid connection and create new one
+          this.connections.delete(interactionId);
+          state = undefined;
+        }
       } else {
-        // Connection exists but not ready or socket is closed, log why
+        // Connection exists but not ready, log why
         console.warn(`[DeepgramProvider] Connection exists but not valid for ${interactionId}`, {
           isReady: state.isReady,
           hasConnection: !!state.connection,
           socketReadyState: state.socket?.readyState,
-          socketOpen: socketOpen,
         });
         // Connection exists but not ready, wait a bit and check again
         // This handles race conditions where connection is being created
