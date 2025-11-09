@@ -202,6 +202,13 @@ class IngestionServer {
     
     // Health check endpoint (required for cloud deployment)
     this.server.on('request', (req: any, res: any) => {
+      // Don't handle WebSocket upgrade requests here - let WebSocket server handle them
+      if (req.headers.upgrade === 'websocket' || 
+          req.headers.connection?.toLowerCase().includes('upgrade')) {
+        // This is a WebSocket upgrade - don't respond, let WebSocket server handle it
+        return;
+      }
+      
       if (req.url === '/health') {
         // Update health status
         this.updateHealthStatus();
