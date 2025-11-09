@@ -309,14 +309,21 @@ class AsrWorker {
       const totalSamples = combinedAudio.length / 2; // 16-bit = 2 bytes per sample
       const audioDurationMs = (totalSamples / buffer.sampleRate) * 1000;
       
-      // CRITICAL: Only process if we have minimum audio duration
-      // Deepgram requires at least 200-500ms of audio for reliable transcription
-      if (audioDurationMs < MIN_AUDIO_DURATION_MS) {
-        console.debug(`[ASRWorker] ⏳ Buffer too small (${audioDurationMs.toFixed(0)}ms < ${MIN_AUDIO_DURATION_MS}ms), waiting for more audio`, {
+      // CRITICAL: Audio duration check depends on streaming mode
+      // - Initial chunk: Require 500ms minimum (for reliable transcription start)
+      // - Continuous streaming: Allow 200ms+ (to maintain continuous flow)
+      const MIN_CONTINUOUS_CHUNK_MS = 200; // Minimum for continuous streaming
+      const requiredDuration = buffer.hasSentInitialChunk 
+        ? MIN_CONTINUOUS_CHUNK_MS  // Continuous mode: 200ms+
+        : MIN_AUDIO_DURATION_MS;    // Initial chunk: 500ms
+      
+      if (audioDurationMs < requiredDuration) {
+        console.debug(`[ASRWorker] ⏳ Buffer too small (${audioDurationMs.toFixed(0)}ms < ${requiredDuration}ms), waiting for more audio`, {
           interaction_id: buffer.interactionId,
           chunksCount: buffer.chunks.length,
           audioDurationMs: audioDurationMs.toFixed(0),
-          minimumRequired: MIN_AUDIO_DURATION_MS,
+          minimumRequired: requiredDuration,
+          mode: buffer.hasSentInitialChunk ? 'continuous' : 'initial',
         });
         return; // Don't process yet - wait for more audio
       }
