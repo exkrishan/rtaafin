@@ -404,35 +404,39 @@ class AsrWorker {
         // Calculate time since last continuous send (this doesn't reset on buffer clear)
         const timeSinceLastContinuousSend = Date.now() - buffer.lastContinuousSendTime;
         
-        // CRITICAL FIX: For continuous streaming, we need to send audio more aggressively
-        // Deepgram requires continuous audio flow - even small chunks are better than silence
-        // The key is to send audio FREQUENTLY (every 50-100ms), not wait for large chunks
+        // CRITICAL: Deepgram requires CONTINUOUS audio flow - gaps cause timeouts (1011)
+        // The problem: We're waiting 20+ seconds to accumulate 100ms of audio
+        // Solution: Send audio MORE FREQUENTLY, even if chunks are smaller
+        // Deepgram can handle 50-100ms chunks if sent frequently (every 200-500ms)
+        
+        // CRITICAL FIX: Reduce minimum chunk size for continuous streaming to 50ms
+        // This allows sending more frequently when audio arrives slowly
+        // Deepgram's absolute minimum is 20ms, but 50ms is safer for reliability
+        const MIN_CONTINUOUS_AUDIO_MS = 50; // Reduced from 100ms to allow more frequent sends
+        
+        // CRITICAL: Maximum time between sends - if we wait too long, Deepgram times out
+        // Even if we don't have 100ms, send what we have after 500ms to prevent timeout
+        const MAX_TIME_BETWEEN_SENDS_MS = 500; // Send at least every 500ms to prevent timeout
+        const isTooLongSinceLastSend = timeSinceLastContinuousSend >= MAX_TIME_BETWEEN_SENDS_MS;
+        
+        // CRITICAL: Minimum time between sends to avoid overwhelming Deepgram
+        const MIN_TIME_BETWEEN_SENDS_MS = 100; // Don't send more than every 100ms
+        
         // Process if:
-        // 1. Enough time has passed since last continuous send (100ms) AND we have ANY audio, OR
-        // 2. We have accumulated enough audio (100ms), OR
-        // 3. We've accumulated too much audio (250ms max - force send), OR
-        // 4. Time-based trigger: Send every 50ms if we have at least 100ms of audio
-        const MIN_CONTINUOUS_TIME_MS = 50; // Minimum time between sends (even for tiny chunks)
-        // CRITICAL FIX: Increased from 20ms to 100ms for reliable Deepgram transcription
-        const MIN_CONTINUOUS_AUDIO_MS = ASR_CHUNK_MIN_MS; // Minimum audio to send in continuous mode (100ms for reliable transcription)
-        
-        // CRITICAL: Also check if buffer age is too high (stale buffer)
-        // If buffer hasn't been processed in a while, force process to prevent Deepgram timeout
-        // BUT: Still require minimum chunk size - don't send tiny chunks even if stale
-        const MAX_BUFFER_AGE_MS = 500; // Force process if buffer is older than 500ms
-        const isBufferStale = timeSinceLastContinuousSend >= MAX_BUFFER_AGE_MS;
-        
-        // CRITICAL FIX: Stale buffer should only force send if we have minimum audio
-        // Sending tiny chunks (20ms) to Deepgram causes timeouts - better to wait for more audio
+        // 1. Too long since last send (500ms+) - send whatever we have to prevent timeout
+        // 2. We have 50ms+ audio AND enough time has passed (100ms+)
+        // 3. We have 100ms+ audio (preferred chunk size)
+        // 4. Buffer is too large (250ms) - force send
         const shouldProcess = 
-          (isBufferStale && currentAudioDurationMs >= MIN_CONTINUOUS_AUDIO_MS) || // Stale buffer: only if we have minimum audio (100ms)
-          (timeSinceLastContinuousSend >= CONTINUOUS_CHUNK_DURATION_MS && currentAudioDurationMs >= MIN_CONTINUOUS_AUDIO_MS) || // Time-based: 100ms elapsed + 100ms audio
-          (timeSinceLastContinuousSend >= MIN_CONTINUOUS_TIME_MS && currentAudioDurationMs >= CONTINUOUS_CHUNK_DURATION_MS) || // Audio-based: 50ms elapsed + 100ms audio
+          (isTooLongSinceLastSend && currentAudioDurationMs >= 20) || // CRITICAL: Send after 500ms even with 20ms to prevent timeout
+          (timeSinceLastContinuousSend >= MIN_TIME_BETWEEN_SENDS_MS && currentAudioDurationMs >= MIN_CONTINUOUS_AUDIO_MS) || // 100ms elapsed + 50ms audio
+          (timeSinceLastContinuousSend >= MIN_TIME_BETWEEN_SENDS_MS && currentAudioDurationMs >= ASR_CHUNK_MIN_MS) || // 100ms elapsed + 100ms audio (preferred)
           currentAudioDurationMs >= MAX_CHUNK_DURATION_MS; // Force send if too large
         
-        // CRITICAL: Never send chunks smaller than minimum, even if buffer is stale
-        // This prevents Deepgram timeouts from tiny chunks
-        if (shouldProcess && currentAudioDurationMs >= MIN_CONTINUOUS_AUDIO_MS) {
+        // CRITICAL: Send if we should process and have at least 20ms (Deepgram minimum)
+        // Allow smaller chunks (50ms) if it's been too long since last send to prevent timeout
+        const minChunkForSend = isTooLongSinceLastSend ? 20 : MIN_CONTINUOUS_AUDIO_MS; // Allow 20ms if timeout risk
+        if (shouldProcess && currentAudioDurationMs >= minChunkForSend) {
           buffer.isProcessing = true;
           try {
             // Store buffer state before processing to check if anything was sent
@@ -455,10 +459,10 @@ class AsrWorker {
               });
             } else {
               // Buffer was too small, processBuffer returned early
-              console.debug(`[ASRWorker] ⏸️ Processing skipped - buffer too small (${audioDurationBeforeProcessing.toFixed(0)}ms < ${MIN_CONTINUOUS_AUDIO_MS}ms)`, {
+              console.debug(`[ASRWorker] ⏸️ Processing skipped - buffer too small (${audioDurationBeforeProcessing.toFixed(0)}ms < ${minChunkForSend}ms)`, {
                 interaction_id,
                 audioDuration: audioDurationBeforeProcessing.toFixed(0),
-                minimumRequired: MIN_CONTINUOUS_AUDIO_MS,
+                minimumRequired: minChunkForSend,
               });
             }
           } finally {
@@ -466,17 +470,17 @@ class AsrWorker {
           }
         } else {
           // Log why we're not processing (for debugging)
-          // CRITICAL: Log warning if buffer is getting stale but still too small
-          if (isBufferStale && currentAudioDurationMs < MIN_CONTINUOUS_AUDIO_MS) {
-            console.warn(`[ASRWorker] ⚠️ Buffer is stale but too small to send (${timeSinceLastContinuousSend}ms since last send, only ${currentAudioDurationMs.toFixed(0)}ms audio)`, {
+          // CRITICAL: Log warning if it's been too long since last send but still too small
+          if (isTooLongSinceLastSend && currentAudioDurationMs < 20) {
+            console.warn(`[ASRWorker] ⚠️ CRITICAL: Too long since last send (${timeSinceLastContinuousSend}ms) but only ${currentAudioDurationMs.toFixed(0)}ms audio`, {
               interaction_id,
               timeSinceLastContinuousSend,
               bufferAge,
               currentAudioDurationMs: currentAudioDurationMs.toFixed(0),
-              minimumRequired: MIN_CONTINUOUS_AUDIO_MS,
+              minimumRequired: '20ms (Deepgram absolute minimum)',
               chunksCount: buffer.chunks.length,
-              needsAudio: (MIN_CONTINUOUS_AUDIO_MS - currentAudioDurationMs).toFixed(0) + 'ms',
-              note: 'Waiting for more audio before sending to prevent Deepgram timeout from tiny chunks',
+              needsAudio: (20 - currentAudioDurationMs).toFixed(0) + 'ms',
+              note: 'Will send as soon as we have 20ms to prevent Deepgram timeout',
             });
           } else if (timeSinceLastContinuousSend > 1000) {
             console.warn(`[ASRWorker] ⚠️ Buffer getting stale (${timeSinceLastContinuousSend}ms since last send)`, {
@@ -650,10 +654,11 @@ class AsrWorker {
       
       // CRITICAL: Audio duration check depends on streaming mode
       // - Initial chunk: Require 200ms minimum (reduced from 500ms)
-      // - Continuous streaming: Require 100ms minimum for reliable Deepgram transcription
-      //   Deepgram can technically accept 20ms, but 100ms+ is needed for accuracy
+      // - Continuous streaming: Allow 50ms minimum (reduced from 100ms for more frequent sends)
+      //   Deepgram can handle 50ms chunks if sent frequently (every 200-500ms)
+      //   Better to send 50ms every 500ms than wait 20 seconds for 100ms
       const requiredDuration = buffer.hasSentInitialChunk 
-        ? ASR_CHUNK_MIN_MS  // Continuous mode: Require 100ms minimum for reliable transcription
+        ? 50  // Continuous mode: Allow 50ms minimum for more frequent sends (prevents 20s gaps)
         : INITIAL_CHUNK_DURATION_MS;    // Initial chunk: 200ms
       
       if (audioDurationMs < requiredDuration) {
