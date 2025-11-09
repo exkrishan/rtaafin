@@ -39,6 +39,7 @@ interface AudioBuffer {
   lastProcessed: number;
   lastChunkReceived: number; // Timestamp of last audio chunk received
   hasSentInitialChunk: boolean; // Track if we've sent the initial 500ms chunk
+  isProcessing: boolean; // Prevent concurrent processing of the same buffer
 }
 
 class AsrWorker {
@@ -160,6 +161,7 @@ class AsrWorker {
           lastProcessed: Date.now(),
           lastChunkReceived: Date.now(),
           hasSentInitialChunk: false, // Haven't sent initial chunk yet
+          isProcessing: false, // Not currently processing
         };
         this.buffers.set(interaction_id, buffer);
       }
@@ -199,21 +201,50 @@ class AsrWorker {
       
       const bufferAge = Date.now() - buffer.lastProcessed;
       
+      // Prevent concurrent processing of the same buffer (race condition fix)
+      if (buffer.isProcessing) {
+        console.debug(`[ASRWorker] ⏸️ Buffer already processing, skipping for ${interaction_id}`);
+        return;
+      }
+      
       if (!buffer.hasSentInitialChunk) {
         // First chunk: Wait for minimum duration (500ms)
         if (currentAudioDurationMs >= MIN_AUDIO_DURATION_MS) {
-          await this.processBuffer(buffer);
-          buffer.lastProcessed = Date.now();
+          buffer.isProcessing = true;
+          try {
+            await this.processBuffer(buffer);
+            buffer.lastProcessed = Date.now();
+          } finally {
+            buffer.isProcessing = false;
+          }
         }
       } else {
         // After initial chunk: Stream continuously
-        // Process if: time-based trigger (500ms) OR we have 200ms+ of new audio
+        // Process if: time-based trigger (500ms since last processing) OR we have 200ms+ of new audio
+        // CRITICAL: After buffer is cleared, currentAudioDurationMs resets, so we rely on time-based trigger
         const CONTINUOUS_STREAM_INTERVAL_MS = 500; // Send every 500ms for continuous flow
         const MIN_CONTINUOUS_CHUNK_MS = 200; // Or if we have 200ms+ accumulated
         
-        if (bufferAge >= CONTINUOUS_STREAM_INTERVAL_MS || currentAudioDurationMs >= MIN_CONTINUOUS_CHUNK_MS) {
-          await this.processBuffer(buffer);
-          buffer.lastProcessed = Date.now();
+        // Check both conditions: time elapsed OR enough audio accumulated
+        const shouldProcess = bufferAge >= CONTINUOUS_STREAM_INTERVAL_MS || currentAudioDurationMs >= MIN_CONTINUOUS_CHUNK_MS;
+        
+        if (shouldProcess) {
+          buffer.isProcessing = true;
+          try {
+            await this.processBuffer(buffer);
+            buffer.lastProcessed = Date.now();
+          } finally {
+            buffer.isProcessing = false;
+          }
+        } else {
+          // Log why we're not processing (for debugging)
+          console.debug(`[ASRWorker] ⏸️ Continuous streaming: waiting (age=${bufferAge}ms, audio=${currentAudioDurationMs.toFixed(0)}ms)`, {
+            interaction_id,
+            bufferAge,
+            currentAudioDurationMs: currentAudioDurationMs.toFixed(0),
+            needsTime: CONTINUOUS_STREAM_INTERVAL_MS - bufferAge,
+            needsAudio: Math.max(0, MIN_CONTINUOUS_CHUNK_MS - currentAudioDurationMs),
+          });
         }
       }
     } catch (error: any) {
