@@ -6,6 +6,13 @@
 import { createClient, LiveTranscriptionEvents } from '@deepgram/sdk';
 import { AsrProvider, Transcript } from '../types';
 
+interface PendingSend {
+  seq: number;
+  sendTime: number;
+  audioSize: number;
+  chunkSizeMs: number;
+}
+
 interface ConnectionState {
   connection: any;
   socket?: any; // Underlying WebSocket for text frames
@@ -14,6 +21,7 @@ interface ConnectionState {
   pendingResolvers: Array<(transcript: Transcript) => void>;
   lastTranscript: Transcript | null;
   lastSendTime?: number; // Timestamp of last audio send
+  pendingSends?: PendingSend[]; // Track pending sends for timeout detection
   keepAliveInterval?: NodeJS.Timeout;
   keepAliveSuccessCount: number;
   keepAliveFailureCount: number;
@@ -539,18 +547,39 @@ export class DeepgramProvider implements AsrProvider {
       connection.on(LiveTranscriptionEvents.Transcript, (data: any) => {
         try {
           this.metrics.transcriptsReceived++;
+          const transcriptTimestamp = new Date().toISOString();
           
-          // CRITICAL: Log FULL transcript event structure for debugging
-          console.info(`[DeepgramProvider] 📨 Transcript event received for ${interactionId}`, {
+          // COMPREHENSIVE FLOW TRACKING: Log transcript receipt
+          console.info(`\n${'='.repeat(80)}`);
+          console.info(`[DeepgramProvider] 📨 STEP 2: DEEPGRAM TRANSCRIPT RECEIVED`);
+          console.info(`[DeepgramProvider] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+          console.info(`[DeepgramProvider] Interaction ID: ${interactionId}`);
+          console.info(`[DeepgramProvider] Timestamp: ${transcriptTimestamp}`);
+          console.info(`[DeepgramProvider] Transcript Event Structure:`, {
             hasChannel: !!data?.channel,
             hasAlternatives: !!data?.channel?.alternatives,
             alternativesCount: data?.channel?.alternatives?.length ?? 0,
             isFinal: data?.is_final ?? false,
             speechFinal: data?.speech_final ?? false,
             rawDataKeys: data ? Object.keys(data) : [],
-            // Log full data structure (truncated for readability)
-            fullDataPreview: data ? JSON.stringify(data).substring(0, 1000) : 'null',
           });
+          
+          // Calculate time since last send (if available)
+          const lastSend = state.pendingSends && state.pendingSends.length > 0 
+            ? state.pendingSends[state.pendingSends.length - 1]
+            : null;
+          const timeSinceSend = lastSend ? (Date.now() - lastSend.sendTime) + 'ms' : 'unknown';
+          
+          console.info(`[DeepgramProvider] Timing:`, {
+            timeSinceLastSend: timeSinceSend,
+            lastSendSeq: lastSend?.seq || 'unknown',
+          });
+          
+          // Log full data structure (truncated)
+          console.info(`[DeepgramProvider] Full Event Data (first 1000 chars):`, {
+            dataPreview: data ? JSON.stringify(data).substring(0, 1000) : 'null',
+          });
+          console.info(`[DeepgramProvider] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
           
           // Log each alternative transcript in detail
           if (data?.channel?.alternatives && Array.isArray(data.channel.alternatives)) {
@@ -585,12 +614,30 @@ export class DeepgramProvider implements AsrProvider {
               isFinal: isFinal as any,
             };
 
-            console.info(`[DeepgramProvider] 📝 Received transcript for ${interactionId}`, {
+            // COMPREHENSIVE FLOW TRACKING: Log successful transcript
+            console.info(`[DeepgramProvider] ✅ STEP 2 SUCCESS: Transcript extracted and processed`, {
+              interactionId,
               type: transcript.type,
               textLength: transcript.text.length,
-              textPreview: transcript.text.substring(0, 50),
+              textPreview: transcript.text.substring(0, 100),
+              confidence: confidence.toFixed(2),
               isFinal,
+              status: 'SUCCESS - Transcript has text',
             });
+            
+            // Remove corresponding pending send
+            if (state.pendingSends && state.pendingSends.length > 0) {
+              const completedSend = state.pendingSends.shift();
+              if (completedSend) {
+                const processingTime = Date.now() - completedSend.sendTime;
+                console.info(`[DeepgramProvider] ⏱️ Processing Time: ${processingTime}ms (from send to transcript)`, {
+                  interactionId,
+                  seq: completedSend.seq,
+                  audioSize: completedSend.audioSize,
+                  chunkSizeMs: completedSend.chunkSizeMs,
+                });
+              }
+            }
 
             state.lastTranscript = transcript;
             state.transcriptQueue.push(transcript);
@@ -599,6 +646,10 @@ export class DeepgramProvider implements AsrProvider {
             if (state.pendingResolvers.length > 0) {
               const resolver = state.pendingResolvers.shift()!;
               resolver(transcript);
+              console.info(`[DeepgramProvider] ✅ STEP 3: Transcript delivered to ASR Worker`, {
+                interactionId,
+                pendingResolversRemaining: state.pendingResolvers.length,
+              });
             }
           } else {
             // Track empty transcripts in metrics
@@ -614,9 +665,10 @@ export class DeepgramProvider implements AsrProvider {
               ? ((this.metrics.emptyTranscriptsReceived / this.metrics.transcriptsReceived) * 100).toFixed(1) + '%'
               : '0%';
             
-            // Only log warning if empty transcript rate is high (>50%) or if this is a final transcript
+            // COMPREHENSIVE FLOW TRACKING: Log empty transcript
             if (isFinal || parseFloat(emptyRate) > 50) {
-              console.warn(`[DeepgramProvider] ⚠️ Empty transcript received from Deepgram for ${interactionId}`, {
+              console.warn(`[DeepgramProvider] ⚠️ STEP 2 WARNING: Empty transcript received`, {
+                interactionId,
                 isFinal,
                 hasChannel: !!data.channel,
                 hasAlternatives: !!data.channel?.alternatives,
@@ -624,14 +676,34 @@ export class DeepgramProvider implements AsrProvider {
                 emptyTranscriptRate: emptyRate,
                 totalTranscripts: this.metrics.transcriptsReceived,
                 totalEmpty: this.metrics.emptyTranscriptsReceived,
-                rawData: JSON.stringify(data).substring(0, 500), // First 500 chars for debugging
-                note: isFinal ? 'Final transcript is empty - this may indicate silence or format issues' : 'Partial transcript is empty - may be normal for silence',
+                status: 'WARNING - No text in transcript',
+                possibleCauses: [
+                  'Audio is silence (no speech detected)',
+                  'Audio format is incorrect (Deepgram can\'t decode)',
+                  'Audio chunks are too small/infrequent',
+                  'Sample rate mismatch',
+                ],
+                rawData: JSON.stringify(data).substring(0, 500),
               });
             } else {
-              // Log at debug level for normal empty partials (silence is normal)
-              console.debug(`[DeepgramProvider] Empty partial transcript (silence) for ${interactionId}`, {
+              // Log at info level for normal empty partials (silence is normal)
+              console.info(`[DeepgramProvider] ℹ️ STEP 2: Empty partial transcript (silence - normal)`, {
+                interactionId,
                 emptyTranscriptRate: emptyRate,
+                status: 'NORMAL - Silence detected',
               });
+            }
+            
+            // Remove corresponding pending send
+            if (state.pendingSends && state.pendingSends.length > 0) {
+              const completedSend = state.pendingSends.shift();
+              if (completedSend) {
+                const processingTime = Date.now() - completedSend.sendTime;
+                console.info(`[DeepgramProvider] ⏱️ Processing Time: ${processingTime}ms (from send to empty transcript)`, {
+                  interactionId,
+                  seq: completedSend.seq,
+                });
+              }
             }
             
             // Still resolve pending promises with empty transcript to prevent timeouts
@@ -1032,22 +1104,71 @@ export class DeepgramProvider implements AsrProvider {
         // According to Deepgram SDK docs, connection.send() accepts Buffer or Uint8Array
         // The SDK handles binary WebSocket frame transmission internally
         const sendStartTime = Date.now();
+        const sendTimestamp = new Date().toISOString();
+        
+        // COMPREHENSIVE FLOW TRACKING: Log before send
+        console.info(`\n${'='.repeat(80)}`);
+        console.info(`[DeepgramProvider] 🎤 STEP 1: SENDING AUDIO TO DEEPGRAM`);
+        console.info(`[DeepgramProvider] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+        console.info(`[DeepgramProvider] Interaction ID: ${interactionId}`);
+        console.info(`[DeepgramProvider] Sequence: ${seq}`);
+        console.info(`[DeepgramProvider] Timestamp: ${sendTimestamp}`);
+        console.info(`[DeepgramProvider] Audio Details:`, {
+          chunkSizeMs: chunkSizeMs.toFixed(0) + 'ms',
+          dataLength: audioData.length + ' bytes',
+          samples: Math.floor(audioData.length / 2),
+          sampleRate: sampleRate + ' Hz',
+          encoding: 'linear16 (PCM16)',
+          channels: 1,
+        });
+        console.info(`[DeepgramProvider] Connection State:`, {
+          isReady: state.isReady,
+          connectionReadyState,
+          socketReadyState,
+          hasConnection: !!state.connection,
+          hasSocket: !!state.socket,
+          timeSinceLastSend: state.lastSendTime ? (Date.now() - state.lastSendTime) + 'ms' : 'first send',
+        });
+        console.info(`[DeepgramProvider] Metrics:`, {
+          totalAudioChunksSent: this.metrics.audioChunksSent + 1,
+          totalTranscriptsReceived: this.metrics.transcriptsReceived,
+          totalEmptyTranscripts: this.metrics.emptyTranscriptsReceived,
+          averageChunkSizeMs: this.metrics.averageChunkSizeMs.toFixed(0) + 'ms',
+        });
+        console.info(`[DeepgramProvider] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
+        
         try {
           state.connection.send(audioData);
           const sendDuration = Date.now() - sendStartTime;
           
-          // Log successful send with detailed metrics
-          console.info(`[DeepgramProvider] ✅ Audio sent successfully for ${interactionId}, seq=${seq}`, {
-            chunkSizeMs: chunkSizeMs.toFixed(0),
-            timeSinceLastSend: state.lastSendTime ? (Date.now() - state.lastSendTime) + 'ms' : 'first',
-            averageChunkSizeMs: this.metrics.averageChunkSizeMs.toFixed(0),
+          // COMPREHENSIVE FLOW TRACKING: Log after successful send
+          console.info(`[DeepgramProvider] ✅ STEP 1 COMPLETE: Audio sent successfully`, {
+            interactionId,
+            seq,
             sendDurationMs: sendDuration,
-            dataLength: audioData.length,
-            connectionReadyState,
-            socketReadyState,
+            status: 'SUCCESS',
+            note: 'Audio data sent to Deepgram WebSocket. Waiting for transcript response...',
           });
           
           state.lastSendTime = Date.now();
+          
+          // Track pending send for timeout detection
+          const pendingSend = {
+            seq,
+            sendTime: Date.now(),
+            audioSize: audioData.length,
+            chunkSizeMs,
+          };
+          if (!state.pendingSends) {
+            state.pendingSends = [];
+          }
+          state.pendingSends.push(pendingSend);
+          
+          // Log pending sends count
+          console.info(`[DeepgramProvider] 📊 Pending transcript requests: ${state.pendingSends.length}`, {
+            interactionId,
+            pendingSeqs: state.pendingSends.map(s => s.seq).join(', '),
+          });
         } catch (sendError: any) {
           console.error(`[DeepgramProvider] ❌ Error during connection.send() for ${interactionId}:`, {
             error: sendError.message || String(sendError),
@@ -1092,15 +1213,58 @@ export class DeepgramProvider implements AsrProvider {
         state.pendingResolvers.push(resolve);
 
         // Timeout after 5 seconds if no response (longer for Deepgram processing)
+        const timeoutStartTime = Date.now();
         setTimeout(() => {
           const index = state.pendingResolvers.indexOf(resolve);
           if (index >= 0) {
             state.pendingResolvers.splice(index, 1);
+            
+            // COMPREHENSIVE FLOW TRACKING: Log timeout
+            const timeoutDuration = Date.now() - timeoutStartTime;
+            const pendingSend = state.pendingSends?.find(s => s.seq === seq);
+            const timeSinceSend = pendingSend ? (Date.now() - pendingSend.sendTime) + 'ms' : 'unknown';
+            
+            console.warn(`\n${'='.repeat(80)}`);
+            console.warn(`[DeepgramProvider] ⚠️ STEP 2 TIMEOUT: No transcript received from Deepgram`);
+            console.warn(`[DeepgramProvider] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+            console.warn(`[DeepgramProvider] Interaction ID: ${interactionId}`);
+            console.warn(`[DeepgramProvider] Sequence: ${seq}`);
+            console.warn(`[DeepgramProvider] Timeout Duration: ${timeoutDuration}ms`);
+            console.warn(`[DeepgramProvider] Time Since Send: ${timeSinceSend}`);
+            console.warn(`[DeepgramProvider] Connection State:`, {
+              isReady: state.isReady,
+              hasConnection: !!state.connection,
+              hasSocket: !!state.socket,
+              socketReadyState: state.socket?.readyState,
+            });
+            console.warn(`[DeepgramProvider] Metrics:`, {
+              totalAudioChunksSent: this.metrics.audioChunksSent,
+              totalTranscriptsReceived: this.metrics.transcriptsReceived,
+              totalEmptyTranscripts: this.metrics.emptyTranscriptsReceived,
+              pendingResolvers: state.pendingResolvers.length,
+              pendingSends: state.pendingSends?.length || 0,
+            });
+            console.warn(`[DeepgramProvider] Possible Causes:`, [
+              'Deepgram did not receive the audio',
+              'Deepgram is processing but taking longer than 5 seconds',
+              'Connection closed before transcript could be sent',
+              'Audio format issue preventing Deepgram from processing',
+              'Network issue preventing transcript delivery',
+            ]);
+            console.warn(`[DeepgramProvider] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
+            
+            // Remove corresponding pending send
+            if (state.pendingSends) {
+              const index = state.pendingSends.findIndex(s => s.seq === seq);
+              if (index >= 0) {
+                const pendingSend = state.pendingSends[index];
+              }
+            }
+            
             // Return last known transcript or empty
             if (state.lastTranscript) {
               resolve(state.lastTranscript);
             } else {
-              console.warn(`[DeepgramProvider] ⚠️ Timeout waiting for transcript for ${interactionId}, seq=${seq}`);
               resolve({
                 type: 'partial',
                 text: '',

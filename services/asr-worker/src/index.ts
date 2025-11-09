@@ -393,10 +393,12 @@ class AsrWorker {
         
         // Send if we have enough audio OR if we've waited too long (prevent timeout)
         if (hasEnoughAudio || (hasWaitedTooLong && currentAudioDurationMs >= 20)) {
+          // CRITICAL: Don't await processBuffer - it sends audio asynchronously
+          // This prevents buffer from being locked during 5-second transcript wait
           buffer.isProcessing = true;
-          try {
-            // If we're sending early due to timeout risk, allow smaller chunks
-            await this.processBuffer(buffer, hasWaitedTooLong);
+          this.processBuffer(buffer, hasWaitedTooLong).then(() => {
+            // Clear processing flag after send completes (not after transcript arrives)
+            buffer.isProcessing = false;
             buffer.lastProcessed = Date.now();
             buffer.hasSentInitialChunk = true;
             buffer.lastContinuousSendTime = Date.now();
@@ -407,9 +409,11 @@ class AsrWorker {
                 waitTime: timeSinceBufferCreation,
               });
             }
-          } finally {
+          }).catch((error: any) => {
             buffer.isProcessing = false;
-          }
+            console.error(`[ASRWorker] Error processing initial chunk for ${interaction_id}:`, error);
+            this.metrics.recordError(error.message || String(error));
+          });
         }
       } else {
         // After initial chunk: Stream continuously with Deepgram-optimized sizing
@@ -613,17 +617,21 @@ class AsrWorker {
       const minChunkForSend = isTooLongSinceLastSend ? 20 : DEEPGRAM_OPTIMAL_CHUNK_MS;
 
       if (shouldProcess && currentAudioDurationMs >= minChunkForSend) {
+        // CRITICAL: Don't await processBuffer - it sends audio asynchronously
+        // This prevents buffer from being locked during 5-second transcript wait
         buffer.isProcessing = true;
-        try {
-          const chunksBeforeProcessing = buffer.chunks.length;
-          const audioDurationBeforeProcessing = currentAudioDurationMs;
-          
-          await this.processBuffer(buffer, isTooLongSinceLastSend);
+        const chunksBeforeProcessing = buffer.chunks.length;
+        const audioDurationBeforeProcessing = currentAudioDurationMs;
+        
+        // Fire and forget - processBuffer handles async transcript response
+        this.processBuffer(buffer, isTooLongSinceLastSend).then(() => {
+          // Clear processing flag after send completes (not after transcript arrives)
+          buffer.isProcessing = false;
           
           if (buffer.chunks.length < chunksBeforeProcessing) {
             buffer.lastProcessed = Date.now();
             buffer.lastContinuousSendTime = Date.now();
-            console.info(`[ASRWorker] ✅ Timer-triggered send for ${interactionId}`, {
+            console.info(`[ASRWorker] ✅ Timer-triggered send completed for ${interactionId}`, {
               timeSinceLastSend: timeSinceLastContinuousSend,
               audioDuration: audioDurationBeforeProcessing.toFixed(0),
               chunksCount: chunksBeforeProcessing,
@@ -631,12 +639,11 @@ class AsrWorker {
               strategy: isTooLongSinceLastSend ? 'timeout-prevention' : 'optimal-chunk',
             });
           }
-        } catch (error: any) {
+        }).catch((error: any) => {
+          buffer.isProcessing = false;
           console.error(`[ASRWorker] Error in timer-based processing for ${interactionId}:`, error);
           this.metrics.recordError(error.message || String(error));
-        } finally {
-          buffer.isProcessing = false;
-        }
+        });
       }
     }, PROCESSING_TIMER_INTERVAL_MS);
 
@@ -665,79 +672,114 @@ class AsrWorker {
     }
 
     try {
-      // Concatenate audio chunks
-      const combinedAudio = Buffer.concat(buffer.chunks);
-      const seq = buffer.chunks.length;
-      
-      // Calculate total audio duration
-      const totalSamples = combinedAudio.length / 2; // 16-bit = 2 bytes per sample
-      const audioDurationMs = (totalSamples / buffer.sampleRate) * 1000;
-      
-      // CRITICAL: Enforce maximum chunk size (250ms per Deepgram recommendation)
-      // If buffer is too large, split into multiple chunks
-      if (audioDurationMs > MAX_CHUNK_DURATION_MS) {
-        console.warn(`[ASRWorker] ⚠️ Buffer too large (${audioDurationMs.toFixed(0)}ms > ${MAX_CHUNK_DURATION_MS}ms), splitting into chunks`, {
-          interaction_id: buffer.interactionId,
-          audioDurationMs: audioDurationMs.toFixed(0),
-          maxChunkSize: MAX_CHUNK_DURATION_MS,
-        });
-        
-        // Split into multiple chunks
-        const maxSamples = Math.floor((MAX_CHUNK_DURATION_MS * buffer.sampleRate) / 1000);
-        const maxBytes = maxSamples * 2; // 16-bit = 2 bytes per sample
-        
-        // Process first chunk
-        const firstChunk = combinedAudio.slice(0, maxBytes);
-        await this.sendToAsrProvider(firstChunk, buffer, seq);
-        
-        // Process remaining chunks if any
-        if (combinedAudio.length > maxBytes) {
-          const remainingChunk = combinedAudio.slice(maxBytes);
-          await this.sendToAsrProvider(remainingChunk, buffer, seq + 1);
-        }
-        
-        // Clear all processed chunks
-        buffer.chunks = [];
-        buffer.timestamps = [];
-        return;
-      }
-      
-      // CRITICAL: Audio duration check depends on streaming mode and timeout risk
+      // CRITICAL: Calculate how much audio we should send
       // - Initial chunk: Require 200ms minimum
       // - Continuous streaming: Allow 20ms minimum if timeout risk, 80ms normally (Deepgram optimal)
-      //   Deepgram can handle 20ms chunks if sent frequently to prevent timeout
-      //   Better to send 20ms every 200ms than wait 8 seconds for 80ms
-      const DEEPGRAM_OPTIMAL_CHUNK_MS = 80; // Deepgram's recommended chunk size
+      const DEEPGRAM_OPTIMAL_CHUNK_MS = 80;
       const requiredDuration = buffer.hasSentInitialChunk 
-        ? (isTimeoutRisk ? 20 : DEEPGRAM_OPTIMAL_CHUNK_MS)  // Continuous mode: 20ms if timeout risk, 80ms normally
-        : INITIAL_CHUNK_DURATION_MS;    // Initial chunk: 200ms
+        ? (isTimeoutRisk ? 20 : DEEPGRAM_OPTIMAL_CHUNK_MS)
+        : INITIAL_CHUNK_DURATION_MS;
       
-      if (audioDurationMs < requiredDuration) {
-        console.debug(`[ASRWorker] ⏳ Buffer too small (${audioDurationMs.toFixed(0)}ms < ${requiredDuration}ms), waiting for more audio`, {
+      // Calculate how many bytes we need
+      const requiredSamples = Math.floor((requiredDuration * buffer.sampleRate) / 1000);
+      const requiredBytes = requiredSamples * 2; // 16-bit = 2 bytes per sample
+      
+      // Calculate total audio in buffer
+      const totalBytes = buffer.chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+      const totalSamples = totalBytes / 2;
+      const totalAudioDurationMs = (totalSamples / buffer.sampleRate) * 1000;
+      
+      // Check if we have enough audio
+      if (totalBytes < requiredBytes) {
+        console.debug(`[ASRWorker] ⏳ Buffer too small (${totalAudioDurationMs.toFixed(0)}ms < ${requiredDuration}ms), waiting for more audio`, {
           interaction_id: buffer.interactionId,
           chunksCount: buffer.chunks.length,
-          audioDurationMs: audioDurationMs.toFixed(0),
+          audioDurationMs: totalAudioDurationMs.toFixed(0),
           minimumRequired: requiredDuration,
           mode: buffer.hasSentInitialChunk ? 'continuous' : 'initial',
         });
         return; // Don't process yet - wait for more audio
       }
-
-      // Log audio details before sending to ASR
+      
+      // CRITICAL: Only send the required amount, keep remaining chunks in buffer
+      // This allows chunks to accumulate while we wait for transcript
+      let bytesToSend = 0;
+      let chunksToSend: Buffer[] = [];
+      let timestampsToSend: number[] = [];
+      
+      // Collect chunks until we have enough audio
+      for (let i = 0; i < buffer.chunks.length; i++) {
+        const chunk = buffer.chunks[i];
+        if (bytesToSend + chunk.length <= requiredBytes || chunksToSend.length === 0) {
+          // Include this chunk (or first chunk even if it exceeds limit)
+          chunksToSend.push(chunk);
+          timestampsToSend.push(buffer.timestamps[i]);
+          bytesToSend += chunk.length;
+        } else {
+          break; // Keep remaining chunks in buffer
+        }
+      }
+      
+      if (chunksToSend.length === 0) {
+        return;
+      }
+      
+      // Combine chunks to send
+      const audioToSend = Buffer.concat(chunksToSend);
+      const audioDurationToSend = (audioToSend.length / 2 / buffer.sampleRate) * 1000;
+      const seq = chunksToSend.length;
+      
+      // Log audio details before sending
       console.info(`[ASRWorker] Processing audio buffer:`, {
         interaction_id: buffer.interactionId,
         seq,
         sampleRate: buffer.sampleRate,
-        audioSize: combinedAudio.length,
-        audioDurationMs: audioDurationMs.toFixed(0),
-        chunksCount: buffer.chunks.length,
+        audioSize: audioToSend.length,
+        audioDurationMs: audioDurationToSend.toFixed(0),
+        chunksToSend: chunksToSend.length,
+        chunksRemaining: buffer.chunks.length - chunksToSend.length,
+        totalChunksInBuffer: buffer.chunks.length,
         bufferAge: Date.now() - buffer.lastProcessed,
-        meetsMinimum: audioDurationMs >= MIN_AUDIO_DURATION_MS,
       });
 
-      // Send to ASR provider (extracted to helper for chunk splitting)
-      const transcript = await this.sendToAsrProvider(combinedAudio, buffer, seq);
-
+      // CRITICAL: Send audio and handle transcript asynchronously
+      // Don't wait for transcript - this prevents buffer from being locked
+      // Send audio immediately, then handle transcript response when it arrives
+      this.sendToAsrProvider(audioToSend, buffer, seq).then((transcript) => {
+        // Handle transcript asynchronously (don't block buffer processing)
+        this.handleTranscriptResponse(buffer, transcript, seq);
+      }).catch((error) => {
+        console.error(`[ASRWorker] Error sending audio for ${buffer.interactionId}:`, error);
+      });
+      
+      // CRITICAL: Remove sent chunks from buffer immediately (don't wait for transcript)
+      // This allows new chunks to accumulate while we wait for transcript
+      buffer.chunks = buffer.chunks.slice(chunksToSend.length);
+      buffer.timestamps = buffer.timestamps.slice(timestampsToSend.length);
+      
+      // Update last processed time
+      buffer.lastProcessed = Date.now();
+      
+      // CRITICAL: Mark initial chunk sent (for continuous streaming mode)
+      if (!buffer.hasSentInitialChunk) {
+        buffer.hasSentInitialChunk = true;
+      }
+      
+    } catch (error: any) {
+      console.error(`[ASRWorker] Error processing buffer:`, error);
+      throw error;
+    }
+  }
+  
+  /**
+   * Handle transcript response asynchronously (doesn't block buffer processing)
+   */
+  private async handleTranscriptResponse(
+    buffer: AudioBuffer,
+    transcript: any,
+    seq: number
+  ): Promise<void> {
+    try {
       // Record first partial latency
       if (transcript.type === 'partial' && !transcript.isFinal) {
         this.metrics.recordFirstPartial(buffer.interactionId);
@@ -776,29 +818,8 @@ class AsrWorker {
           provider: process.env.ASR_PROVIDER || 'mock',
         });
       }
-
-      // Mark that we've sent the initial chunk (for continuous streaming)
-      buffer.hasSentInitialChunk = true;
-      
-      // Clear buffer if final transcript
-      if (transcript.isFinal) {
-        this.buffers.delete(buffer.interactionId);
-        this.metrics.resetInteraction(buffer.interactionId);
-      } else {
-        // Clear ALL processed chunks to prevent reprocessing
-        // The buffer will accumulate new chunks for continuous streaming
-        // This prevents infinite loop of processing same chunks
-        const clearedChunksCount = buffer.chunks.length;
-        buffer.chunks = [];
-        buffer.timestamps = [];
-        
-        console.info(`[ASRWorker] ✅ Cleared ${clearedChunksCount} chunks from buffer for ${buffer.interactionId} after processing`, {
-          hasSentInitialChunk: buffer.hasSentInitialChunk,
-          note: 'Will now stream continuously as new chunks arrive',
-        });
-      }
     } catch (error: any) {
-      console.error('[ASRWorker] Error processing buffer:', error);
+      console.error(`[ASRWorker] Error handling transcript response:`, error);
       this.metrics.recordError(error.message || String(error));
     }
   }
