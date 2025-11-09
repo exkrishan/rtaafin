@@ -51,6 +51,7 @@ interface AudioBuffer {
   hasSentInitialChunk: boolean; // Track if we've sent the initial 500ms chunk
   isProcessing: boolean; // Prevent concurrent processing of the same buffer
   lastContinuousSendTime: number; // Timestamp of last continuous chunk send (doesn't reset on buffer clear)
+  processTimer?: NodeJS.Timeout; // Timer for periodic processing (ensures sends every 200ms)
 }
 
 class AsrWorker {
@@ -60,6 +61,7 @@ class AsrWorker {
   private metrics: MetricsCollector;
   private server: ReturnType<typeof createServer>;
   private subscriptions: any[] = [];
+  private bufferTimers: Map<string, NodeJS.Timeout> = new Map(); // Track timers per buffer for cleanup
 
   constructor() {
     this.pubsub = createPubSubAdapterFromEnv();
@@ -341,6 +343,11 @@ class AsrWorker {
 
       buffer.chunks.push(audioBuffer);
       buffer.timestamps.push(frame.timestamp_ms);
+      buffer.lastChunkReceived = Date.now(); // Update last chunk received time
+
+      // CRITICAL: Start/restart processing timer to ensure frequent sends
+      // This ensures we check every 200ms if we should send, regardless of chunk arrival frequency
+      this.startBufferProcessingTimer(interaction_id);
 
       // Calculate current audio duration in buffer
       const totalSamples = buffer.chunks.reduce((sum, chunk) => sum + chunk.length, 0) / 2; // 16-bit = 2 bytes per sample
@@ -548,6 +555,14 @@ class AsrWorker {
           interaction_id: interactionId,
           chunksCount: buffer.chunks.length,
         });
+        
+        // CRITICAL: Clear processing timer
+        const timer = this.bufferTimers.get(interactionId);
+        if (timer) {
+          clearInterval(timer);
+          this.bufferTimers.delete(interactionId);
+        }
+        
         this.buffers.delete(interactionId);
         this.metrics.resetInteraction(interactionId);
         
@@ -605,6 +620,99 @@ class AsrWorker {
         }
       }
     }, 2000); // Check every 2 seconds
+  }
+
+  /**
+   * CRITICAL: Timer-based processing to ensure audio is sent every 200ms
+   * This prevents Deepgram timeouts (1011) when chunks arrive slowly
+   * 
+   * The timer checks every 200ms if we should send audio, regardless of when chunks arrive.
+   * This ensures continuous audio flow even if chunks arrive every 3 seconds.
+   */
+  private startBufferProcessingTimer(interactionId: string): void {
+    // Clear existing timer if any
+    const existingTimer = this.bufferTimers.get(interactionId);
+    if (existingTimer) {
+      clearInterval(existingTimer);
+    }
+
+    // Start new timer: check every 200ms
+    const PROCESSING_TIMER_INTERVAL_MS = 200; // Check every 200ms
+    const timer = setInterval(async () => {
+      const buffer = this.buffers.get(interactionId);
+      if (!buffer) {
+        // Buffer was cleaned up, clear timer
+        clearInterval(timer);
+        this.bufferTimers.delete(interactionId);
+        return;
+      }
+
+      // Skip if already processing or no chunks
+      if (buffer.isProcessing || buffer.chunks.length === 0) {
+        return;
+      }
+
+      // Only process if we've sent initial chunk (continuous mode)
+      // Initial chunk logic is handled in handleAudioFrame
+      if (!buffer.hasSentInitialChunk) {
+        return;
+      }
+
+      // Calculate current audio duration
+      const totalSamples = buffer.chunks.reduce((sum, chunk) => sum + chunk.length, 0) / 2;
+      const currentAudioDurationMs = (totalSamples / buffer.sampleRate) * 1000;
+
+      // Initialize lastContinuousSendTime if needed
+      if (buffer.lastContinuousSendTime === 0) {
+        buffer.lastContinuousSendTime = buffer.lastProcessed;
+      }
+
+      const timeSinceLastContinuousSend = Date.now() - buffer.lastContinuousSendTime;
+      const DEEPGRAM_OPTIMAL_CHUNK_MS = 80;
+      const MAX_TIME_BETWEEN_SENDS_MS = 200;
+      const MIN_TIME_BETWEEN_SENDS_MS = 50;
+
+      const isTooLongSinceLastSend = timeSinceLastContinuousSend >= MAX_TIME_BETWEEN_SENDS_MS;
+      const hasEnoughTimePassed = timeSinceLastContinuousSend >= MIN_TIME_BETWEEN_SENDS_MS;
+      const hasOptimalChunkSize = currentAudioDurationMs >= DEEPGRAM_OPTIMAL_CHUNK_MS;
+      const hasMinimumChunkSize = currentAudioDurationMs >= 20;
+
+      const shouldProcess = 
+        (isTooLongSinceLastSend && hasMinimumChunkSize) ||
+        (hasEnoughTimePassed && hasOptimalChunkSize) ||
+        currentAudioDurationMs >= MAX_CHUNK_DURATION_MS;
+
+      const minChunkForSend = isTooLongSinceLastSend ? 20 : DEEPGRAM_OPTIMAL_CHUNK_MS;
+
+      if (shouldProcess && currentAudioDurationMs >= minChunkForSend) {
+        buffer.isProcessing = true;
+        try {
+          const chunksBeforeProcessing = buffer.chunks.length;
+          const audioDurationBeforeProcessing = currentAudioDurationMs;
+          
+          await this.processBuffer(buffer, isTooLongSinceLastSend);
+          
+          if (buffer.chunks.length < chunksBeforeProcessing) {
+            buffer.lastProcessed = Date.now();
+            buffer.lastContinuousSendTime = Date.now();
+            console.info(`[ASRWorker] ✅ Timer-triggered send for ${interactionId}`, {
+              timeSinceLastSend: timeSinceLastContinuousSend,
+              audioDuration: audioDurationBeforeProcessing.toFixed(0),
+              chunksCount: chunksBeforeProcessing,
+              chunksRemaining: buffer.chunks.length,
+              strategy: isTooLongSinceLastSend ? 'timeout-prevention' : 'optimal-chunk',
+            });
+          }
+        } catch (error: any) {
+          console.error(`[ASRWorker] Error in timer-based processing for ${interactionId}:`, error);
+          this.metrics.recordError(error.message || String(error));
+        } finally {
+          buffer.isProcessing = false;
+        }
+      }
+    }, PROCESSING_TIMER_INTERVAL_MS);
+
+    this.bufferTimers.set(interactionId, timer);
   }
 
   /**
