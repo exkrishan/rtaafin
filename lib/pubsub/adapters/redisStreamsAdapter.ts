@@ -226,10 +226,18 @@ export class RedisStreamsAdapter implements PubSubAdapter {
   }
 
   async publish(topic: string, message: any): Promise<string | void> {
+    console.info(`[RedisStreamsAdapter] 📤 Publishing message to topic: ${topic}`, {
+      topic,
+      messageKeys: Object.keys(message),
+      interaction_id: message.interaction_id,
+      seq: message.seq,
+    });
+    
     // Check if we're in backoff period
     const lastMaxClientsError = maxClientsErrorTime.get(this.redisUrl);
     if (lastMaxClientsError && (Date.now() - lastMaxClientsError) < MAX_CLIENTS_BACKOFF_MS) {
       const waitTime = Math.ceil((MAX_CLIENTS_BACKOFF_MS - (Date.now() - lastMaxClientsError)) / 1000);
+      console.error(`[RedisStreamsAdapter] ❌ Redis max clients backoff active - waiting ${waitTime}s before retry`);
       throw new Error(`Redis max clients backoff active - waiting ${waitTime}s before retry`);
     }
     
