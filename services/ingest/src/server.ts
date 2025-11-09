@@ -202,10 +202,11 @@ class IngestionServer {
     
     // Health check endpoint (required for cloud deployment)
     this.server.on('request', (req: any, res: any) => {
-      // Don't handle WebSocket upgrade requests here - let WebSocket server handle them
-      if (req.headers.upgrade === 'websocket' || 
-          req.headers.connection?.toLowerCase().includes('upgrade')) {
-        // This is a WebSocket upgrade - don't respond, let WebSocket server handle it
+      // Don't handle WebSocket upgrade requests - let WebSocket server handle them
+      if (req.url === '/v1/ingest' && 
+          (req.headers.upgrade === 'websocket' || 
+           req.headers.connection?.toLowerCase().includes('upgrade'))) {
+        // This is a WebSocket upgrade for /v1/ingest - don't respond, let WebSocket server handle it
         return;
       }
       
@@ -228,8 +229,12 @@ class IngestionServer {
         }));
         return;
       }
-      res.writeHead(404);
-      res.end('Not Found');
+      
+      // Only send 404 if it's not a WebSocket upgrade
+      if (req.headers.upgrade !== 'websocket') {
+        res.writeHead(404);
+        res.end('Not Found');
+      }
     });
 
     // ============================================
