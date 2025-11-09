@@ -4,6 +4,9 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import CustomerDetailsHeader, { Customer } from './CustomerDetailsHeader';
 import { showToast } from './ToastContainer';
 
+// Re-export Customer type for convenience
+export type { Customer } from './CustomerDetailsHeader';
+
 export interface KBArticle {
   id: string;
   title: string;

@@ -4,6 +4,7 @@ import { useState, useRef, useEffect } from 'react';
 import TranscriptPanel from '@/components/TranscriptPanel';
 import AutoDispositionModal, { Suggestion } from '@/components/AutoDispositionModal';
 import AgentAssistPanelV2, { KBArticle, DispositionData, Customer } from '@/components/AgentAssistPanelV2';
+import type { Customer } from '@/components/CustomerDetailsHeader';
 import ToastContainer from '@/components/ToastContainer';
 
 interface DemoTranscriptLine {
