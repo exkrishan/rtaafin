@@ -50,7 +50,11 @@ function CustomerInfoPlaceholder() {
 }
 
 export default function DashboardPage() {
-  const [callId] = useState('call-123');
+  // TODO: Replace with actual Exotel call ID from logs
+  // Find it in Ingest Service logs: [exotel] call_sid: "CA123..."
+  // Or ASR Worker logs: interaction_id: 'call-1762532332133'
+  // For now, using a placeholder - update this with your actual call ID
+  const [callId] = useState('call-123'); // ⚠️ UPDATE THIS with your Exotel call ID
   const [tenantId] = useState('default');
   const [showModal, setShowModal] = useState(false);
   const [mockArticles] = useState<KBArticle[]>(loadMockArticles());

@@ -293,13 +293,44 @@ class AsrWorker {
       const firstBytes = Array.from(audioBuffer.slice(0, Math.min(8, audioBuffer.length)));
       if (firstBytes[0] === 0x7b || firstBytes[0] === 0x5b) { // '{' or '['
         const firstBytesHex = firstBytes.map(b => `0x${b.toString(16).padStart(2, '0')}`).join(', ');
-        console.error('[ASRWorker] ❌ CRITICAL: Decoded audio buffer contains JSON text!', {
-          interaction_id,
-          seq,
-          first_bytes_hex: firstBytesHex,
-          buffer_length: audioBuffer.length,
-          audio_field_length: audio.length,
-        });
+        
+        // Try to parse as JSON to see what Exotel is actually sending
+        try {
+          const jsonText = audioBuffer.toString('utf8');
+          const parsedJson = JSON.parse(jsonText);
+          
+          // Log detailed error with parsed JSON structure
+          console.error('[ASRWorker] ❌ CRITICAL: Decoded audio buffer contains JSON text!', {
+            interaction_id,
+            seq,
+            first_bytes_hex: firstBytesHex,
+            buffer_length: audioBuffer.length,
+            audio_field_length: audio.length,
+            parsed_json_keys: Object.keys(parsedJson),
+            parsed_json_event: parsedJson.event,
+            parsed_json_structure: JSON.stringify(parsedJson).substring(0, 1000),
+            note: 'This indicates Exotel is sending base64-encoded JSON instead of base64-encoded audio. Check Ingest service logs for [exotel] errors.',
+          });
+          
+          // Log this only once per interaction to avoid spam
+          if (seq === 1 || seq === 2) {
+            console.error('[ASRWorker] 🔍 Full parsed JSON (first occurrence):', {
+              interaction_id,
+              seq,
+              full_json: JSON.stringify(parsedJson, null, 2),
+            });
+          }
+        } catch (parseError) {
+          console.error('[ASRWorker] ❌ CRITICAL: Decoded audio buffer contains JSON text (but not valid JSON)!', {
+            interaction_id,
+            seq,
+            first_bytes_hex: firstBytesHex,
+            buffer_length: audioBuffer.length,
+            audio_field_length: audio.length,
+            buffer_preview: audioBuffer.toString('utf8').substring(0, 200),
+            parse_error: parseError instanceof Error ? parseError.message : String(parseError),
+          });
+        }
         return;
       }
 

@@ -354,7 +354,7 @@ class IngestionServer {
         }
         this.exotelHandler.handleMessage(ws as any, data);
       } else {
-        // Binary message - Exotel is sending raw PCM16 audio
+        // Binary message - Exotel might be sending raw PCM16 audio OR base64-encoded JSON
         // Handle binary frames directly if state is initialized
         if (exotelState.started || exotelState.seq === 0) {
           // If not started yet, assume defaults and start processing
@@ -367,6 +367,59 @@ class IngestionServer {
           }
           
           exotelState.seq += 1;
+          
+          // Validate binary data - check if it's actually JSON text (base64-encoded JSON)
+          // This can happen if Exotel sends JSON as binary frames
+          const firstBytes = Array.from(data.slice(0, Math.min(8, data.length)));
+          if (firstBytes[0] === 0x7b || firstBytes[0] === 0x5b) { // '{' or '['
+            // This looks like JSON text, not binary audio!
+            try {
+              const jsonText = data.toString('utf8');
+              const parsedJson = JSON.parse(jsonText);
+              console.error('[exotel] ❌ CRITICAL: Binary frame contains JSON text!', {
+                stream_sid: exotelState.streamSid,
+                call_sid: exotelState.callSid,
+                seq: exotelState.seq,
+                first_bytes_hex: firstBytes.map(b => `0x${b.toString(16).padStart(2, '0')}`).join(', '),
+                buffer_length: data.length,
+                parsed_json_keys: Object.keys(parsedJson),
+                parsed_json_event: parsedJson.event,
+                parsed_json_structure: JSON.stringify(parsedJson).substring(0, 500),
+                note: 'Exotel is sending JSON as binary frames. This should be handled as text frames instead.',
+              });
+              
+              // Try to handle it as a JSON message instead
+              if (parsedJson.event === 'media' && parsedJson.media) {
+                console.info('[exotel] Attempting to handle binary JSON as media event');
+                this.exotelHandler.handleMessage(ws as any, jsonText);
+              }
+              return; // Don't publish as audio
+            } catch (parseError) {
+              // Not valid JSON, but starts with { or [
+              console.error('[exotel] ❌ CRITICAL: Binary frame contains JSON-like text (but not valid JSON)!', {
+                stream_sid: exotelState.streamSid,
+                call_sid: exotelState.callSid,
+                seq: exotelState.seq,
+                first_bytes_hex: firstBytes.map(b => `0x${b.toString(16).padStart(2, '0')}`).join(', '),
+                buffer_length: data.length,
+                buffer_preview: data.toString('utf8').substring(0, 200),
+              });
+              return; // Don't publish as audio
+            }
+          }
+          
+          // Log first few binary frames for debugging
+          if (exotelState.seq <= 3) {
+            const firstBytesHex = firstBytes.map(b => `0x${b.toString(16).padStart(2, '0')}`).join(', ');
+            console.info('[exotel] 🔍 Raw binary frame received:', {
+              stream_sid: exotelState.streamSid,
+              call_sid: exotelState.callSid,
+              seq: exotelState.seq,
+              buffer_length: data.length,
+              first_bytes_hex: firstBytesHex,
+              first_bytes_decimal: firstBytes.join(', '),
+            });
+          }
           
           // Create audio frame from binary data
           const frame: AudioFrame = {
