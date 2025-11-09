@@ -296,14 +296,26 @@ class IngestionServer {
     });
 
     this.wss.on('connection', (ws: Connection, req) => {
-      // Check if this is Exotel connection
-      const isExotel = (req as any).isExotel !== false && this.supportExotel;
-      
-      if (isExotel) {
-        this.handleExotelConnection(ws, req);
-      } else {
-        this.handleConnection(ws, req);
+      try {
+        // Check if this is Exotel connection
+        const isExotel = (req as any).isExotel !== false && this.supportExotel;
+        
+        if (isExotel) {
+          this.handleExotelConnection(ws, req);
+        } else {
+          this.handleConnection(ws, req);
+        }
+      } catch (error: any) {
+        console.error('[server] ❌ Error handling WebSocket connection:', error);
+        console.error('[server] Error stack:', error.stack);
+        ws.close(1011, 'Internal Server Error');
       }
+    });
+
+    // Handle WebSocket server errors
+    this.wss.on('error', (error: Error) => {
+      console.error('[server] ❌ WebSocket server error:', error);
+      console.error('[server] Error stack:', error.stack);
     });
 
     // Handle server errors
