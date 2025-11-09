@@ -413,120 +413,23 @@ class AsrWorker {
         }
       } else {
         // After initial chunk: Stream continuously with Deepgram-optimized sizing
-        // CRITICAL: Use lastContinuousSendTime which doesn't reset when buffer is cleared
-        // This ensures continuous streaming works even after buffer is cleared
+        // CRITICAL: Timer-based processing handles ALL continuous streaming
+        // Event-driven processing is DISABLED for continuous mode to avoid race conditions
+        // The timer checks every 200ms and sends when needed, ensuring continuous audio flow
         
-        // CRITICAL FIX: Initialize lastContinuousSendTime to buffer creation time if not set
-        // This prevents the age calculation from being wrong when buffer is old
+        // Initialize lastContinuousSendTime if needed (for timer to calculate time since last send)
         if (buffer.lastContinuousSendTime === 0) {
-          // Use lastProcessed (buffer creation time) instead of current time
-          // This ensures timeSinceLastContinuousSend is calculated correctly
           buffer.lastContinuousSendTime = buffer.lastProcessed;
         }
         
-        // Calculate time since last continuous send (this doesn't reset on buffer clear)
-        const timeSinceLastContinuousSend = Date.now() - buffer.lastContinuousSendTime;
-        
-        // CRITICAL: Deepgram requires CONTINUOUS audio flow - gaps cause timeouts (1011)
-        // The problem: Audio chunks arrive every 3 seconds (20ms each), but we're only sending every 8-9 seconds
-        // Root cause: We're clearing the buffer after each send, so chunks never accumulate
-        // Solution: ACCUMULATE chunks and send more frequently (every 200ms), even if chunks are smaller
-        
-        // CRITICAL FIX: Deepgram recommends 80ms chunks for optimal performance
-        // But we MUST send at least every 200ms to prevent timeout (1011 errors)
-        // Strategy: Accumulate chunks until we have 80ms OR 200ms has passed, whichever comes first
-        const DEEPGRAM_OPTIMAL_CHUNK_MS = 80; // Deepgram's recommended chunk size
-        const MAX_TIME_BETWEEN_SENDS_MS = 200; // CRITICAL: Send at least every 200ms to prevent timeout
-        const MIN_TIME_BETWEEN_SENDS_MS = 50; // Don't send more than every 50ms (avoid overwhelming)
-        
-        const isTooLongSinceLastSend = timeSinceLastContinuousSend >= MAX_TIME_BETWEEN_SENDS_MS;
-        const hasEnoughTimePassed = timeSinceLastContinuousSend >= MIN_TIME_BETWEEN_SENDS_MS;
-        const hasOptimalChunkSize = currentAudioDurationMs >= DEEPGRAM_OPTIMAL_CHUNK_MS;
-        const hasMinimumChunkSize = currentAudioDurationMs >= 20; // Deepgram absolute minimum
-        
-        // CRITICAL: Process if:
-        // 1. Too long since last send (200ms+) - send whatever we have (even 20ms) to prevent timeout
-        // 2. We have optimal chunk size (80ms+) AND enough time has passed (50ms+) - preferred
-        // 3. Buffer is too large (250ms) - force send
-        const shouldProcess = 
-          (isTooLongSinceLastSend && hasMinimumChunkSize) || // CRITICAL: Send after 200ms even with 20ms to prevent timeout
-          (hasEnoughTimePassed && hasOptimalChunkSize) || // Preferred: 50ms elapsed + 80ms audio
-          currentAudioDurationMs >= MAX_CHUNK_DURATION_MS; // Force send if too large
-        
-        // CRITICAL: Send if we should process and have at least 20ms (Deepgram minimum)
-        // Allow smaller chunks (20ms) if it's been too long since last send to prevent timeout
-        const minChunkForSend = isTooLongSinceLastSend ? 20 : DEEPGRAM_OPTIMAL_CHUNK_MS; // Allow 20ms if timeout risk
-        if (shouldProcess && currentAudioDurationMs >= minChunkForSend) {
-          buffer.isProcessing = true;
-          try {
-            // Store buffer state before processing to check if anything was sent
-            const chunksBeforeProcessing = buffer.chunks.length;
-            const audioDurationBeforeProcessing = currentAudioDurationMs;
-            
-            // CRITICAL: Pass timeout risk flag to processBuffer so it can accept smaller chunks
-            await this.processBuffer(buffer, isTooLongSinceLastSend);
-            
-            // Only log success if buffer was actually processed (chunks were cleared)
-            // processBuffer returns early if buffer is too small, so chunks won't be cleared
-            if (buffer.chunks.length < chunksBeforeProcessing) {
-              buffer.lastProcessed = Date.now();
-              // Update lastContinuousSendTime to track continuous streaming (doesn't reset on buffer clear)
-              buffer.lastContinuousSendTime = Date.now();
-              console.info(`[ASRWorker] ✅ Sent continuous chunk for ${interaction_id}`, {
-                timeSinceLastSend: timeSinceLastContinuousSend,
-                audioDuration: audioDurationBeforeProcessing.toFixed(0),
-                chunksCount: chunksBeforeProcessing,
-                chunksRemaining: buffer.chunks.length,
-                strategy: isTooLongSinceLastSend ? 'timeout-prevention' : 'optimal-chunk',
-              });
-            } else {
-              // Buffer was too small, processBuffer returned early
-              console.debug(`[ASRWorker] ⏸️ Processing skipped - buffer too small (${audioDurationBeforeProcessing.toFixed(0)}ms < ${minChunkForSend}ms)`, {
-                interaction_id,
-                audioDuration: audioDurationBeforeProcessing.toFixed(0),
-                minimumRequired: minChunkForSend,
-              });
-            }
-          } finally {
-            buffer.isProcessing = false;
-          }
-        } else {
-          // Log why we're not processing (for debugging)
-          // CRITICAL: Log warning if it's been too long since last send but still too small
-          if (isTooLongSinceLastSend && currentAudioDurationMs < 20) {
-            console.warn(`[ASRWorker] ⚠️ CRITICAL: Too long since last send (${timeSinceLastContinuousSend}ms) but only ${currentAudioDurationMs.toFixed(0)}ms audio`, {
-              interaction_id,
-              timeSinceLastContinuousSend,
-              bufferAge,
-              currentAudioDurationMs: currentAudioDurationMs.toFixed(0),
-              minimumRequired: '20ms (Deepgram absolute minimum)',
-              chunksCount: buffer.chunks.length,
-              needsAudio: (20 - currentAudioDurationMs).toFixed(0) + 'ms',
-              note: 'Will send as soon as we have 20ms to prevent Deepgram timeout',
-            });
-          } else if (timeSinceLastContinuousSend > 500) {
-            console.warn(`[ASRWorker] ⚠️ Buffer accumulating (${timeSinceLastContinuousSend}ms since last send, ${currentAudioDurationMs.toFixed(0)}ms audio)`, {
-              interaction_id,
-              timeSinceLastContinuousSend,
-              bufferAge,
-              currentAudioDurationMs: currentAudioDurationMs.toFixed(0),
-              chunksCount: buffer.chunks.length,
-              waitingFor: hasOptimalChunkSize ? 'time' : `${(DEEPGRAM_OPTIMAL_CHUNK_MS - currentAudioDurationMs).toFixed(0)}ms more audio`,
-              maxChunkSize: MAX_CHUNK_DURATION_MS,
-            });
-          } else {
-            console.debug(`[ASRWorker] ⏸️ Continuous streaming: accumulating chunks`, {
-              interaction_id,
-              timeSinceLastSend: timeSinceLastContinuousSend,
-              bufferAge,
-              currentAudioDurationMs: currentAudioDurationMs.toFixed(0),
-              chunksCount: buffer.chunks.length,
-              needsTime: Math.max(0, MIN_TIME_BETWEEN_SENDS_MS - timeSinceLastContinuousSend),
-              needsAudio: Math.max(0, DEEPGRAM_OPTIMAL_CHUNK_MS - currentAudioDurationMs),
-              maxChunkSize: MAX_CHUNK_DURATION_MS,
-            });
-          }
-        }
+        // Just log that chunk was received - timer will handle all sending
+        const timeSinceLastSend = buffer.lastContinuousSendTime > 0 ? Date.now() - buffer.lastContinuousSendTime : 'never';
+        console.debug(`[ASRWorker] 📥 Chunk received (continuous mode) - timer will handle sending for ${interaction_id}`, {
+          chunksCount: buffer.chunks.length,
+          totalAudioDurationMs: currentAudioDurationMs.toFixed(0),
+          timeSinceLastSend: timeSinceLastSend,
+          note: 'Timer checks every 200ms and sends when needed',
+        });
       }
     } catch (error: any) {
       console.error('[ASRWorker] Error handling audio frame:', error);
@@ -657,6 +560,13 @@ class AsrWorker {
 
       // Skip if already processing or no chunks
       if (buffer.isProcessing || buffer.chunks.length === 0) {
+        if (buffer.chunks.length === 0) {
+          // Log when timer runs but buffer is empty (for debugging)
+          console.debug(`[ASRWorker] ⏸️ Timer tick: buffer empty for ${interactionId}`, {
+            timeSinceLastSend: buffer.lastContinuousSendTime > 0 ? Date.now() - buffer.lastContinuousSendTime : 'never',
+            hasSentInitialChunk: buffer.hasSentInitialChunk,
+          });
+        }
         return;
       }
 
@@ -665,6 +575,13 @@ class AsrWorker {
       if (!buffer.hasSentInitialChunk) {
         return;
       }
+      
+      // Log timer tick for debugging
+      console.debug(`[ASRWorker] ⏰ Timer tick for ${interactionId}`, {
+        chunksCount: buffer.chunks.length,
+        isProcessing: buffer.isProcessing,
+        hasSentInitialChunk: buffer.hasSentInitialChunk,
+      });
 
       // Calculate current audio duration
       const totalSamples = buffer.chunks.reduce((sum, chunk) => sum + chunk.length, 0) / 2;
