@@ -454,16 +454,15 @@ class IngestionServer {
             try {
               const jsonText = data.toString('utf8');
               const parsedJson = JSON.parse(jsonText);
-              console.error('[exotel] ❌ CRITICAL: Binary frame contains JSON text!', {
+              // This is NORMAL behavior - Exotel sends JSON messages as binary frames
+              // We handle it correctly by parsing and routing to exotelHandler
+              // Only log as debug to reduce noise (was CRITICAL error)
+              console.debug('[exotel] Binary frame contains JSON (normal Exotel behavior)', {
                 stream_sid: exotelState.streamSid,
                 call_sid: exotelState.callSid,
                 seq: exotelState.seq,
-                first_bytes_hex: firstBytes.map(b => `0x${b.toString(16).padStart(2, '0')}`).join(', '),
-                buffer_length: data.length,
-                parsed_json_keys: Object.keys(parsedJson),
-                parsed_json_event: parsedJson.event,
-                parsed_json_structure: JSON.stringify(parsedJson).substring(0, 500),
-                note: 'Exotel is sending JSON as binary frames. This should be handled as text frames instead.',
+                event: parsedJson.event,
+                note: 'Exotel sends JSON as binary frames - handled correctly',
               });
               
               // Handle it as a JSON message (Exotel is sending JSON as binary frames)
@@ -478,13 +477,13 @@ class IngestionServer {
               return; // Don't publish as audio
             } catch (parseError) {
               // Not valid JSON, but starts with { or [
-              console.error('[exotel] ❌ CRITICAL: Binary frame contains JSON-like text (but not valid JSON)!', {
+              // Invalid JSON in binary frame - log as warning, not CRITICAL
+              console.warn('[exotel] Binary frame contains JSON-like text (invalid JSON)', {
                 stream_sid: exotelState.streamSid,
                 call_sid: exotelState.callSid,
                 seq: exotelState.seq,
-                first_bytes_hex: firstBytes.map(b => `0x${b.toString(16).padStart(2, '0')}`).join(', '),
                 buffer_length: data.length,
-                buffer_preview: data.toString('utf8').substring(0, 200),
+                note: 'Skipping invalid JSON frame',
               });
               return; // Don't publish as audio
             }

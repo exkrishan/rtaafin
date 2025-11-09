@@ -215,27 +215,22 @@ export class ExotelHandler {
         try {
           const jsonText = audioBuffer.toString('utf8');
           const parsedJson = JSON.parse(jsonText);
-          console.error('[exotel] ❌ CRITICAL: Decoded audio buffer contains JSON text!', {
+          // This indicates Exotel sent a JSON message in the media.payload field
+          // This is unusual but we handle it by detecting and skipping
+          // Log as warning, not CRITICAL error
+          console.warn('[exotel] Media payload contains JSON instead of base64 audio', {
             stream_sid: state.streamSid,
             call_sid: state.callSid,
-            first_bytes_hex: firstBytesHex,
-            first_bytes_ascii: firstBytesAscii,
-            buffer_length: audioBuffer.length,
-            payload_length: media.payload.length,
-            parsed_json_keys: Object.keys(parsedJson),
             parsed_json_event: parsedJson.event,
-            parsed_json_structure: JSON.stringify(parsedJson).substring(0, 500),
-            note: 'Exotel is sending base64-encoded JSON instead of base64-encoded audio. This is a protocol mismatch.',
+            note: 'Skipping - expected base64 audio, got JSON',
           });
         } catch (parseError) {
-          console.error('[exotel] ❌ CRITICAL: Decoded audio buffer contains JSON text (but not valid JSON)!', {
+          // Invalid JSON in decoded audio buffer - log as warning
+          console.warn('[exotel] Decoded audio buffer contains invalid JSON text', {
             stream_sid: state.streamSid,
             call_sid: state.callSid,
-            first_bytes_hex: firstBytesHex,
-            first_bytes_ascii: firstBytesAscii,
             buffer_length: audioBuffer.length,
-            payload_length: media.payload.length,
-            buffer_preview: audioBuffer.toString('utf8').substring(0, 200),
+            note: 'Skipping - expected binary audio data',
           });
         }
         return;
