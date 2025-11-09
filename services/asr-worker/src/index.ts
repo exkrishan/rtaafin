@@ -194,19 +194,27 @@ class AsrWorker {
       // CRITICAL: Deepgram streaming requires CONTINUOUS audio flow
       // Strategy:
       // 1. First chunk: Wait for 500ms minimum before sending (initial chunk)
-      // 2. After initial chunk: Send new chunks continuously as they arrive (streaming mode)
+      // 2. After initial chunk: Send continuously - process every 500-1000ms OR when we have 200ms+ of new audio
       // This ensures Deepgram receives continuous audio, not one chunk then silence
       
       const bufferAge = Date.now() - buffer.lastProcessed;
-      const shouldProcess = 
-        // If we haven't sent initial chunk, wait for minimum duration
-        (!buffer.hasSentInitialChunk && currentAudioDurationMs >= MIN_AUDIO_DURATION_MS) ||
-        // If we've sent initial chunk, process on time-based trigger (continuous streaming)
-        (buffer.hasSentInitialChunk && bufferAge >= BUFFER_WINDOW_MS);
       
-      if (shouldProcess) {
-        await this.processBuffer(buffer);
-        buffer.lastProcessed = Date.now();
+      if (!buffer.hasSentInitialChunk) {
+        // First chunk: Wait for minimum duration (500ms)
+        if (currentAudioDurationMs >= MIN_AUDIO_DURATION_MS) {
+          await this.processBuffer(buffer);
+          buffer.lastProcessed = Date.now();
+        }
+      } else {
+        // After initial chunk: Stream continuously
+        // Process if: time-based trigger (500ms) OR we have 200ms+ of new audio
+        const CONTINUOUS_STREAM_INTERVAL_MS = 500; // Send every 500ms for continuous flow
+        const MIN_CONTINUOUS_CHUNK_MS = 200; // Or if we have 200ms+ accumulated
+        
+        if (bufferAge >= CONTINUOUS_STREAM_INTERVAL_MS || currentAudioDurationMs >= MIN_CONTINUOUS_CHUNK_MS) {
+          await this.processBuffer(buffer);
+          buffer.lastProcessed = Date.now();
+        }
       }
     } catch (error: any) {
       console.error('[ASRWorker] Error handling audio frame:', error);
