@@ -15,17 +15,14 @@ export default function LeftSidebar({ onNavigate }: LeftSidebarProps) {
 
   return (
     <div className="w-16 bg-white border-r border-gray-200 flex flex-col items-center py-4 gap-0">
-      {/* Logo at top */}
-      <div className="mb-4">
-        <div className="w-10 h-10 flex items-center justify-center">
-          <svg className="w-8 h-8 text-blue-600" fill="currentColor" viewBox="0 0 24 24">
-            <circle cx="12" cy="12" r="3" />
-            <circle cx="12" cy="4" r="2" />
-            <circle cx="12" cy="20" r="2" />
-            <circle cx="4" cy="12" r="2" />
-            <circle cx="20" cy="12" r="2" />
-          </svg>
-        </div>
+      {/* Exotel Logo at top */}
+      <div className="mb-4 px-2">
+        <img 
+          src="/xtrm_logo_color.svg" 
+          alt="Exotel" 
+          className="w-full h-auto"
+          style={{ maxWidth: '90px' }}
+        />
       </div>
 
       {/* Home */}

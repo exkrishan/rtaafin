@@ -578,8 +578,8 @@ export default function AgentAssistPanelV2({
               </div>
             </div>
 
-            {/* KB Suggestions Section - 70% of remaining space */}
-            <div className="flex flex-col flex-[0.7] border-b border-gray-200 min-h-0">
+            {/* KB Suggestions Section - Full space (transcript removed) */}
+            <div className="flex flex-col flex-1 min-h-0">
               <div className="px-4 py-2.5 border-b border-gray-200 flex-shrink-0">
                 <span className="text-sm font-semibold text-gray-900">Knowledge Base Suggestions</span>
               </div>
