@@ -340,73 +340,70 @@ export default function DemoPage() {
         </div>
       )}
 
-      {/* Single column layout - Customer Info in center, Agent Assist is right-docked */}
-      <div className={`flex flex-col h-screen p-6 pr-[376px] ${isCallActive ? 'pt-16' : ''}`}>
-        {/* Top Controls */}
-        <div className="mb-4 flex items-center justify-between">
-          <h1 className="text-xl font-semibold text-gray-900">Agent Desktop</h1>
-          {!isCallActive && !callEnded && (
-            <button
-              onClick={startCall}
-              disabled={demoTranscript.length === 0}
-              className="px-4 py-2 bg-green-600 text-white text-sm font-medium rounded-md hover:bg-green-700 shadow disabled:bg-gray-400 disabled:cursor-not-allowed"
-            >
-              ▶ Start Call
-            </button>
-          )}
-          {isCallActive && (
-            <div className="flex gap-2">
-              {isPaused ? (
-                <button
-                  onClick={resumeCall}
-                  className="px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-md hover:bg-blue-700"
-                >
-                  ▶ Resume
-                </button>
-              ) : (
-                <button
-                  onClick={pauseCall}
-                  className="px-4 py-2 bg-yellow-600 text-white text-sm font-medium rounded-md hover:bg-yellow-700"
-                >
-                  ⏸ Pause
-                </button>
-              )}
-              <button
-                onClick={stopCall}
-                className="px-4 py-2 bg-red-600 text-white text-sm font-medium rounded-md hover:bg-red-700"
-              >
-                ⏹ Stop
-              </button>
-            </div>
-          )}
-          {callEnded && (
-            <div className="flex gap-2">
-              <button
-                onClick={resetCall}
-                className="px-4 py-2 bg-gray-600 text-white text-sm font-medium rounded-md hover:bg-gray-700"
-              >
-                🔄 Reset
-              </button>
-              {demoResult && (
-                <button
-                  onClick={exportDemoResult}
-                  className="px-4 py-2 bg-purple-600 text-white text-sm font-medium rounded-md hover:bg-purple-700"
-                >
-                  📥 Export
-                </button>
-              )}
-            </div>
-          )}
-        </div>
-
+      {/* Main Layout */}
+      <div className={`flex h-screen ${isCallActive ? 'pt-12' : ''}`}>
         {/* Left Sidebar */}
         <LeftSidebar />
 
         {/* Main Content Area */}
         <div className="flex-1 flex flex-col pr-[376px]">
-          {/* Page Header */}
-          <div className="bg-white border-b border-gray-200 px-6 py-4">
+          {/* Page Header with Controls */}
+          <div className="bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between">
             <h1 className="text-xl font-semibold text-gray-900">Agent Desktop</h1>
+            <div className="flex items-center gap-2">
+              {!isCallActive && !callEnded && (
+                <button
+                  onClick={startCall}
+                  disabled={demoTranscript.length === 0}
+                  className="px-4 py-2 bg-green-600 text-white text-sm font-medium rounded-md hover:bg-green-700 shadow disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
+                >
+                  ▶ Start Call
+                </button>
+              )}
+              {isCallActive && (
+                <>
+                  {isPaused ? (
+                    <button
+                      onClick={resumeCall}
+                      className="px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-md hover:bg-blue-700 transition-colors"
+                    >
+                      ▶ Resume
+                    </button>
+                  ) : (
+                    <button
+                      onClick={pauseCall}
+                      className="px-4 py-2 bg-yellow-600 text-white text-sm font-medium rounded-md hover:bg-yellow-700 transition-colors"
+                    >
+                      ⏸ Pause
+                    </button>
+                  )}
+                  <button
+                    onClick={stopCall}
+                    className="px-4 py-2 bg-red-600 text-white text-sm font-medium rounded-md hover:bg-red-700 transition-colors"
+                  >
+                    ⏹ Stop
+                  </button>
+                </>
+              )}
+              {callEnded && (
+                <>
+                  <button
+                    onClick={resetCall}
+                    className="px-4 py-2 bg-gray-600 text-white text-sm font-medium rounded-md hover:bg-gray-700 transition-colors"
+                  >
+                    🔄 Reset
+                  </button>
+                  {demoResult && (
+                    <button
+                      onClick={exportDemoResult}
+                      className="px-4 py-2 bg-purple-600 text-white text-sm font-medium rounded-md hover:bg-purple-700 transition-colors"
+                    >
+                      📥 Export
+                    </button>
+                  )}
+                </>
+              )}
+            </div>
           </div>
 
           {/* Center Column: Customer Info - Main focus like Universal Agent Desktop */}
