@@ -4,14 +4,6 @@ import { useState } from 'react';
 import type { Customer } from './CustomerDetailsHeader';
 import CallControls from './CallControls';
 
-export interface TranscriptUtterance {
-  utterance_id: string;
-  speaker: 'agent' | 'customer';
-  text: string;
-  confidence?: number;
-  timestamp: string;
-}
-
 export interface CentralCallViewProps {
   customer: Customer | null;
   callDuration: string;
