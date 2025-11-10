@@ -35,7 +35,6 @@ export default function CentralCallView({
   callDuration,
   callId,
   isCallActive,
-  transcript = [],
   onMute,
   onHold,
   onTransfer,
@@ -47,7 +46,7 @@ export default function CentralCallView({
   onOpenCRM,
   onOpenCaseHistory,
 }: CentralCallViewProps) {
-  const [activeTab, setActiveTab] = useState<'transcript' | 'customer' | 'crm'>('transcript');
+  const [activeTab, setActiveTab] = useState<'customer' | 'crm'>('customer');
 
   if (!customer) {
     return (
@@ -273,38 +272,6 @@ export default function CentralCallView({
                     <span className="text-gray-900 font-medium">@mj12</span>
                     <span className="text-gray-900 font-medium">@mani12</span>
                   </div>
-                </div>
-              </div>
-            </div>
-
-            {/* Sentiment Trend */}
-            <div>
-              <h3 className="text-sm font-semibold text-gray-900 mb-4">Sentiment Trend</h3>
-              <div className="bg-gray-50 rounded-lg p-4 border border-gray-200">
-                <div className="flex items-center justify-between mb-3">
-                  <span className="text-xs text-gray-600">Last 5 months</span>
-                  <span className="px-2 py-1 bg-green-100 text-green-700 text-xs font-medium rounded">Positive</span>
-                </div>
-                <div className="h-32 flex items-end gap-3">
-                  {[
-                    { month: 'Nov', value: 65, sentiment: 'positive' },
-                    { month: 'Dec', value: 72, sentiment: 'positive' },
-                    { month: 'Jan', value: 68, sentiment: 'positive' },
-                    { month: 'Feb', value: 75, sentiment: 'positive' },
-                    { month: 'Mar', value: 80, sentiment: 'positive' },
-                  ].map((item, i) => (
-                    <div key={i} className="flex-1 flex flex-col items-center">
-                      <div
-                        className={`w-full rounded-t ${
-                          item.sentiment === 'positive' ? 'bg-green-500' : 
-                          item.sentiment === 'negative' ? 'bg-red-500' : 
-                          'bg-yellow-500'
-                        }`}
-                        style={{ height: `${item.value}%`, minHeight: '8px' }}
-                      />
-                      <span className="text-xs text-gray-500 mt-2">{item.month}</span>
-                    </div>
-                  ))}
                 </div>
               </div>
             </div>

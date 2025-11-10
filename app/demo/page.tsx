@@ -428,13 +428,6 @@ export default function DemoPage() {
               callDuration={isCallActive ? '00:00' : '00:00'}
               callId={callId}
               isCallActive={isCallActive}
-              transcript={transcriptUtterances.length > 0 ? transcriptUtterances : demoTranscript.map((line, idx) => ({
-                utterance_id: `demo-${idx}`,
-                speaker: line.speaker.toLowerCase() as 'agent' | 'customer',
-                text: line.text,
-                confidence: 0.95,
-                timestamp: line.ts || new Date().toISOString(),
-              }))}
               onMute={() => console.log('[Demo] Mute clicked')}
               onHold={() => console.log('[Demo] Hold clicked')}
               onTransfer={() => console.log('[Demo] Transfer clicked')}

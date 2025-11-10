@@ -280,7 +280,6 @@ export default function LivePage() {
               callDuration="00:00"
               callId={callId || undefined}
               isCallActive={!!callId}
-              transcript={transcriptUtterances}
               onMute={() => console.log('[Live] Mute clicked')}
               onHold={() => console.log('[Live] Hold clicked')}
               onTransfer={() => console.log('[Live] Transfer clicked')}

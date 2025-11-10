@@ -559,7 +559,8 @@ export default function AgentAssistPanelV2({
                   onChange={(e) => setManualSearchQuery(e.target.value)}
                   onKeyDown={(e) => e.key === 'Enter' && handleManualSearch()}
                   placeholder="Search KB..."
-                  className="w-full pl-8 pr-8 h-9 rounded-md border border-gray-300 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  className="w-full pl-8 pr-8 h-9 rounded-md border border-gray-300 text-sm text-gray-900 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  style={{ color: '#111827' }}
                   aria-label="Manual knowledge base search"
                 />
                 <svg
@@ -578,8 +579,8 @@ export default function AgentAssistPanelV2({
               </div>
             </div>
 
-            {/* KB Suggestions Section - Full space (transcript removed) */}
-            <div className="flex flex-col flex-1 min-h-0">
+            {/* KB Suggestions Section - 70% of remaining space */}
+            <div className="flex flex-col flex-[0.7] min-h-0">
               <div className="px-4 py-2.5 border-b border-gray-200 flex-shrink-0">
                 <span className="text-sm font-semibold text-gray-900">Knowledge Base Suggestions</span>
               </div>
@@ -620,19 +621,19 @@ export default function AgentAssistPanelV2({
                           <div className="flex items-center gap-1">
                             <button
                               onClick={() => handleFeedback(article.id, true)}
-                              className="p-1.5 hover:bg-green-50 rounded transition-colors"
+                              className="p-1.5 hover:bg-green-50 rounded transition-colors group"
                               aria-label={`Like: ${article.title}`}
                             >
-                              <svg className="w-4 h-4 text-gray-600" fill="currentColor" viewBox="0 0 24 24">
+                              <svg className="w-4 h-4 text-gray-600 group-hover:text-green-600 transition-colors" fill="currentColor" viewBox="0 0 24 24">
                                 <path d="M1 21h4V9H1v12zm22-11c0-1.1-.9-2-2-2h-6.31l.95-4.57.03-.32c0-.41-.17-.79-.44-1.06L14.17 1 7.59 7.59C7.22 7.95 7 8.45 7 9v10c0 1.1.9 2 2 2h9c.83 0 1.54-.5 1.84-1.22l3.02-7.05c.09-.23.14-.47.14-.73v-2z"/>
                               </svg>
                             </button>
                             <button
                               onClick={() => handleFeedback(article.id, false)}
-                              className="p-1.5 hover:bg-red-50 rounded transition-colors"
+                              className="p-1.5 hover:bg-red-50 rounded transition-colors group"
                               aria-label={`Dislike: ${article.title}`}
                             >
-                              <svg className="w-4 h-4 text-gray-600" fill="currentColor" viewBox="0 0 24 24" style={{ transform: 'rotate(180deg)' }}>
+                              <svg className="w-4 h-4 text-gray-600 group-hover:text-red-600 transition-colors" fill="currentColor" viewBox="0 0 24 24" style={{ transform: 'rotate(180deg)' }}>
                                 <path d="M1 21h4V9H1v12zm22-11c0-1.1-.9-2-2-2h-6.31l.95-4.57.03-.32c0-.41-.17-.79-.44-1.06L14.17 1 7.59 7.59C7.22 7.95 7 8.45 7 9v10c0 1.1.9 2 2 2h9c.83 0 1.54-.5 1.84-1.22l3.02-7.05c.09-.23.14-.47.14-.73v-2z"/>
                               </svg>
                             </button>
@@ -666,6 +667,71 @@ export default function AgentAssistPanelV2({
               </div>
             </div>
 
+            {/* Transcripts Section - 30% of remaining space */}
+            <div className="flex flex-col flex-[0.3] min-h-0">
+              <div className="px-4 py-2.5 border-b border-gray-200 flex-shrink-0">
+                <span className="text-sm font-semibold text-gray-900">Transcripts</span>
+              </div>
+              <div
+                ref={transcriptContainerRef}
+                onScroll={handleTranscriptScroll}
+                className="flex-1 overflow-y-auto px-4 pb-4 space-y-2"
+                role="log"
+                aria-label="Call transcript"
+              >
+                {utterances.length === 0 ? (
+                  <div className="text-center py-8 text-sm text-gray-500">Waiting for transcript...</div>
+                ) : (
+                  utterances.map((utterance) => {
+                    // Filter out system messages
+                    if (utterance.text.includes('Connected to realtime stream') || utterance.text.includes('clientId:')) {
+                      return null;
+                    }
+                    
+                    return (
+                      <div
+                        key={utterance.utterance_id}
+                        className={`p-2.5 rounded-md text-sm ${
+                          utterance.speaker === 'agent'
+                            ? 'bg-blue-50 ml-4 text-gray-900'
+                            : 'bg-green-50 mr-4 text-gray-900'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between mb-1.5">
+                          <span className="text-xs font-medium text-gray-600">
+                            {utterance.speaker === 'agent' ? 'Agent' : 'Customer'}
+                          </span>
+                          <div className="flex items-center gap-2">
+                            {utterance.speaker === 'customer' && (
+                              <button
+                                onClick={() => handleTriggerKBSearch(utterance.text)}
+                                className="p-1 hover:bg-yellow-100 rounded transition-colors"
+                                aria-label="Trigger KB search for this utterance"
+                                title="Search KB for this"
+                              >
+                                <svg className="w-4 h-4 text-yellow-600" fill="currentColor" viewBox="0 0 24 24">
+                                  <path d="M9 21c0 .5.4 1 1 1h4c.6 0 1-.5 1-1v-1H9v1zm3-19C8.1 2 5 5.1 5 9c0 2.4 1.2 4.5 3 5.7V17c0 .5.4 1 1 1h6c.6 0 1-.5 1-1v-2.3c1.8-1.3 3-3.4 3-5.7 0-3.9-3.1-7-7-7z"/>
+                                </svg>
+                              </button>
+                            )}
+                            <span className="text-xs text-gray-500">
+                              {new Date(utterance.timestamp).toLocaleTimeString()}
+                            </span>
+                            {utterance.confidence < 0.7 && (
+                              <span className="px-1.5 py-0.5 bg-red-100 text-red-700 text-xs rounded">
+                                Low
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                        <p className="text-sm text-gray-900 leading-relaxed">{utterance.text}</p>
+                      </div>
+                    );
+                  })
+                )}
+                <div ref={transcriptEndRef} />
+              </div>
+            </div>
           </div>
         )}
       </div>
