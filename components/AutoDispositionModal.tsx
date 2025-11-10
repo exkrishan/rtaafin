@@ -73,6 +73,20 @@ export default function AutoDispositionModal({
 
         if (payload.ok && Array.isArray(payload.dispositions)) {
           setAllDispositions(payload.dispositions);
+          // If we have a selected disposition, ensure it's still valid
+          if (selectedDisposition) {
+            const found = payload.dispositions.find((d: DispositionOption) => d.code === selectedDisposition);
+            if (!found && currentSuggestions.length > 0) {
+              // Keep using current suggestions if selected disposition not in allDispositions
+              const suggestion = currentSuggestions.find(s => s.code === selectedDisposition);
+              if (suggestion) {
+                // Keep the selection from suggestions
+                setSelectedDispositionId(suggestion.id || null);
+              }
+            } else if (found) {
+              setSelectedDispositionId(found.id || null);
+            }
+          }
         } else {
           console.warn('[AutoDispositionModal] Failed to fetch dispositions, using suggested only');
         }
@@ -84,7 +98,7 @@ export default function AutoDispositionModal({
     };
 
     fetchDispositions();
-  }, [open]);
+  }, [open, selectedDisposition, currentSuggestions]);
 
   // Fetch sub-dispositions when disposition changes
   useEffect(() => {
@@ -320,22 +334,13 @@ export default function AutoDispositionModal({
         .filter((section: string | undefined) => section && section.trim().length > 0)
         .join('\n\n');
 
+      // Update suggestions and notes - regenerate notes specifically
       setCurrentSuggestions(newSuggestions.length > 0 ? newSuggestions : currentSuggestions);
       setCurrentAutoNotes(newNotes || '');
-      setNotes(newNotes || '');
+      setNotes(newNotes || ''); // Regenerate notes
       
-      // Auto-select best match
-      if (newSuggestions.length > 0) {
-        const bestSuggestion = newSuggestions.reduce((best, current) => {
-          const bestScore = best.score || 0;
-          const currentScore = current.score || 0;
-          return currentScore > bestScore ? current : best;
-        });
-        setSelectedDisposition(bestSuggestion.code);
-        setSelectedSubDisposition(bestSuggestion.subDisposition || '');
-        setSelectedDispositionId(bestSuggestion.id || null);
-        setSelectedSubDispositionId(bestSuggestion.subDispositionId || null);
-      }
+      // Keep current disposition selection, only update notes
+      // Don't auto-select new disposition unless user wants to change it
     } catch (err: any) {
       clearTimeout(timeoutId);
       console.error('[AutoDispositionModal] Retry failed', err);

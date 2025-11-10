@@ -206,8 +206,19 @@ export default function AgentAssistPanelV2({
           
           setKbArticles(prev => {
             const existingIds = new Set(prev.map(a => a.id));
-            const newArticles = articlesWithIntent.filter((a: KBArticle) => !existingIds.has(a.id));
-            return [...newArticles, ...prev];
+            const newArticles = articlesWithIntent
+              .filter((a: KBArticle) => !existingIds.has(a.id))
+              .map((a: KBArticle) => ({
+                ...a,
+                timestamp: Date.now(), // Add timestamp for sorting
+              }));
+            // Sort by timestamp (newest first), then merge with existing
+            const allArticles = [...newArticles, ...prev];
+            return allArticles.sort((a, b) => {
+              const aTime = (a as any).timestamp || 0;
+              const bTime = (b as any).timestamp || 0;
+              return bTime - aTime; // Newest first
+            });
           });
           
           articlesWithIntent.forEach((article: KBArticle) => {
@@ -259,7 +270,16 @@ export default function AgentAssistPanelV2({
         interactionId,
         recentUtterance,
       });
-      setKbArticles(results);
+      // Add timestamp and sort by latest
+      const resultsWithTimestamp = results.map((r: KBArticle) => ({
+        ...r,
+        timestamp: Date.now(),
+      }));
+      setKbArticles(resultsWithTimestamp.sort((a: any, b: any) => {
+        const aTime = a.timestamp || 0;
+        const bTime = b.timestamp || 0;
+        return bTime - aTime; // Newest first
+      }));
       emitTelemetry?.('manual_kb_search_triggered', {
         interaction_id: interactionId,
         query: manualSearchQuery,
@@ -281,7 +301,16 @@ export default function AgentAssistPanelV2({
     setIsSearching(true);
     try {
       const results = await triggerKBSearch(text, { interactionId });
-      setKbArticles(results);
+      // Add timestamp and sort by latest
+      const resultsWithTimestamp = results.map((r: KBArticle) => ({
+        ...r,
+        timestamp: Date.now(),
+      }));
+      setKbArticles(resultsWithTimestamp.sort((a: any, b: any) => {
+        const aTime = a.timestamp || 0;
+        const bTime = b.timestamp || 0;
+        return bTime - aTime; // Newest first
+      }));
       emitTelemetry?.('manual_kb_search_triggered', {
         interaction_id: interactionId,
         query: text,

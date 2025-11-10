@@ -348,78 +348,20 @@ export default function DemoPage() {
       {/* Main Layout */}
       <div className={`flex h-screen ${isCallActive ? 'pt-12' : ''}`}>
         {/* Left Sidebar */}
-        <LeftSidebar />
+        <LeftSidebar 
+          isCallActive={isCallActive}
+          isPaused={isPaused}
+          callEnded={callEnded}
+          onStartCall={startCall}
+          onPauseCall={pauseCall}
+          onResumeCall={resumeCall}
+          onStopCall={stopCall}
+          onResetCall={resetCall}
+        />
 
         {/* Main Content Area */}
         <div className="flex-1 flex flex-col pr-[376px]">
-          {/* Page Header with Controls */}
-          <div className="bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              {/* Exotel Logo/Brand */}
-              <div className="flex items-center gap-2.5">
-                <div className="w-8 h-8 bg-gradient-to-br from-blue-600 to-blue-700 rounded-md flex items-center justify-center shadow-sm">
-                  <svg className="w-5 h-5 text-white" fill="currentColor" viewBox="0 0 24 24">
-                    <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
-                  </svg>
-                </div>
-                <h1 className="text-xl font-semibold text-gray-900">Agent Desktop</h1>
-              </div>
-            </div>
-            <div className="flex items-center gap-2">
-              {!isCallActive && !callEnded && (
-                <button
-                  onClick={startCall}
-                  disabled={demoTranscript.length === 0}
-                  className="px-4 py-2 bg-green-600 text-white text-sm font-medium rounded-md hover:bg-green-700 shadow disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
-                >
-                  ▶ Start Call
-                </button>
-              )}
-              {isCallActive && (
-                <>
-                  {isPaused ? (
-                    <button
-                      onClick={resumeCall}
-                      className="px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-md hover:bg-blue-700 transition-colors"
-                    >
-                      ▶ Resume
-                    </button>
-                  ) : (
-                    <button
-                      onClick={pauseCall}
-                      className="px-4 py-2 bg-yellow-600 text-white text-sm font-medium rounded-md hover:bg-yellow-700 transition-colors"
-                    >
-                      ⏸ Pause
-                    </button>
-                  )}
-                  <button
-                    onClick={stopCall}
-                    className="px-4 py-2 bg-red-600 text-white text-sm font-medium rounded-md hover:bg-red-700 transition-colors"
-                  >
-                    ⏹ Stop
-                  </button>
-                </>
-              )}
-              {callEnded && (
-                <>
-                  <button
-                    onClick={resetCall}
-                    className="px-4 py-2 bg-gray-600 text-white text-sm font-medium rounded-md hover:bg-gray-700 transition-colors"
-                  >
-                    🔄 Reset
-                  </button>
-                  {demoResult && (
-                    <button
-                      onClick={exportDemoResult}
-                      className="px-4 py-2 bg-purple-600 text-white text-sm font-medium rounded-md hover:bg-purple-700 transition-colors"
-                    >
-                      📥 Export
-                    </button>
-                  )}
-                </>
-              )}
-            </div>
-          </div>
+          {/* Page Header - Removed for subtle demo controls */}
 
           {/* Center Column: Unified Call View */}
           <div className="flex-1 overflow-y-auto p-6">
