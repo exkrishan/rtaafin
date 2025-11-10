@@ -36,6 +36,7 @@ export interface AutoDispositionModalProps {
 export default function AutoDispositionModal({
   open,
   onClose,
+  onBack,
   callId,
   tenantId,
   suggested = [],
@@ -394,9 +395,35 @@ export default function AutoDispositionModal({
         >
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
-          <h2 id="modal-title" className="text-lg font-semibold text-gray-900">
-            Dispose
-          </h2>
+          <div className="flex items-center gap-3">
+            {onBack && (
+              <button
+                type="button"
+                onClick={onBack}
+                disabled={isLoading}
+                className="text-gray-600 hover:text-gray-900 transition-colors disabled:opacity-50"
+                aria-label="Go back"
+                role="button"
+              >
+                <svg
+                  className="w-5 h-5"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M15 19l-7-7 7-7"
+                  />
+                </svg>
+              </button>
+            )}
+            <h2 id="modal-title" className="text-lg font-semibold text-gray-900">
+              Dispose
+            </h2>
+          </div>
           <button
             type="button"
             onClick={onClose}
@@ -485,17 +512,17 @@ export default function AutoDispositionModal({
               className="w-full rounded-md border border-gray-300 px-3 py-2.5 text-sm text-gray-900 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:cursor-not-allowed disabled:bg-gray-100 disabled:text-gray-500"
               aria-label="Select sub-disposition"
             >
-              <option value="">Select sub-disposition...</option>
+              <option value="" style={{ color: '#9CA3AF' }}>Select sub-disposition...</option>
               {subDispositions.length > 0 ? (
                 subDispositions.map((subDisp) => (
-                  <option key={subDisp.code || subDisp.title} value={subDisp.code || subDisp.title}>
+                  <option key={subDisp.code || subDisp.title} value={subDisp.code || subDisp.title} style={{ color: '#111827' }}>
                     {subDisp.title || subDisp.label || subDisp.code}
                   </option>
                 ))
               ) : selectedDisposition ? (
-                <option value="" disabled>Loading sub-dispositions...</option>
+                <option value="" disabled style={{ color: '#9CA3AF' }}>Loading sub-dispositions...</option>
               ) : (
-                <option value="" disabled>Select a disposition first</option>
+                <option value="" disabled style={{ color: '#9CA3AF' }}>Select a disposition first</option>
               )}
             </select>
           </div>

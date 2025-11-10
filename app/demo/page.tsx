@@ -28,12 +28,12 @@ interface DemoResult {
 
 // Mock customer data for demo
 const mockCustomer: Customer = {
-  name: 'Asha Sharma',
+  name: 'Manish Sharma',
   id: 'cust-789',
   masked_phone: '+91-XXXX-1234',
   account: 'MoneyAssure — Card Services',
   tags: ['Premium', 'Card'],
-  email: 'asha.sharma@example.com',
+  email: 'manish.sharma@example.com',
   lastInteractions: [
     { date: '2025-10-29', summary: 'Payment issue resolved', caseId: 'CASE-1234' },
     { date: '2025-09-12', summary: 'KYC updated', caseId: 'CASE-5678' },

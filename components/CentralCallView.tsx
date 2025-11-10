@@ -285,14 +285,24 @@ export default function CentralCallView({
                   <span className="text-xs text-gray-600">Last 5 months</span>
                   <span className="px-2 py-1 bg-green-100 text-green-700 text-xs font-medium rounded">Positive</span>
                 </div>
-                <div className="h-24 flex items-end gap-2">
-                  {[65, 72, 68, 75, 80].map((value, i) => (
+                <div className="h-32 flex items-end gap-3">
+                  {[
+                    { month: 'Nov', value: 65, sentiment: 'positive' },
+                    { month: 'Dec', value: 72, sentiment: 'positive' },
+                    { month: 'Jan', value: 68, sentiment: 'positive' },
+                    { month: 'Feb', value: 75, sentiment: 'positive' },
+                    { month: 'Mar', value: 80, sentiment: 'positive' },
+                  ].map((item, i) => (
                     <div key={i} className="flex-1 flex flex-col items-center">
                       <div
-                        className="w-full bg-blue-500 rounded-t"
-                        style={{ height: `${value}%` }}
+                        className={`w-full rounded-t ${
+                          item.sentiment === 'positive' ? 'bg-green-500' : 
+                          item.sentiment === 'negative' ? 'bg-red-500' : 
+                          'bg-yellow-500'
+                        }`}
+                        style={{ height: `${item.value}%`, minHeight: '8px' }}
                       />
-                      <span className="text-xs text-gray-500 mt-1">Nov</span>
+                      <span className="text-xs text-gray-500 mt-2">{item.month}</span>
                     </div>
                   ))}
                 </div>
@@ -325,7 +335,7 @@ export default function CentralCallView({
                 <div className="p-3 bg-gray-50 rounded-md border border-gray-200">
                   <div className="flex items-center gap-2 mb-2">
                     <span className="text-xs font-semibold text-gray-900">Intent:</span>
-                    <span className="text-xs text-gray-700">Complex Trade Execution Support</span>
+                    <span className="text-xs text-gray-700">Card Replacement Request</span>
                     <span className="px-2 py-0.5 bg-yellow-100 text-yellow-700 text-xs font-medium rounded">Neutral</span>
                   </div>
                   <p className="text-xs text-gray-600">
