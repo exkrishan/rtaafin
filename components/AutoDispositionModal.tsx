@@ -396,33 +396,32 @@ export default function AutoDispositionModal({
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
           <div className="flex items-center gap-3">
-            {onBack && (
-              <button
-                type="button"
-                onClick={onBack}
-                disabled={isLoading}
-                className="text-gray-600 hover:text-gray-900 transition-colors disabled:opacity-50"
-                aria-label="Go back"
-                role="button"
+            <button
+              type="button"
+              onClick={onBack || onClose}
+              disabled={isLoading}
+              className="text-gray-600 hover:text-gray-900 transition-colors disabled:opacity-50"
+              aria-label="Go back"
+              role="button"
+            >
+              <svg
+                className="w-5 h-5"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
               >
-                <svg
-                  className="w-5 h-5"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M15 19l-7-7 7-7"
-                  />
-                </svg>
-              </button>
-            )}
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M15 19l-7-7 7-7"
+                />
+              </svg>
+            </button>
             <h2 id="modal-title" className="text-lg font-semibold text-gray-900">
-              Dispose
+              Agent Assist
             </h2>
+            <div className="w-2 h-2 rounded-full bg-green-500"></div>
           </div>
           <button
             type="button"
@@ -450,10 +449,10 @@ export default function AutoDispositionModal({
 
         {/* Body */}
         <div className="px-6 py-5 space-y-5">
-          {/* Disposition Select */}
+          {/* Recommended Disposition Select */}
           <div>
             <label htmlFor="disposition-select" className="block text-sm font-semibold text-gray-900 mb-2">
-              Disposition
+              Recommended Disposition
             </label>
             <select
               id="disposition-select"
