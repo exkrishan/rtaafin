@@ -683,11 +683,13 @@ export default function AgentAssistPanelV2({
               </div>
             </div>
 
-            {/* KB Suggestions Section - Dynamic height based on drag */}
-            <div 
-              className="flex flex-col min-h-0"
-              style={{ flexBasis: `${kbHeight}%`, flexShrink: 0, flexGrow: 0 }}
-            >
+            {/* Container for KB and Transcripts with draggable divider */}
+            <div className="flex flex-col flex-1 min-h-0 overflow-hidden">
+              {/* KB Suggestions Section - Dynamic height based on drag */}
+              <div 
+                className="flex flex-col min-h-0 overflow-hidden"
+                style={{ height: `${kbHeight}%` }}
+              >
               <div className="px-4 py-2.5 border-b border-gray-200 flex-shrink-0">
                 <span className="text-sm font-semibold text-gray-900">Knowledge Base Suggestions</span>
               </div>
@@ -772,22 +774,22 @@ export default function AgentAssistPanelV2({
                   })
                 )}
               </div>
-            </div>
-
-            {/* Draggable Divider */}
-            <div
-              ref={dividerRef}
-              onMouseDown={handleDividerMouseDown}
-              className={`flex-shrink-0 h-1 bg-gray-200 hover:bg-blue-400 cursor-row-resize transition-colors ${
-                isDragging ? 'bg-blue-500' : ''
-              }`}
-              style={{ userSelect: 'none' }}
-              title="Drag to resize"
-            >
-              <div className="h-full w-full flex items-center justify-center">
-                <div className="w-12 h-0.5 bg-gray-400 rounded"></div>
               </div>
-            </div>
+
+              {/* Draggable Divider */}
+              <div
+                ref={dividerRef}
+                onMouseDown={handleDividerMouseDown}
+                className={`flex-shrink-0 h-1 bg-gray-200 hover:bg-blue-400 cursor-row-resize transition-colors ${
+                  isDragging ? 'bg-blue-500' : ''
+                }`}
+                style={{ userSelect: 'none' }}
+                title="Drag to resize"
+              >
+                <div className="h-full w-full flex items-center justify-center">
+                  <div className="w-12 h-0.5 bg-gray-400 rounded"></div>
+                </div>
+              </div>
 
               {/* Transcripts Section - Dynamic height based on drag */}
               <div 
