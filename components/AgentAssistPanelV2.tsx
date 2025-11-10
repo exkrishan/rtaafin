@@ -111,17 +111,23 @@ export default function AgentAssistPanelV2({
 
   // Listen to SSE for transcript and KB updates
   useEffect(() => {
-    if (!interactionId || isCollapsed) return;
+    if (!interactionId || isCollapsed) {
+      console.log('[AgentAssistPanel] SSE not starting', { interactionId, isCollapsed });
+      return;
+    }
 
+    console.log('[AgentAssistPanel] Starting SSE connection', { interactionId });
     const url = `/api/events/stream?callId=${encodeURIComponent(interactionId)}`;
     const eventSource = new EventSource(url);
 
     eventSource.onopen = () => {
+      console.log('[AgentAssistPanel] SSE connection opened');
       setWsConnected(true);
       setHealthStatus('healthy');
     };
 
-    eventSource.onerror = () => {
+    eventSource.onerror = (err) => {
+      console.error('[AgentAssistPanel] SSE connection error', err);
       setWsConnected(false);
       setHealthStatus('error');
     };
@@ -129,12 +135,24 @@ export default function AgentAssistPanelV2({
     eventSource.addEventListener('transcript_line', (event) => {
       try {
         const data = JSON.parse(event.data);
+        console.log('[AgentAssistPanel] Received transcript_line event', {
+          eventCallId: data.callId,
+          expectedCallId: interactionId,
+          hasText: !!data.text,
+          text: data.text?.substring(0, 50),
+          seq: data.seq,
+        });
+        
         // Skip system messages
         if (data.text && (data.text.includes('Connected to realtime stream') || data.text.includes('clientId:') || data.callId === 'system')) {
+          console.log('[AgentAssistPanel] Skipping system message');
           return;
         }
         
-        if (data.callId === interactionId && data.text) {
+        // More lenient matching - check if callId matches or if no callId is provided (assume it's for this interaction)
+        const callIdMatches = !data.callId || data.callId === interactionId;
+        
+        if (callIdMatches && data.text) {
           // Determine speaker from text prefix (Agent: or Customer:)
           let speaker: 'agent' | 'customer' = 'customer';
           let text = data.text;
@@ -154,6 +172,7 @@ export default function AgentAssistPanelV2({
           
           // Only add if we have actual text content
           if (!text || text.length === 0) {
+            console.log('[AgentAssistPanel] Skipping empty text after processing');
             return;
           }
           
@@ -166,6 +185,12 @@ export default function AgentAssistPanelV2({
             isPartial: false,
           };
           
+          console.log('[AgentAssistPanel] Adding utterance', {
+            utterance_id: utterance.utterance_id,
+            speaker: utterance.speaker,
+            textLength: utterance.text.length,
+          });
+          
           setUtterances(prev => {
             // Check for duplicates by seq or utterance_id
             const exists = prev.some(u => 
@@ -176,6 +201,7 @@ export default function AgentAssistPanelV2({
               console.log('[AgentAssistPanel] Skipping duplicate utterance', utterance.utterance_id);
               return prev;
             }
+            console.log('[AgentAssistPanel] Adding new utterance, total count:', prev.length + 1);
             return [...prev, utterance];
           });
           onTranscriptEvent?.(utterance);
@@ -187,9 +213,16 @@ export default function AgentAssistPanelV2({
             timestamp: utterance.timestamp,
             latency_ms: 2000, // Simulated
           });
+        } else {
+          console.log('[AgentAssistPanel] Skipping transcript_line', {
+            reason: !callIdMatches ? 'callId mismatch' : !data.text ? 'no text' : 'unknown',
+            eventCallId: data.callId,
+            expectedCallId: interactionId,
+            hasText: !!data.text,
+          });
         }
       } catch (err) {
-        console.error('[AgentAssistPanel] Failed to parse transcript_line', err);
+        console.error('[AgentAssistPanel] Failed to parse transcript_line', err, event.data);
       }
     });
 
