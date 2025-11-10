@@ -691,10 +691,10 @@ export default function AgentAssistPanelV2({
                 className="flex flex-col min-h-0 overflow-hidden"
                 style={{ height: `${kbHeight}%` }}
               >
-              <div className="px-4 py-2.5 border-b border-gray-200 flex-shrink-0">
-                <span className="text-sm font-semibold text-gray-900">Knowledge Base Suggestions</span>
-              </div>
-              <div className="flex-1 overflow-y-auto px-4 pb-4 space-y-3 min-h-0">
+                <div className="px-4 py-2.5 border-b border-gray-200 flex-shrink-0">
+                  <span className="text-sm font-semibold text-gray-900">Knowledge Base Suggestions</span>
+                </div>
+                <div className="flex-1 overflow-y-auto px-4 pb-4 space-y-3 min-h-0">
                 {kbArticles.length === 0 ? (
                   <div className="text-center py-8 text-sm text-gray-500">
                     {isSearching ? 'Searching...' : 'Looking for suggestions'}
@@ -774,7 +774,7 @@ export default function AgentAssistPanelV2({
                     );
                   })
                 )}
-              </div>
+                </div>
               </div>
 
               {/* Draggable Divider */}
@@ -797,16 +797,16 @@ export default function AgentAssistPanelV2({
                 className="flex flex-col min-h-0 overflow-hidden"
                 style={{ height: `${100 - kbHeight}%` }}
               >
-              <div className="px-4 py-2.5 border-b border-gray-200 flex-shrink-0">
-                <span className="text-sm font-semibold text-gray-900">Transcripts</span>
-              </div>
-              <div
-                ref={transcriptContainerRef}
-                onScroll={handleTranscriptScroll}
-                className="flex-1 overflow-y-auto px-4 pb-4 space-y-2"
-                role="log"
-                aria-label="Call transcript"
-              >
+                <div className="px-4 py-2.5 border-b border-gray-200 flex-shrink-0">
+                  <span className="text-sm font-semibold text-gray-900">Transcripts</span>
+                </div>
+                <div
+                  ref={transcriptContainerRef}
+                  onScroll={handleTranscriptScroll}
+                  className="flex-1 overflow-y-auto px-4 pb-4 space-y-2"
+                  role="log"
+                  aria-label="Call transcript"
+                >
                 {utterances.length === 0 ? (
                   <div className="text-center py-8 text-sm text-gray-500">Waiting for transcript...</div>
                 ) : (
@@ -857,8 +857,8 @@ export default function AgentAssistPanelV2({
                     );
                   })
                 )}
-                <div ref={transcriptEndRef} />
-              </div>
+                  <div ref={transcriptEndRef} />
+                </div>
               </div>
             </div>
           </div>
