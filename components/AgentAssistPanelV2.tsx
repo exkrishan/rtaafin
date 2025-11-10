@@ -110,13 +110,14 @@ export default function AgentAssistPanelV2({
   }, [isCallActive, isCollapsed, tenantId, agentId, interactionId, emitTelemetry]);
 
   // Listen to SSE for transcript and KB updates
+  // Always listen when interactionId is available, even if collapsed (so data is ready when expanded)
   useEffect(() => {
-    if (!interactionId || isCollapsed) {
-      console.log('[AgentAssistPanel] SSE not starting', { interactionId, isCollapsed });
+    if (!interactionId) {
+      console.log('[AgentAssistPanel] SSE not starting - no interactionId');
       return;
     }
 
-    console.log('[AgentAssistPanel] Starting SSE connection', { interactionId });
+    console.log('[AgentAssistPanel] Starting SSE connection', { interactionId, isCollapsed });
     const url = `/api/events/stream?callId=${encodeURIComponent(interactionId)}`;
     const eventSource = new EventSource(url);
 
@@ -149,10 +150,12 @@ export default function AgentAssistPanelV2({
           return;
         }
         
-        // More lenient matching - check if callId matches or if no callId is provided (assume it's for this interaction)
-        const callIdMatches = !data.callId || data.callId === interactionId;
+        // Match callId - must match exactly or be missing (assume it's for this interaction)
+        // Also check if the event type field matches
+        const eventCallId = data.callId || data.interaction_id || data.interactionId;
+        const callIdMatches = !eventCallId || eventCallId === interactionId;
         
-        if (callIdMatches && data.text) {
+        if (callIdMatches && data.text && data.text.trim().length > 0) {
           // Determine speaker from text prefix (Agent: or Customer:)
           let speaker: 'agent' | 'customer' = 'customer';
           let text = data.text;
@@ -272,9 +275,10 @@ export default function AgentAssistPanelV2({
     });
 
     return () => {
+      console.log('[AgentAssistPanel] Closing SSE connection', { interactionId });
       eventSource.close();
     };
-  }, [interactionId, isCollapsed, onTranscriptEvent, emitTelemetry, tenantId, agentId]);
+  }, [interactionId, onTranscriptEvent, emitTelemetry, tenantId, agentId]);
 
   // Auto-scroll transcript
   useEffect(() => {
