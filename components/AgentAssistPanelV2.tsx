@@ -83,6 +83,9 @@ export default function AgentAssistPanelV2({
   const transcriptEndRef = useRef<HTMLDivElement>(null);
   const transcriptContainerRef = useRef<HTMLDivElement>(null);
   const [manualScroll, setManualScroll] = useState(false);
+  const [kbHeight, setKbHeight] = useState(70); // Percentage of available height for KB (default 70%)
+  const [isDragging, setIsDragging] = useState(false);
+  const dividerRef = useRef<HTMLDivElement>(null);
 
   // Persist collapse state in sessionStorage
   useEffect(() => {
@@ -294,6 +297,41 @@ export default function AgentAssistPanelV2({
     const isNearBottom = scrollHeight - scrollTop - clientHeight < 50;
     setManualScroll(!isNearBottom);
   }, []);
+
+  // Handle divider drag
+  const handleDividerMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    setIsDragging(true);
+  }, []);
+
+  useEffect(() => {
+    if (!isDragging) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!dividerRef.current?.parentElement) return;
+      
+      const container = dividerRef.current.parentElement;
+      const containerRect = container.getBoundingClientRect();
+      const y = e.clientY - containerRect.top;
+      const containerHeight = containerRect.height;
+      
+      // Calculate percentage (with min/max constraints)
+      const percentage = Math.max(20, Math.min(80, (y / containerHeight) * 100));
+      setKbHeight(percentage);
+    };
+
+    const handleMouseUp = () => {
+      setIsDragging(false);
+    };
+
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isDragging]);
 
   // Manual KB search
   const handleManualSearch = useCallback(async () => {
@@ -645,12 +683,15 @@ export default function AgentAssistPanelV2({
               </div>
             </div>
 
-            {/* KB Suggestions Section - 70% of remaining space */}
-            <div className="flex flex-col flex-[0.7] min-h-0">
+            {/* KB Suggestions Section - Dynamic height based on drag */}
+            <div 
+              className="flex flex-col min-h-0"
+              style={{ flexBasis: `${kbHeight}%`, flexShrink: 0, flexGrow: 0 }}
+            >
               <div className="px-4 py-2.5 border-b border-gray-200 flex-shrink-0">
                 <span className="text-sm font-semibold text-gray-900">Knowledge Base Suggestions</span>
               </div>
-              <div className="flex-1 overflow-y-auto px-4 pb-4 space-y-3">
+              <div className="flex-1 overflow-y-auto px-4 pb-4 space-y-3 min-h-0">
                 {kbArticles.length === 0 ? (
                   <div className="text-center py-8 text-sm text-gray-500">
                     {isSearching ? 'Searching...' : 'Looking for suggestions'}
@@ -733,8 +774,26 @@ export default function AgentAssistPanelV2({
               </div>
             </div>
 
-            {/* Transcripts Section - 30% of remaining space */}
-            <div className="flex flex-col flex-[0.3] min-h-0">
+            {/* Draggable Divider */}
+            <div
+              ref={dividerRef}
+              onMouseDown={handleDividerMouseDown}
+              className={`flex-shrink-0 h-1 bg-gray-200 hover:bg-blue-400 cursor-row-resize transition-colors ${
+                isDragging ? 'bg-blue-500' : ''
+              }`}
+              style={{ userSelect: 'none' }}
+              title="Drag to resize"
+            >
+              <div className="h-full w-full flex items-center justify-center">
+                <div className="w-12 h-0.5 bg-gray-400 rounded"></div>
+              </div>
+            </div>
+
+            {/* Transcripts Section - Dynamic height based on drag */}
+            <div 
+              className="flex flex-col min-h-0"
+              style={{ flexBasis: `${100 - kbHeight}%`, flexShrink: 0, flexGrow: 0 }}
+            >
               <div className="px-4 py-2.5 border-b border-gray-200 flex-shrink-0">
                 <span className="text-sm font-semibold text-gray-900">Transcripts</span>
               </div>
