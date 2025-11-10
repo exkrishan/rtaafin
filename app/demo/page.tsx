@@ -4,10 +4,8 @@ import { useState, useRef, useEffect } from 'react';
 import TranscriptPanel from '@/components/TranscriptPanel';
 import AutoDispositionModal, { Suggestion } from '@/components/AutoDispositionModal';
 import AgentAssistPanelV2, { KBArticle, DispositionData, Customer } from '@/components/AgentAssistPanelV2';
-import CustomerDetailsHeader from '@/components/CustomerDetailsHeader';
-import CallControls from '@/components/CallControls';
 import LeftSidebar from '@/components/LeftSidebar';
-import CustomerDetailsPanel from '@/components/CustomerDetailsPanel';
+import CentralCallView from '@/components/CentralCallView';
 import ToastContainer from '@/components/ToastContainer';
 
 interface DemoTranscriptLine {
@@ -406,54 +404,33 @@ export default function DemoPage() {
             </div>
           </div>
 
-          {/* Center Column: Customer Info - Main focus like Universal Agent Desktop */}
+          {/* Center Column: Unified Call View */}
           <div className="flex-1 overflow-y-auto p-6">
-            <div className="max-w-3xl mx-auto space-y-6">
-              {/* Customer Header Card */}
-              <CustomerDetailsHeader
-                customer={mockCustomer}
-                callDuration={isCallActive ? '00:00' : '00:00'}
-                callId={callId}
-                onOpenCRM={() => {
-                  console.log('[Demo] Open CRM clicked');
-                  window.open('https://crm.example.com/customer/cust-789', '_blank');
-                }}
-                onOpenCaseHistory={() => {
-                  console.log('[Demo] Open Case History clicked');
-                  window.open('https://crm.example.com/cases/cust-789', '_blank');
-                }}
-              />
-
-              {/* Call Controls Card */}
-              <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
-                <CallControls
-                  onMute={() => console.log('[Demo] Mute clicked')}
-                  onHold={() => console.log('[Demo] Hold clicked')}
-                  onTransfer={() => console.log('[Demo] Transfer clicked')}
-                  onConference={() => console.log('[Demo] Conference clicked')}
-                  onKeypad={() => console.log('[Demo] Keypad clicked')}
-                  onRecord={() => console.log('[Demo] Record clicked')}
-                  onComplete={() => console.log('[Demo] Complete clicked')}
-                  onEndCall={() => {
-                    console.log('[Demo] End call clicked');
-                    stopCall();
-                  }}
-                />
-              </div>
-
-              {/* Customer Details Panel */}
-              <CustomerDetailsPanel
-                customer={mockCustomer}
-                onOpenCRM={() => {
-                  console.log('[Demo] Open CRM clicked');
-                  window.open('https://crm.example.com/customer/cust-789', '_blank');
-                }}
-                onOpenCaseHistory={() => {
-                  console.log('[Demo] Open Case History clicked');
-                  window.open('https://crm.example.com/cases/cust-789', '_blank');
-                }}
-              />
-            </div>
+            <CentralCallView
+              customer={mockCustomer}
+              callDuration={isCallActive ? '00:00' : '00:00'}
+              callId={callId}
+              isCallActive={isCallActive}
+              onMute={() => console.log('[Demo] Mute clicked')}
+              onHold={() => console.log('[Demo] Hold clicked')}
+              onTransfer={() => console.log('[Demo] Transfer clicked')}
+              onConference={() => console.log('[Demo] Conference clicked')}
+              onKeypad={() => console.log('[Demo] Keypad clicked')}
+              onRecord={() => console.log('[Demo] Record clicked')}
+              onComplete={() => console.log('[Demo] Complete clicked')}
+              onEndCall={() => {
+                console.log('[Demo] End call clicked');
+                stopCall();
+              }}
+              onOpenCRM={() => {
+                console.log('[Demo] Open CRM clicked');
+                window.open('https://crm.example.com/customer/cust-789', '_blank');
+              }}
+              onOpenCaseHistory={() => {
+                console.log('[Demo] Open Case History clicked');
+                window.open('https://crm.example.com/cases/cust-789', '_blank');
+              }}
+            />
           </div>
         </div>
 
