@@ -9,7 +9,6 @@ export interface CentralCallViewProps {
   callDuration: string;
   callId?: string;
   isCallActive: boolean;
-  transcript?: TranscriptUtterance[];
   onMute?: () => void;
   onHold?: () => void;
   onTransfer?: () => void;
