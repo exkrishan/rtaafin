@@ -139,9 +139,12 @@ export default function AgentAssistPanelV2({
     eventSource.addEventListener('transcript_line', (event) => {
       try {
         const data = JSON.parse(event.data);
+        const eventCallId = data.callId || data.interaction_id || data.interactionId;
+        
         console.log('[AgentAssistPanel] Received transcript_line event', {
-          eventCallId: data.callId,
+          eventCallId,
           expectedCallId: interactionId,
+          matches: eventCallId === interactionId || !eventCallId,
           hasText: !!data.text,
           text: data.text?.substring(0, 50),
           seq: data.seq,
@@ -154,8 +157,6 @@ export default function AgentAssistPanelV2({
         }
         
         // Match callId - must match exactly or be missing (assume it's for this interaction)
-        // Also check if the event type field matches
-        const eventCallId = data.callId || data.interaction_id || data.interactionId;
         const callIdMatches = !eventCallId || eventCallId === interactionId;
         
         if (callIdMatches && data.text && data.text.trim().length > 0) {
@@ -857,6 +858,7 @@ export default function AgentAssistPanelV2({
                   })
                 )}
                 <div ref={transcriptEndRef} />
+              </div>
               </div>
             </div>
           </div>

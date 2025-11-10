@@ -190,10 +190,12 @@ export default function DemoPage() {
     };
 
     sendTranscriptLineRef.current = sendTranscriptLine;
-    // Wait a bit for SSE connection to establish, then start sending
+    // Wait longer for SSE connection to establish, then start sending
+    // This ensures the AgentAssistPanel has time to connect to the SSE stream
     setTimeout(() => {
+      console.log('[Demo] Starting transcript playback after SSE connection delay');
       sendTranscriptLine(0);
-    }, 500);
+    }, 1500); // Increased delay to ensure SSE connection is ready
   };
 
   const pauseCall = () => {
