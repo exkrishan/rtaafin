@@ -470,25 +470,26 @@ export default function AutoDispositionModal({
                 setSelectedSubDispositionId(null);
               }}
               disabled={isLoading || (allDispositions.length === 0 && currentSuggestions.length === 0)}
-              className="w-full rounded-md border border-gray-300 px-3 py-2.5 text-sm text-gray-900 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:cursor-not-allowed disabled:bg-gray-100 disabled:text-gray-500"
+              className="w-full rounded-md border border-gray-300 px-3 py-2.5 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:cursor-not-allowed disabled:bg-gray-100"
+              style={{ color: '#111827' }}
               aria-label="Select disposition"
               required
             >
-              <option value="">Select disposition...</option>
+              <option value="" style={{ color: '#9CA3AF' }}>Select disposition...</option>
               {allDispositions.length > 0 ? (
                 allDispositions.map((disposition) => (
-                  <option key={disposition.code} value={disposition.code}>
+                  <option key={disposition.code} value={disposition.code} style={{ color: '#111827' }}>
                     {disposition.title || disposition.label || disposition.code}
                   </option>
                 ))
               ) : currentSuggestions.length > 0 ? (
                 currentSuggestions.map((suggestion) => (
-                  <option key={suggestion.code} value={suggestion.code}>
+                  <option key={suggestion.code} value={suggestion.code} style={{ color: '#111827' }}>
                     {suggestion.title} {suggestion.score ? `(${Math.round(suggestion.score * 100)}%)` : ''}
                   </option>
                 ))
               ) : (
-                <option value="" disabled>Loading dispositions...</option>
+                <option value="" disabled style={{ color: '#9CA3AF' }}>Loading dispositions...</option>
               )}
             </select>
           </div>
@@ -509,7 +510,8 @@ export default function AutoDispositionModal({
                 setSelectedSubDispositionId(selected?.id || null);
               }}
               disabled={isLoading || !selectedDisposition || subDispositions.length === 0}
-              className="w-full rounded-md border border-gray-300 px-3 py-2.5 text-sm text-gray-900 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:cursor-not-allowed disabled:bg-gray-100 disabled:text-gray-500"
+              className="w-full rounded-md border border-gray-300 px-3 py-2.5 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:cursor-not-allowed disabled:bg-gray-100"
+              style={{ color: '#111827' }}
               aria-label="Select sub-disposition"
             >
               <option value="" style={{ color: '#9CA3AF' }}>Select sub-disposition...</option>
