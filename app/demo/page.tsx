@@ -404,10 +404,15 @@ export default function DemoPage() {
 
         {/* Main Content Area */}
         <div className="flex-1 flex flex-col pr-[376px]">
+          {/* Page Header */}
+          <div className="bg-white border-b border-gray-200 px-6 py-4">
+            <h1 className="text-xl font-semibold text-gray-900">Agent Desktop</h1>
+          </div>
+
           {/* Center Column: Customer Info - Main focus like Universal Agent Desktop */}
-          <div className="flex-1 overflow-y-auto p-4">
-            <div className="max-w-4xl mx-auto space-y-4">
-              {/* Customer Header */}
+          <div className="flex-1 overflow-y-auto p-6">
+            <div className="max-w-3xl mx-auto space-y-6">
+              {/* Customer Header Card */}
               <CustomerDetailsHeader
                 customer={mockCustomer}
                 callDuration={isCallActive ? '00:00' : '00:00'}
@@ -422,7 +427,7 @@ export default function DemoPage() {
                 }}
               />
 
-              {/* Call Controls */}
+              {/* Call Controls Card */}
               <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
                 <CallControls
                   onMute={() => console.log('[Demo] Mute clicked')}

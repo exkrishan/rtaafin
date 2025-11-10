@@ -71,20 +71,20 @@ export default function CustomerDetailsHeader({
   };
 
   return (
-    <div className="bg-white border-b border-gray-200 relative" ref={flyoutRef}>
+    <div className="bg-white rounded-lg shadow-sm border border-gray-200 relative" ref={flyoutRef}>
       {/* Main Header - Centered like Universal Agent Desktop */}
-      <div className="p-6">
-        <div className="flex flex-col items-center gap-4">
-          {/* Large Avatar - Centered */}
-          <div className="w-24 h-24 rounded-full bg-blue-600 flex items-center justify-center text-white font-semibold text-2xl flex-shrink-0">
+      <div className="px-6 py-8">
+        <div className="flex flex-col items-center gap-5">
+          {/* Large Avatar - Centered, consistent size */}
+          <div className="w-20 h-20 rounded-full bg-blue-600 flex items-center justify-center text-white font-semibold text-xl flex-shrink-0">
             {getInitials(customer.name)}
           </div>
           
-          {/* Customer Name */}
+          {/* Customer Name - Consistent font size */}
           <div className="text-center">
             <button
               onClick={() => setFlyoutOpen(!flyoutOpen)}
-              className="text-xl font-semibold text-gray-900 hover:opacity-80 transition-opacity focus:outline-none focus:ring-2 focus:ring-blue-500 rounded"
+              className="text-lg font-semibold text-gray-900 hover:opacity-80 transition-opacity focus:outline-none focus:ring-2 focus:ring-blue-500 rounded"
               aria-label={`Customer details for ${customer.name}`}
               aria-expanded={flyoutOpen}
             >
@@ -92,14 +92,14 @@ export default function CustomerDetailsHeader({
             </button>
           </div>
           
-          {/* Customer Info Row */}
-          <div className="flex items-center gap-3 justify-center">
+          {/* Customer Info Row - Consistent font size */}
+          <div className="flex items-center gap-2 justify-center">
             <div className="text-sm text-gray-600">
               {maskPhone(customer.masked_phone)}
             </div>
             {customer.account && (
               <>
-                <span className="text-gray-400">•</span>
+                <span className="text-gray-400 text-sm">•</span>
                 <div className="text-sm text-gray-600">
                   {customer.account}
                 </div>
@@ -107,13 +107,13 @@ export default function CustomerDetailsHeader({
             )}
           </div>
           
-          {/* Tags */}
+          {/* Tags - Consistent size */}
           {customer.tags && customer.tags.length > 0 && (
             <div className="flex gap-2 justify-center">
               {customer.tags.slice(0, 2).map((tag, i) => (
                 <span
                   key={i}
-                  className="px-3 py-1 bg-blue-50 text-blue-700 text-sm font-medium rounded"
+                  className="px-2.5 py-1 bg-blue-50 text-blue-700 text-xs font-medium rounded"
                 >
                   {tag}
                 </span>
@@ -122,13 +122,13 @@ export default function CustomerDetailsHeader({
           )}
         </div>
 
-        {/* Call Details Row */}
-        <div className="mt-4 text-center text-xs text-gray-600">
-          <div className="space-y-1">
-            <div>Campaign: whatsapp_chat</div>
-            <div>Call Type: Manual Dial</div>
-            <div>Queue: --</div>
-            <div>DID: NODID</div>
+        {/* Call Details Row - Consistent font size and alignment */}
+        <div className="mt-6 pt-6 border-t border-gray-200">
+          <div className="space-y-1.5 text-left">
+            <div className="text-xs text-gray-600">Campaign: <span className="text-gray-900">whatsapp_chat</span></div>
+            <div className="text-xs text-gray-600">Call Type: <span className="text-gray-900">Manual Dial</span></div>
+            <div className="text-xs text-gray-600">Queue: <span className="text-gray-900">--</span></div>
+            <div className="text-xs text-gray-600">DID: <span className="text-gray-900">NODID</span></div>
           </div>
         </div>
       </div>

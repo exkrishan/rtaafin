@@ -404,7 +404,7 @@ export default function AgentAssistPanelV2({
   return (
     <div className="fixed right-0 top-0 h-full w-[360px] bg-white border-l border-gray-200 flex flex-col z-50 shadow-lg">
       {/* Header */}
-      <div className="flex items-center justify-between p-3 border-b border-gray-200 bg-gray-50">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 bg-gray-50">
         <div className="flex items-center gap-2">
           <h2 className="text-sm font-semibold text-gray-900">Agent Assist</h2>
           <div className="relative group">
@@ -551,7 +551,7 @@ export default function AgentAssistPanelV2({
         ) : (
           <div className="flex flex-col h-full">
             {/* Manual KB Search - Always Visible */}
-            <div className="p-3 border-b border-gray-200 flex-shrink-0">
+            <div className="px-4 py-3 border-b border-gray-200 flex-shrink-0">
               <div className="relative">
                 <input
                   type="text"
@@ -559,7 +559,7 @@ export default function AgentAssistPanelV2({
                   onChange={(e) => setManualSearchQuery(e.target.value)}
                   onKeyDown={(e) => e.key === 'Enter' && handleManualSearch()}
                   placeholder="Search KB..."
-                  className="w-full pl-8 pr-8 h-8 rounded border border-gray-300 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  className="w-full pl-8 pr-8 h-9 rounded-md border border-gray-300 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                   aria-label="Manual knowledge base search"
                 />
                 <svg
@@ -580,12 +580,12 @@ export default function AgentAssistPanelV2({
 
             {/* KB Suggestions Section - 70% of remaining space */}
             <div className="flex flex-col flex-[0.7] border-b border-gray-200 min-h-0">
-              <div className="px-3 py-2 border-b border-gray-200 flex-shrink-0">
-                <span className="text-sm font-medium text-gray-900">Knowledge Base Suggestions</span>
+              <div className="px-4 py-2.5 border-b border-gray-200 flex-shrink-0">
+                <span className="text-sm font-semibold text-gray-900">Knowledge Base Suggestions</span>
               </div>
-              <div className="flex-1 overflow-y-auto px-3 pb-3 space-y-2">
+              <div className="flex-1 overflow-y-auto px-4 pb-4 space-y-3">
                 {kbArticles.length === 0 ? (
-                  <div className="text-center py-4 text-sm text-gray-500">
+                  <div className="text-center py-8 text-sm text-gray-500">
                     {isSearching ? 'Searching...' : 'Looking for suggestions'}
                   </div>
                 ) : (
@@ -596,14 +596,14 @@ export default function AgentAssistPanelV2({
                       return (
                         <div
                           key={article.id}
-                          className={`p-3 border rounded-lg ${
+                          className={`p-3 border rounded-md ${
                             isLowConfidence ? 'bg-gray-50 border-gray-200 opacity-60' : 'bg-white border-gray-200'
                           }`}
                           title={isLowConfidence ? 'Low confidence suggestion' : ''}
                         >
                           <div className="flex items-start justify-between mb-2">
-                            <h4 className="text-sm font-semibold text-gray-900 flex-1">{article.title}</h4>
-                            <div className="flex items-center gap-2">
+                            <h4 className="text-sm font-semibold text-gray-900 flex-1 pr-2">{article.title}</h4>
+                            <div className="flex items-center gap-1.5 flex-shrink-0">
                               {article.intent && (
                                 <span className="px-2 py-0.5 bg-blue-50 text-blue-700 text-xs font-medium rounded" title={`Intent: ${article.intent}`}>
                                   {article.intent.replace(/_/g, ' ')}
@@ -615,7 +615,7 @@ export default function AgentAssistPanelV2({
                             </div>
                           </div>
                           {article.snippet && (
-                            <p className="text-xs text-gray-600 mb-2 line-clamp-2">{article.snippet}</p>
+                            <p className="text-xs text-gray-600 mb-3 line-clamp-2 leading-relaxed">{article.snippet}</p>
                           )}
                           <div className="flex items-center gap-1">
                             <button
@@ -668,18 +668,18 @@ export default function AgentAssistPanelV2({
 
             {/* Transcripts Section - 30% of remaining space */}
             <div className="flex flex-col flex-[0.3] min-h-0">
-              <div className="px-3 py-2 border-b border-gray-200 flex-shrink-0">
-                <span className="text-sm font-medium text-gray-900">Transcripts</span>
+              <div className="px-4 py-2.5 border-b border-gray-200 flex-shrink-0">
+                <span className="text-sm font-semibold text-gray-900">Transcripts</span>
               </div>
               <div
                 ref={transcriptContainerRef}
                 onScroll={handleTranscriptScroll}
-                className="flex-1 overflow-y-auto px-3 pb-3 space-y-2"
+                className="flex-1 overflow-y-auto px-4 pb-4 space-y-2"
                 role="log"
                 aria-label="Call transcript"
               >
                 {utterances.length === 0 ? (
-                  <div className="text-center py-4 text-sm text-gray-500">Waiting for transcript...</div>
+                  <div className="text-center py-8 text-sm text-gray-500">Waiting for transcript...</div>
                 ) : (
                   utterances.map((utterance) => {
                     // Filter out system messages
@@ -690,13 +690,13 @@ export default function AgentAssistPanelV2({
                     return (
                       <div
                         key={utterance.utterance_id}
-                        className={`p-2 rounded text-sm ${
+                        className={`p-2.5 rounded-md text-sm ${
                           utterance.speaker === 'agent'
                             ? 'bg-blue-50 ml-4 text-gray-900'
                             : 'bg-green-50 mr-4 text-gray-900'
                         }`}
                       >
-                        <div className="flex items-center justify-between mb-1">
+                        <div className="flex items-center justify-between mb-1.5">
                           <span className="text-xs font-medium text-gray-600">
                             {utterance.speaker === 'agent' ? 'Agent' : 'Customer'}
                           </span>
@@ -723,7 +723,7 @@ export default function AgentAssistPanelV2({
                             )}
                           </div>
                         </div>
-                        <p className="text-sm text-gray-900">{utterance.text}</p>
+                        <p className="text-sm text-gray-900 leading-relaxed">{utterance.text}</p>
                       </div>
                     );
                   })

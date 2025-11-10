@@ -22,12 +22,12 @@ export default function CallControls({
   onEndCall,
 }: CallControlsProps) {
   return (
-    <div className="flex flex-col gap-3 mt-6">
-      {/* Top Row */}
+    <div className="flex flex-col gap-4">
+      {/* Top Row - All buttons same size */}
       <div className="flex items-center justify-center gap-3">
         <button
           onClick={onMute}
-          className="w-10 h-10 rounded-full bg-gray-100 hover:bg-gray-200 flex items-center justify-center transition-colors"
+          className="w-12 h-12 rounded-full bg-gray-100 hover:bg-gray-200 flex items-center justify-center transition-colors"
           aria-label="Mute"
           title="Mute"
         >
@@ -37,7 +37,7 @@ export default function CallControls({
         </button>
         <button
           onClick={onHold}
-          className="w-10 h-10 rounded-full bg-gray-100 hover:bg-gray-200 flex items-center justify-center transition-colors"
+          className="w-12 h-12 rounded-full bg-gray-100 hover:bg-gray-200 flex items-center justify-center transition-colors"
           aria-label="Hold"
           title="Hold"
         >
@@ -47,7 +47,7 @@ export default function CallControls({
         </button>
         <button
           onClick={onTransfer}
-          className="w-10 h-10 rounded-full bg-gray-100 hover:bg-gray-200 flex items-center justify-center transition-colors"
+          className="w-12 h-12 rounded-full bg-gray-100 hover:bg-gray-200 flex items-center justify-center transition-colors"
           aria-label="Transfer"
           title="Transfer"
         >
@@ -57,7 +57,7 @@ export default function CallControls({
         </button>
         <button
           onClick={onConference}
-          className="w-10 h-10 rounded-full bg-gray-100 hover:bg-gray-200 flex items-center justify-center transition-colors"
+          className="w-12 h-12 rounded-full bg-gray-100 hover:bg-gray-200 flex items-center justify-center transition-colors"
           aria-label="Conference"
           title="Conference"
         >
@@ -67,11 +67,11 @@ export default function CallControls({
         </button>
       </div>
       
-      {/* Bottom Row */}
+      {/* Bottom Row - All buttons same size */}
       <div className="flex items-center justify-center gap-3">
         <button
           onClick={onKeypad}
-          className="w-10 h-10 rounded-full bg-gray-100 hover:bg-gray-200 flex items-center justify-center transition-colors"
+          className="w-12 h-12 rounded-full bg-gray-100 hover:bg-gray-200 flex items-center justify-center transition-colors"
           aria-label="Keypad"
           title="Keypad"
         >
@@ -81,7 +81,7 @@ export default function CallControls({
         </button>
         <button
           onClick={onRecord}
-          className="w-10 h-10 rounded-full bg-gray-100 hover:bg-gray-200 flex items-center justify-center transition-colors"
+          className="w-12 h-12 rounded-full bg-gray-100 hover:bg-gray-200 flex items-center justify-center transition-colors"
           aria-label="Record"
           title="Record"
         >
@@ -91,7 +91,7 @@ export default function CallControls({
         </button>
         <button
           onClick={onComplete}
-          className="w-10 h-10 rounded-full bg-gray-100 hover:bg-gray-200 flex items-center justify-center transition-colors"
+          className="w-12 h-12 rounded-full bg-gray-100 hover:bg-gray-200 flex items-center justify-center transition-colors"
           aria-label="Complete"
           title="Complete"
         >
@@ -101,7 +101,7 @@ export default function CallControls({
         </button>
         <button
           onClick={onEndCall}
-          className="w-10 h-10 rounded-full bg-red-500 hover:bg-red-600 flex items-center justify-center transition-colors"
+          className="w-12 h-12 rounded-full bg-red-500 hover:bg-red-600 flex items-center justify-center transition-colors"
           aria-label="End Call"
           title="End Call"
         >

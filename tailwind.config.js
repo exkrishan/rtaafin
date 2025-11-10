@@ -23,6 +23,21 @@ module.exports = {
         // Warning color for alerts
         warning: '#F59E0B',
       },
+      fontSize: {
+        // Consistent typography scale
+        'xs': ['12px', { lineHeight: '16px' }],
+        'sm': ['14px', { lineHeight: '20px' }],
+        'base': ['14px', { lineHeight: '20px' }],
+        'lg': ['16px', { lineHeight: '24px' }],
+        'xl': ['18px', { lineHeight: '28px' }],
+        '2xl': ['20px', { lineHeight: '28px' }],
+        '3xl': ['24px', { lineHeight: '32px' }],
+      },
+      spacing: {
+        // Consistent spacing scale
+        '18': '4.5rem',
+        '22': '5.5rem',
+      },
       borderRadius: {
         // Large border radius for main cards and panels
         lg: '12px',
