@@ -317,11 +317,21 @@ export default function LivePage() {
             }}
             triggerKBSearch={async (query, context) => {
               console.log('[Live] KB search triggered:', { query, context });
-              // TODO: Replace with actual API call
               try {
-                const response = await fetch(`/api/kb/search?q=${encodeURIComponent(query)}&interactionId=${context.interactionId}`);
-                const data = await response.json();
-                return data.articles || [];
+                const response = await fetch(`/api/kb/search?q=${encodeURIComponent(query)}&tenantId=${tenantId}&limit=10`);
+                const payload = await response.json();
+                
+                if (payload.ok && Array.isArray(payload.results)) {
+                  return payload.results.map((article: any) => ({
+                    id: article.id || article.code,
+                    title: article.title,
+                    snippet: article.snippet || '',
+                    confidence: article.score || 0.8,
+                    url: article.url,
+                  }));
+                }
+                
+                return [];
               } catch (err) {
                 console.error('[Live] KB search failed', err);
                 return [];

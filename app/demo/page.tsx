@@ -6,6 +6,8 @@ import AutoDispositionModal, { Suggestion } from '@/components/AutoDispositionMo
 import AgentAssistPanelV2, { KBArticle, DispositionData, Customer } from '@/components/AgentAssistPanelV2';
 import CustomerDetailsHeader from '@/components/CustomerDetailsHeader';
 import CallControls from '@/components/CallControls';
+import LeftSidebar from '@/components/LeftSidebar';
+import CustomerDetailsPanel from '@/components/CustomerDetailsPanel';
 import ToastContainer from '@/components/ToastContainer';
 
 interface DemoTranscriptLine {
