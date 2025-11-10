@@ -653,7 +653,7 @@ export default function AgentAssistPanelV2({
             ) : null}
           </div>
         ) : (
-          <div className="flex flex-col h-full">
+          <div className="flex flex-col h-full min-h-0">
             {/* Manual KB Search - Always Visible */}
             <div className="px-4 py-3 border-b border-gray-200 flex-shrink-0">
               <div className="relative">
@@ -789,11 +789,11 @@ export default function AgentAssistPanelV2({
               </div>
             </div>
 
-            {/* Transcripts Section - Dynamic height based on drag */}
-            <div 
-              className="flex flex-col min-h-0"
-              style={{ flexBasis: `${100 - kbHeight}%`, flexShrink: 0, flexGrow: 0 }}
-            >
+              {/* Transcripts Section - Dynamic height based on drag */}
+              <div 
+                className="flex flex-col min-h-0 overflow-hidden"
+                style={{ height: `${100 - kbHeight}%` }}
+              >
               <div className="px-4 py-2.5 border-b border-gray-200 flex-shrink-0">
                 <span className="text-sm font-semibold text-gray-900">Transcripts</span>
               </div>
