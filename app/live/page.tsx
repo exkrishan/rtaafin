@@ -34,6 +34,13 @@ export default function LivePage() {
   const [callId, setCallId] = useState<string>('');
   const [tenantId] = useState('default');
   const [dispositionOpen, setDispositionOpen] = useState(false);
+  const [transcriptUtterances, setTranscriptUtterances] = useState<Array<{
+    utterance_id: string;
+    speaker: 'agent' | 'customer';
+    text: string;
+    confidence: number;
+    timestamp: string;
+  }>>([]);
   const [dispositionData, setDispositionData] = useState<{
     suggested: Suggestion[];
     autoNotes: string;
@@ -273,7 +280,7 @@ export default function LivePage() {
               callDuration="00:00"
               callId={callId || undefined}
               isCallActive={!!callId}
-              transcript={[]} // TODO: Collect from AgentAssistPanelV2
+              transcript={transcriptUtterances}
               onMute={() => console.log('[Live] Mute clicked')}
               onHold={() => console.log('[Live] Hold clicked')}
               onTransfer={() => console.log('[Live] Transfer clicked')}
@@ -305,6 +312,13 @@ export default function LivePage() {
             isCallActive={true}
             onTranscriptEvent={(event) => {
               console.log('[Live] Transcript event:', event);
+              setTranscriptUtterances(prev => {
+                const existing = prev.find(u => u.utterance_id === event.utterance_id);
+                if (existing) {
+                  return prev.map(u => u.utterance_id === event.utterance_id ? event : u);
+                }
+                return [...prev, event];
+              });
             }}
             triggerKBSearch={async (query, context) => {
               console.log('[Live] KB search triggered:', { query, context });

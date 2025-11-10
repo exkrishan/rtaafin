@@ -114,7 +114,7 @@ export default function CentralCallView({
       </div>
 
       {/* Call Controls */}
-      <div className="px-6 py-4 border-b border-gray-200 bg-gray-50">
+      <div className="px-6 py-4 border-b border-gray-200">
         <CallControls
           onMute={onMute}
           onHold={onHold}
@@ -125,24 +125,6 @@ export default function CentralCallView({
           onComplete={onComplete}
           onEndCall={onEndCall}
         />
-      </div>
-
-      {/* Call Details */}
-      <div className="px-6 py-3 border-b border-gray-200 bg-gray-50">
-        <div className="grid grid-cols-4 gap-4 text-xs text-gray-600">
-          <div>
-            <span className="text-gray-500">Campaign:</span> <span className="text-gray-900 font-medium">whatsapp_chat</span>
-          </div>
-          <div>
-            <span className="text-gray-500">Call Type:</span> <span className="text-gray-900 font-medium">Manual Dial</span>
-          </div>
-          <div>
-            <span className="text-gray-500">Queue:</span> <span className="text-gray-900 font-medium">--</span>
-          </div>
-          <div>
-            <span className="text-gray-500">DID:</span> <span className="text-gray-900 font-medium">NODID</span>
-          </div>
-        </div>
       </div>
 
       {/* Tabs */}
