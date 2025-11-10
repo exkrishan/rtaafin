@@ -27,6 +27,7 @@ export type Suggestion = {
 export interface AutoDispositionModalProps {
   open: boolean;
   onClose: () => void;
+  onBack?: () => void;
   callId: string;
   tenantId?: string;
   suggested?: Suggestion[]; // sorted by score desc
