@@ -435,31 +435,33 @@ export default function AutoDispositionModal({
                 const newCode = e.target.value;
                 setSelectedDisposition(newCode);
                 // Find the selected disposition to get its ID
-                const selected = allDispositions.find(d => d.code === newCode);
+                const selected = allDispositions.find(d => d.code === newCode) || 
+                                currentSuggestions.find(s => s.code === newCode);
                 setSelectedDispositionId(selected?.id || null);
                 // Clear sub-disposition when disposition changes
                 setSelectedSubDisposition('');
                 setSelectedSubDispositionId(null);
               }}
-              disabled={isLoading}
-              className="w-full rounded-md border border-border-soft p-2 text-sm text-gray-900 bg-panel-bg focus:outline-none focus:ring-2 focus:ring-brand/20 focus:border-brand disabled:cursor-not-allowed disabled:bg-gray-50"
+              disabled={isLoading || (allDispositions.length === 0 && currentSuggestions.length === 0)}
+              className="w-full rounded-md border border-gray-300 p-2.5 text-sm text-gray-900 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:cursor-not-allowed disabled:bg-gray-100 disabled:text-gray-500"
               aria-label="Select disposition"
+              required
             >
-              <option value="">Select disposition...</option>
+              <option value="">-- Select disposition --</option>
               {allDispositions.length > 0 ? (
                 allDispositions.map((disposition) => (
                   <option key={disposition.code} value={disposition.code}>
-                    {disposition.title}
+                    {disposition.title || disposition.label || disposition.code}
                   </option>
                 ))
               ) : currentSuggestions.length > 0 ? (
                 currentSuggestions.map((suggestion) => (
                   <option key={suggestion.code} value={suggestion.code}>
-                    {suggestion.title}
+                    {suggestion.title} {suggestion.score ? `(${Math.round(suggestion.score * 100)}%)` : ''}
                   </option>
                 ))
               ) : (
-                <option value="">Loading dispositions...</option>
+                <option value="" disabled>Loading dispositions...</option>
               )}
             </select>
             {/* Show auto-selected indicator if suggested disposition matches */}
@@ -483,24 +485,24 @@ export default function AutoDispositionModal({
                 const newCode = e.target.value;
                 setSelectedSubDisposition(newCode);
                 // Find the selected sub-disposition to get its ID
-                const selected = subDispositions.find(sd => sd.code === newCode);
+                const selected = subDispositions.find(sd => sd.code === newCode || sd.title === newCode);
                 setSelectedSubDispositionId(selected?.id || null);
               }}
               disabled={isLoading || !selectedDisposition || subDispositions.length === 0}
-              className="w-full rounded-md border border-border-soft p-2 text-sm text-gray-900 bg-panel-bg focus:outline-none focus:ring-2 focus:ring-brand/20 focus:border-brand disabled:cursor-not-allowed disabled:bg-gray-50"
+              className="w-full rounded-md border border-gray-300 p-2.5 text-sm text-gray-900 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:cursor-not-allowed disabled:bg-gray-100 disabled:text-gray-500"
               aria-label="Select sub-disposition"
             >
-              <option value="">Select sub-disposition...</option>
+              <option value="">-- Select sub-disposition --</option>
               {subDispositions.length > 0 ? (
                 subDispositions.map((subDisp) => (
-                  <option key={subDisp.code} value={subDisp.code}>
-                    {subDisp.title}
+                  <option key={subDisp.code || subDisp.title} value={subDisp.code || subDisp.title}>
+                    {subDisp.title || subDisp.label || subDisp.code}
                   </option>
                 ))
               ) : selectedDisposition ? (
-                <option value="">Loading sub-dispositions...</option>
+                <option value="" disabled>Loading sub-dispositions...</option>
               ) : (
-                <option value="">Select a disposition first</option>
+                <option value="" disabled>Select a disposition first</option>
               )}
             </select>
             {currentSuggestions.length > 0 && 
@@ -524,8 +526,8 @@ export default function AutoDispositionModal({
                 onChange={(e) => setNotes(e.target.value)}
                 disabled={isLoading}
                 rows={5}
-                className="w-full rounded-lg border border-border-soft p-3 text-sm text-gray-900 bg-panel-bg resize-none focus:outline-none focus:ring-2 focus:ring-brand/20 focus:border-brand disabled:cursor-not-allowed disabled:bg-gray-50"
-                style={{ height: '120px' }}
+                className="w-full rounded-lg border border-border-soft p-3 text-sm text-gray-900 bg-panel-bg resize-none focus:outline-none focus:ring-2 focus:ring-brand/20 focus:border-brand disabled:cursor-not-allowed disabled:bg-gray-50 disabled:text-gray-500"
+                style={{ height: '120px', color: '#111827' }}
                 aria-label="Call notes"
               />
               {/* LLM Icon Badge */}

@@ -444,18 +444,49 @@ export default function DemoPage() {
           }}
           triggerKBSearch={async (query, context) => {
             console.log('[Demo] KB search triggered:', { query, context });
-            // Mock KB search results with intent detection basis
-            return [
-              {
-                id: 'kb-1',
-                title: 'Card Replacement Process',
-                snippet: 'For card replacement requests, verify customer identity and check fraud status...',
-                confidence: 0.85,
-                intent: 'credit_card_replacement',
-                intentConfidence: 0.92,
-                url: 'https://kb.example.com/card-replacement',
-              },
-            ];
+            
+            // Call actual KB search API
+            try {
+              const response = await fetch(`/api/kb/search?q=${encodeURIComponent(query)}&tenantId=${tenantId}&limit=10`);
+              const payload = await response.json();
+              
+              if (payload.ok && Array.isArray(payload.results)) {
+                return payload.results.map((article: any) => ({
+                  id: article.id || article.code,
+                  title: article.title,
+                  snippet: article.snippet || '',
+                  confidence: article.score || 0.8,
+                  url: article.url,
+                }));
+              }
+              
+              // Fallback to mock data if API fails
+              return [
+                {
+                  id: 'kb-1',
+                  title: 'Card Replacement Process',
+                  snippet: 'For card replacement requests, verify customer identity and check fraud status...',
+                  confidence: 0.85,
+                  intent: 'credit_card_replacement',
+                  intentConfidence: 0.92,
+                  url: 'https://kb.example.com/card-replacement',
+                },
+              ];
+            } catch (err) {
+              console.error('[Demo] KB search API error:', err);
+              // Return mock data on error
+              return [
+                {
+                  id: 'kb-1',
+                  title: 'Card Replacement Process',
+                  snippet: 'For card replacement requests, verify customer identity and check fraud status...',
+                  confidence: 0.85,
+                  intent: 'credit_card_replacement',
+                  intentConfidence: 0.92,
+                  url: 'https://kb.example.com/card-replacement',
+                },
+              ];
+            }
           }}
           fetchDispositionSummary={async (interactionId) => {
             console.log('[Demo] Fetching disposition for:', interactionId);
