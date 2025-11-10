@@ -531,7 +531,7 @@ export default function AutoDispositionModal({
           {/* Notes Textarea */}
           <div>
             <label htmlFor="notes-textarea" className="block text-sm font-semibold text-gray-900 mb-2">
-              Call Notes
+              Notes (AI-generated, editable)
             </label>
             <div className="relative">
               <textarea
