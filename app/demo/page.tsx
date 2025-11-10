@@ -48,6 +48,13 @@ export default function DemoPage() {
   const [isPaused, setIsPaused] = useState(false);
   const [callEnded, setCallEnded] = useState(false);
   const [dispositionOpen, setDispositionOpen] = useState(false);
+  const [transcriptUtterances, setTranscriptUtterances] = useState<Array<{
+    utterance_id: string;
+    speaker: 'agent' | 'customer';
+    text: string;
+    confidence: number;
+    timestamp: string;
+  }>>([]);
   const [dispositionData, setDispositionData] = useState<{
     suggested: Suggestion[];
     autoNotes: string;
@@ -411,7 +418,7 @@ export default function DemoPage() {
               callDuration={isCallActive ? '00:00' : '00:00'}
               callId={callId}
               isCallActive={isCallActive}
-              transcript={demoTranscript.map((line, idx) => ({
+              transcript={transcriptUtterances.length > 0 ? transcriptUtterances : demoTranscript.map((line, idx) => ({
                 utterance_id: `demo-${idx}`,
                 speaker: line.speaker.toLowerCase() as 'agent' | 'customer',
                 text: line.text,
@@ -451,6 +458,13 @@ export default function DemoPage() {
           isCallActive={isCallActive}
           onTranscriptEvent={(event) => {
             console.log('[Demo] Transcript event:', event);
+            setTranscriptUtterances(prev => {
+              const existing = prev.find(u => u.utterance_id === event.utterance_id);
+              if (existing) {
+                return prev.map(u => u.utterance_id === event.utterance_id ? event : u);
+              }
+              return [...prev, event];
+            });
           }}
           triggerKBSearch={async (query, context) => {
             console.log('[Demo] KB search triggered:', { query, context });
