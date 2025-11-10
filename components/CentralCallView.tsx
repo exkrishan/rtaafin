@@ -4,11 +4,20 @@ import { useState } from 'react';
 import type { Customer } from './CustomerDetailsHeader';
 import CallControls from './CallControls';
 
+export interface TranscriptUtterance {
+  utterance_id: string;
+  speaker: 'agent' | 'customer';
+  text: string;
+  confidence?: number;
+  timestamp: string;
+}
+
 export interface CentralCallViewProps {
   customer: Customer | null;
   callDuration: string;
   callId?: string;
   isCallActive: boolean;
+  transcript?: TranscriptUtterance[];
   onMute?: () => void;
   onHold?: () => void;
   onTransfer?: () => void;
@@ -26,6 +35,7 @@ export default function CentralCallView({
   callDuration,
   callId,
   isCallActive,
+  transcript = [],
   onMute,
   onHold,
   onTransfer,
@@ -37,7 +47,7 @@ export default function CentralCallView({
   onOpenCRM,
   onOpenCaseHistory,
 }: CentralCallViewProps) {
-  const [activeTab, setActiveTab] = useState<'customer' | 'crm'>('customer');
+  const [activeTab, setActiveTab] = useState<'transcript' | 'customer' | 'crm'>('transcript');
 
   if (!customer) {
     return (
@@ -138,6 +148,16 @@ export default function CentralCallView({
       {/* Tabs */}
       <div className="flex border-b border-gray-200">
         <button
+          onClick={() => setActiveTab('transcript')}
+          className={`px-6 py-3 text-sm font-medium transition-colors ${
+            activeTab === 'transcript'
+              ? 'text-blue-600 border-b-2 border-blue-600'
+              : 'text-gray-600 hover:text-gray-900'
+          }`}
+        >
+          Transcript
+        </button>
+        <button
           onClick={() => setActiveTab('customer')}
           className={`px-6 py-3 text-sm font-medium transition-colors ${
             activeTab === 'customer'
@@ -164,6 +184,83 @@ export default function CentralCallView({
 
       {/* Tab Content */}
       <div className="flex-1 overflow-y-auto">
+        {activeTab === 'transcript' && (
+          <div className="p-6">
+            {/* Call Details */}
+            <div className="mb-4 pb-4 border-b border-gray-200">
+              <div className="grid grid-cols-4 gap-4 text-xs text-gray-600">
+                <div>
+                  <span className="text-gray-500">Campaign:</span> <span className="text-gray-900 font-medium">Service</span>
+                </div>
+                <div>
+                  <span className="text-gray-500">Queue:</span> <span className="text-gray-900 font-medium">Card</span>
+                </div>
+                <div>
+                  <span className="text-gray-500">Call Type:</span> <span className="text-gray-900 font-medium">Inbound</span>
+                </div>
+                <div>
+                  <span className="text-gray-500">DID:</span> <span className="text-gray-900 font-medium">080 XXXXXXXX</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Transcript Messages */}
+            <div className="space-y-4">
+              {transcript.length === 0 ? (
+                <div className="text-center py-12 text-sm text-gray-500">
+                  Waiting for transcript...
+                </div>
+              ) : (
+                transcript.map((utterance) => {
+                  // Filter out system messages
+                  if (utterance.text.includes('Connected to realtime stream') || utterance.text.includes('clientId:')) {
+                    return null;
+                  }
+
+                  return (
+                    <div
+                      key={utterance.utterance_id}
+                      className={`flex gap-3 ${
+                        utterance.speaker === 'agent' ? 'justify-end' : 'justify-start'
+                      }`}
+                    >
+                      {utterance.speaker === 'customer' && (
+                        <div className="w-8 h-8 rounded-full bg-gray-400 flex items-center justify-center text-white font-semibold text-sm flex-shrink-0">
+                          {customer ? customer.name.charAt(0).toUpperCase() : 'C'}
+                        </div>
+                      )}
+                      <div className={`flex-1 max-w-[70%] ${utterance.speaker === 'agent' ? 'order-2' : ''}`}>
+                        <div className="flex items-center gap-2 mb-1">
+                          <span className="text-xs font-medium text-gray-700">
+                            {utterance.speaker === 'agent' ? 'You' : customer?.name || 'Customer'}
+                          </span>
+                          <span className="text-xs text-gray-500">
+                            {new Date(utterance.timestamp).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}
+                          </span>
+                        </div>
+                        <div
+                          className={`p-3 rounded-lg ${
+                            utterance.speaker === 'agent'
+                              ? 'bg-blue-50 text-gray-900'
+                              : 'bg-gray-100 text-gray-900'
+                          }`}
+                        >
+                          <p className="text-sm leading-relaxed">{utterance.text}</p>
+                        </div>
+                      </div>
+                      {utterance.speaker === 'agent' && (
+                        <div className="w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center text-white font-semibold text-sm flex-shrink-0 order-3">
+                          P
+                        </div>
+                      )}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        )}
+
         {activeTab === 'customer' && (
           <div className="p-6 space-y-6">
             {/* Customer Information */}

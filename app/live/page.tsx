@@ -4,8 +4,9 @@ import { useState, useEffect } from 'react';
 import TranscriptPanel from '@/components/TranscriptPanel';
 import AutoDispositionModal, { Suggestion } from '@/components/AutoDispositionModal';
 import AgentAssistPanelV2, { KBArticle, DispositionData } from '@/components/AgentAssistPanelV2';
-import CustomerDetailsHeader, { Customer } from '@/components/CustomerDetailsHeader';
-import CallControls from '@/components/CallControls';
+import { Customer } from '@/components/CustomerDetailsHeader';
+import CentralCallView from '@/components/CentralCallView';
+import LeftSidebar from '@/components/LeftSidebar';
 import ToastContainer from '@/components/ToastContainer';
 
 interface EnvCheck {
@@ -258,15 +259,29 @@ export default function LivePage() {
         </p>
       </div>
 
-      {/* Single column layout - Customer Info in center, Agent Assist is right-docked */}
-      <div className="flex flex-col h-[calc(100vh-120px)] p-6 pr-[376px]">
-        {/* Center Column: Customer Info - Main focus like Universal Agent Desktop */}
-        <div className="flex-1 overflow-y-auto">
-          <div className="card h-full flex flex-col">
-            <CustomerDetailsHeader
-              customer={mockCustomer}
+      {/* Main Layout */}
+      <div className="flex h-[calc(100vh-120px)]">
+        {/* Left Sidebar */}
+        <LeftSidebar />
+
+        {/* Main Content Area */}
+        <div className="flex-1 flex flex-col pr-[376px]">
+          {/* Center Column: Unified Call View */}
+          <div className="flex-1 overflow-y-auto p-6">
+            <CentralCallView
+              customer={callId ? mockCustomer : null}
               callDuration="00:00"
               callId={callId || undefined}
+              isCallActive={!!callId}
+              transcript={[]} // TODO: Collect from AgentAssistPanelV2
+              onMute={() => console.log('[Live] Mute clicked')}
+              onHold={() => console.log('[Live] Hold clicked')}
+              onTransfer={() => console.log('[Live] Transfer clicked')}
+              onConference={() => console.log('[Live] Conference clicked')}
+              onKeypad={() => console.log('[Live] Keypad clicked')}
+              onRecord={() => console.log('[Live] Record clicked')}
+              onComplete={() => console.log('[Live] Complete clicked')}
+              onEndCall={() => console.log('[Live] End call clicked')}
               onOpenCRM={() => {
                 console.log('[Live] Open CRM clicked');
                 window.open(`https://crm.example.com/customer/${mockCustomer.id}`, '_blank');
@@ -276,30 +291,6 @@ export default function LivePage() {
                 window.open(`https://crm.example.com/cases/${mockCustomer.id}`, '_blank');
               }}
             />
-            <div className="flex-1 p-6 flex flex-col items-center">
-              {callId ? (
-                <CallControls
-                  onMute={() => console.log('[Live] Mute clicked')}
-                  onHold={() => console.log('[Live] Hold clicked')}
-                  onTransfer={() => console.log('[Live] Transfer clicked')}
-                  onConference={() => console.log('[Live] Conference clicked')}
-                  onKeypad={() => console.log('[Live] Keypad clicked')}
-                  onRecord={() => console.log('[Live] Record clicked')}
-                  onComplete={() => console.log('[Live] Complete clicked')}
-                  onEndCall={() => console.log('[Live] End call clicked')}
-                />
-              ) : (
-                <div className="flex items-center justify-center h-full text-gray-500">
-                  <div className="text-center">
-                    <svg className="w-16 h-16 mx-auto mb-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-                    </svg>
-                    <p className="text-sm">No Customer Exists</p>
-                    <p className="text-xs mt-2">Please check the customer in CRM App.</p>
-                  </div>
-                </div>
-              )}
-            </div>
           </div>
         </div>
 
