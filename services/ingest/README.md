@@ -73,6 +73,9 @@ This service provides a WebSocket endpoint (`wss://<host>:<PORT>/v1/ingest`) tha
 | `ACK_INTERVAL` | ACK every N frames | `10` |
 | `SSL_KEY_PATH` | Path to SSL private key (optional) | - |
 | `SSL_CERT_PATH` | Path to SSL certificate (optional) | - |
+| `EXO_BRIDGE_ENABLED` | Enable Exotel→Deepgram bridge feature | `false` |
+| `EXO_MAX_BUFFER_MS` | Max buffer duration for fallback (100-10000ms) | `500` |
+| `EXO_IDLE_CLOSE_S` | Idle timeout before closing connection (1-300s) | `10` |
 
 ## API
 

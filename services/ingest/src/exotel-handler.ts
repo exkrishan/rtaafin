@@ -23,15 +23,47 @@ export interface ExotelConnectionState {
   started: boolean;
 }
 
+interface BoundedBuffer {
+  frames: Array<{ frame: AudioFrame; timestamp: number }>;
+  maxDurationMs: number;
+  totalDurationMs: number;
+}
+
 export class ExotelHandler {
   private pubsub: PubSubAdapter;
   private connections: Map<string, ExotelConnectionState> = new Map();
+  private boundedBuffers: Map<string, BoundedBuffer> = new Map();
+  private exoBridgeEnabled: boolean;
+  private exoMaxBufferMs: number;
+  // Metrics counters (simple in-memory for now)
+  private metrics = {
+    framesIn: 0,
+    bytesIn: 0,
+    bufferDrops: 0,
+    publishFailures: 0,
+  };
 
   constructor(pubsub: PubSubAdapter) {
     this.pubsub = pubsub;
+    this.exoBridgeEnabled = process.env.EXO_BRIDGE_ENABLED === 'true';
+    this.exoMaxBufferMs = parseInt(process.env.EXO_MAX_BUFFER_MS || '500', 10);
+    
+    if (this.exoBridgeEnabled) {
+      console.info('[exotel] Exotel→Deepgram bridge: ENABLED', {
+        maxBufferMs: this.exoMaxBufferMs,
+      });
+    } else {
+      console.info('[exotel] Exotel→Deepgram bridge: DISABLED (set EXO_BRIDGE_ENABLED=true to enable)');
+    }
   }
 
   handleMessage(ws: WebSocket & { exotelState?: ExotelConnectionState }, message: string): void {
+    // Check feature flag - skip processing if bridge is disabled
+    if (!this.exoBridgeEnabled) {
+      console.debug('[exotel] Bridge disabled, skipping message processing');
+      return;
+    }
+
     try {
       const data: ExotelMessage = JSON.parse(message);
 
@@ -312,6 +344,10 @@ export class ExotelHandler {
       state.seq += 1;
       state.lastChunk = media.chunk;
 
+      // Update metrics
+      this.metrics.framesIn += 1;
+      this.metrics.bytesIn += audioBuffer.length;
+
       // Create audio frame in our internal format
       const frame: AudioFrame = {
         tenant_id: state.accountSid || 'exotel',
@@ -323,8 +359,16 @@ export class ExotelHandler {
         audio: audioBuffer,
       };
 
-      // Publish to pub/sub
+      // Publish to pub/sub with bounded buffer fallback
       this.pubsub.publish(frame).then(() => {
+        // Clear bounded buffer on successful publish
+        const callId = frame.interaction_id;
+        const buffer = this.boundedBuffers.get(callId);
+        if (buffer && buffer.frames.length > 0) {
+          // Try to flush any buffered frames
+          this.flushBoundedBuffer(callId);
+        }
+
         // Log first frame and every 10th frame
         if (state.seq === 1 || state.seq % 10 === 0) {
           console.info('[exotel] ✅ Published audio frame', {
@@ -335,15 +379,23 @@ export class ExotelHandler {
             interaction_id: frame.interaction_id,
             tenant_id: frame.tenant_id,
             audio_size: frame.audio.length,
+            metrics: {
+              framesIn: this.metrics.framesIn,
+              bytesIn: this.metrics.bytesIn,
+            },
           });
         }
       }).catch((error) => {
-        console.error('[exotel] ❌ CRITICAL: Failed to publish frame:', {
+        this.metrics.publishFailures += 1;
+        console.error('[exotel] ❌ Failed to publish frame, using bounded buffer fallback:', {
           error: error.message,
           stream_sid: state.streamSid,
           call_sid: state.callSid,
           seq: state.seq,
         });
+
+        // Add to bounded buffer as fallback
+        this.addToBoundedBuffer(frame);
       });
     } catch (error: any) {
       console.error('[exotel] ❌ Failed to decode base64 audio payload:', {
@@ -391,11 +443,104 @@ export class ExotelHandler {
 
       this.connections.delete(state.streamSid);
       ws.exotelState = undefined;
+      
+      // Clean up bounded buffer for this call (reuse interactionId from above)
+      this.boundedBuffers.delete(interactionId);
     }
   }
 
   getConnectionState(streamSid: string): ExotelConnectionState | undefined {
     return this.connections.get(streamSid);
+  }
+
+  /**
+   * Add frame to bounded buffer (fallback when pub/sub fails)
+   */
+  private addToBoundedBuffer(frame: AudioFrame): void {
+    const callId = frame.interaction_id;
+    let buffer = this.boundedBuffers.get(callId);
+    
+    if (!buffer) {
+      buffer = {
+        frames: [],
+        maxDurationMs: this.exoMaxBufferMs,
+        totalDurationMs: 0,
+      };
+      this.boundedBuffers.set(callId, buffer);
+    }
+
+    // Calculate frame duration (approximate)
+    const frameDurationMs = (frame.audio.length / (frame.sample_rate * 2)) * 1000; // 2 bytes per sample for PCM16
+    const now = Date.now();
+
+    // Add frame
+    buffer.frames.push({ frame, timestamp: now });
+    buffer.totalDurationMs += frameDurationMs;
+
+    // Trim buffer if exceeds max duration
+    while (buffer.totalDurationMs > buffer.maxDurationMs && buffer.frames.length > 0) {
+      const dropped = buffer.frames.shift();
+      if (dropped) {
+        const droppedDurationMs = (dropped.frame.audio.length / (dropped.frame.sample_rate * 2)) * 1000;
+        buffer.totalDurationMs -= droppedDurationMs;
+        this.metrics.bufferDrops += 1;
+        
+        // Rate-limit warning (log every 10th drop)
+        if (this.metrics.bufferDrops % 10 === 0) {
+          console.warn('[exotel] ⚠️ Bounded buffer full, dropping oldest frames', {
+            callId,
+            bufferDepth: buffer.frames.length,
+            totalDurationMs: buffer.totalDurationMs.toFixed(0),
+            maxDurationMs: buffer.maxDurationMs,
+            drops: this.metrics.bufferDrops,
+          });
+        }
+      }
+    }
+  }
+
+  /**
+   * Flush bounded buffer (try to publish buffered frames)
+   */
+  private flushBoundedBuffer(callId: string): void {
+    const buffer = this.boundedBuffers.get(callId);
+    if (!buffer || buffer.frames.length === 0) {
+      return;
+    }
+
+    const framesToPublish = [...buffer.frames];
+    buffer.frames = [];
+    buffer.totalDurationMs = 0;
+
+    // Try to publish each frame
+    let published = 0;
+    for (const { frame } of framesToPublish) {
+      this.pubsub.publish(frame).then(() => {
+        published += 1;
+      }).catch((error) => {
+        // If still failing, re-add to buffer
+        this.addToBoundedBuffer(frame);
+      });
+    }
+
+    if (published > 0) {
+      console.info('[exotel] ✅ Flushed bounded buffer', {
+        callId,
+        published,
+        total: framesToPublish.length,
+      });
+    }
+  }
+
+  /**
+   * Get metrics for health endpoint
+   */
+  getMetrics() {
+    return {
+      ...this.metrics,
+      bufferDepth: Array.from(this.boundedBuffers.values()).reduce((sum, buf) => sum + buf.frames.length, 0),
+      activeBuffers: this.boundedBuffers.size,
+    };
   }
 }
 

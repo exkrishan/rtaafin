@@ -39,6 +39,14 @@ interface ConnectionState {
   lastReconnectTime: number;
   maxReconnectAttempts: number;
   sampleRate?: number; // Store for reconnection
+  // Exotel Bridge: Idle timeout tracking
+  lastFrameTime?: number; // Timestamp of last audio frame received
+  idleTimeoutMs?: number; // Idle timeout duration in milliseconds
+  idleTimeoutTimer?: NodeJS.Timeout; // Timer for idle timeout
+  // Exotel Bridge: Early-audio filtering
+  earlyAudioFilterEnabled?: boolean; // Whether to filter early audio (ringing, etc.)
+  speechDetected?: boolean; // Whether speech has been detected
+  firstFrameTime?: number; // Timestamp of first audio frame
 }
 
 interface DeepgramMetrics {
@@ -199,14 +207,22 @@ export class DeepgramProvider implements AsrProvider {
       // CRITICAL: Deepgram requires specific configuration for telephony audio (8kHz)
       // Note: Deepgram supports 8kHz sample rate, but default is 24kHz
       // For telephony (8kHz), we must explicitly set sample_rate
+      // Support both DEEPGRAM_MODEL (legacy) and DG_MODEL (new bridge) env vars
+      const model = process.env.DG_MODEL || process.env.DEEPGRAM_MODEL || 'nova-3';
+      const encoding = process.env.DG_ENCODING || 'linear16';
+      const channels = parseInt(process.env.DG_CHANNELS || '1', 10);
+      const smartFormat = process.env.DG_SMART_FORMAT !== 'false' && process.env.DEEPGRAM_SMART_FORMAT !== 'false'; // Default true
+      const diarize = process.env.DG_DIARIZE === 'true'; // Default false
+      
       const connectionConfig = {
-        model: process.env.DEEPGRAM_MODEL || 'nova-2',
+        model,
         language: process.env.DEEPGRAM_LANGUAGE || 'en-US',
-        smart_format: process.env.DEEPGRAM_SMART_FORMAT !== 'false', // Default true
+        smart_format: smartFormat,
         interim_results: process.env.DEEPGRAM_INTERIM_RESULTS !== 'false', // Default true
-        sample_rate: sampleRate, // CRITICAL: Must match actual audio sample rate (8kHz for telephony)
-        encoding: 'linear16', // 16-bit PCM, little-endian (required for raw audio)
-        channels: 1, // Mono audio (required for telephony)
+        sample_rate: parseInt(process.env.DG_SAMPLE_RATE || String(sampleRate), 10), // Use DG_SAMPLE_RATE if set, else use passed sampleRate
+        encoding, // Support DG_ENCODING env var (default linear16)
+        channels, // Support DG_CHANNELS env var (default 1)
+        diarize, // Support DG_DIARIZE env var (default false)
       };
       
       console.info(`[DeepgramProvider] Connection config:`, {
@@ -401,6 +417,10 @@ export class DeepgramProvider implements AsrProvider {
       // Configuration from environment variables
       const maxReconnectAttempts = parseInt(process.env.DEEPGRAM_MAX_RECONNECT_ATTEMPTS || '3', 10);
       
+      // Exotel Bridge: Idle timeout configuration
+      const exoIdleCloseS = parseInt(process.env.EXO_IDLE_CLOSE_S || '10', 10);
+      const exoIdleCloseMs = exoIdleCloseS * 1000;
+      
       state = {
         connection,
         socket,
@@ -415,6 +435,14 @@ export class DeepgramProvider implements AsrProvider {
         lastReconnectTime: 0,
         maxReconnectAttempts,
         sampleRate,
+        // Exotel Bridge: Track last frame time for idle timeout
+        lastFrameTime: Date.now(),
+        idleTimeoutMs: exoIdleCloseMs,
+        idleTimeoutTimer: undefined,
+        // Exotel Bridge: Early-audio filtering (suppress transcripts until speech detected)
+        earlyAudioFilterEnabled: process.env.EXO_EARLY_AUDIO_FILTER !== 'false', // Default true
+        speechDetected: false,
+        firstFrameTime: Date.now(),
       };
 
       // Set up event handlers
@@ -722,6 +750,37 @@ export class DeepgramProvider implements AsrProvider {
           const isFinal = data?.is_final ?? false;
           const confidence = data?.channel?.alternatives?.[0]?.confidence ?? 0.9;
 
+          // Exotel Bridge: Early-audio filtering - suppress transcripts until speech detected
+          if (state.earlyAudioFilterEnabled && !state.speechDetected) {
+            // Simple VAD: Check if transcript has actual speech (not just silence/empty)
+            const hasSpeech = transcriptText && transcriptText.trim().length > 0 && 
+                             transcriptText.trim().toLowerCase() !== 'um' && 
+                             transcriptText.trim().toLowerCase() !== 'uh';
+            
+            // Also check time since first frame (allow after 2 seconds even if no speech)
+            const timeSinceFirstFrame = state.firstFrameTime ? Date.now() - state.firstFrameTime : 0;
+            const allowAfterTime = timeSinceFirstFrame >= 2000; // 2 seconds
+            
+            if (hasSpeech || allowAfterTime) {
+              state.speechDetected = true;
+              console.info(`[DeepgramProvider] 🎤 Speech detected for ${interactionId}`, {
+                interactionId,
+                transcript: transcriptText?.substring(0, 50),
+                timeSinceFirstFrame,
+                detectedBy: hasSpeech ? 'transcript' : 'timeout',
+              });
+            } else {
+              // Suppress transcript - still early audio (ringing/early frames)
+              console.debug(`[DeepgramProvider] 🔇 Suppressing early-audio transcript for ${interactionId}`, {
+                interactionId,
+                transcript: transcriptText?.substring(0, 50),
+                timeSinceFirstFrame,
+                note: 'Early audio filtering active - waiting for speech or 2s timeout',
+              });
+              return; // Skip this transcript
+            }
+          }
+
           if (transcriptText && transcriptText.trim().length > 0) {
             const transcript: Transcript = {
               type: isFinal ? 'final' : 'partial',
@@ -752,6 +811,23 @@ export class DeepgramProvider implements AsrProvider {
                   audioSize: completedSend.audioSize,
                   chunkSizeMs: completedSend.chunkSizeMs,
                 });
+                
+                // Exotel Bridge: Track latency metrics
+                if (!isFinal) {
+                  // First interim transcript latency
+                  if (this.metrics.firstInterimLatencyMs.length === 0 || 
+                      !state.lastTranscript || 
+                      state.lastTranscript.type === 'final') {
+                    this.metrics.firstInterimLatencyMs.push(processingTime);
+                  }
+                } else {
+                  // Final transcript latency
+                  // Track as average latency (can be enhanced to track per-call)
+                  const currentAvg = this.metrics.averageLatencyMs;
+                  const count = this.metrics.transcriptsReceived;
+                  this.metrics.averageLatencyMs = 
+                    (currentAvg * (count - 1) + processingTime) / count;
+                }
               }
             }
 
@@ -1393,6 +1469,37 @@ export class DeepgramProvider implements AsrProvider {
           
           stateToUse.lastSendTime = Date.now();
           
+          // Exotel Bridge: Update last frame time for idle timeout tracking
+          if (stateToUse.lastFrameTime !== undefined) {
+            stateToUse.lastFrameTime = Date.now();
+            
+            // Reset idle timeout timer
+            if (stateToUse.idleTimeoutTimer) {
+              clearTimeout(stateToUse.idleTimeoutTimer);
+            }
+            
+            // Set up new idle timeout timer
+            if (stateToUse.idleTimeoutMs && stateToUse.idleTimeoutMs > 0) {
+              stateToUse.idleTimeoutTimer = setTimeout(() => {
+                const currentState = this.connections.get(interactionId);
+                if (currentState && currentState.lastFrameTime) {
+                  const idleDuration = Date.now() - currentState.lastFrameTime;
+                  if (idleDuration >= currentState.idleTimeoutMs!) {
+                    console.info(`[DeepgramProvider] ⏱️ Idle timeout reached for ${interactionId} (${idleDuration}ms idle)`, {
+                      interactionId,
+                      idleDurationMs: idleDuration,
+                      timeoutMs: currentState.idleTimeoutMs,
+                    });
+                    // Close connection due to idle timeout
+                    this.closeConnection(interactionId).catch((err) => {
+                      console.error(`[DeepgramProvider] Error closing idle connection for ${interactionId}:`, err);
+                    });
+                  }
+                }
+              }, stateToUse.idleTimeoutMs);
+            }
+          }
+          
           // Track pending send for timeout detection
           const pendingSend = {
             seq,
@@ -1546,6 +1653,12 @@ export class DeepgramProvider implements AsrProvider {
       if (state.keepAliveInterval) {
         clearInterval(state.keepAliveInterval);
         state.keepAliveInterval = undefined;
+      }
+      
+      // Exotel Bridge: Clear idle timeout timer
+      if (state.idleTimeoutTimer) {
+        clearTimeout(state.idleTimeoutTimer);
+        state.idleTimeoutTimer = undefined;
       }
       
       // CRITICAL: Send CloseStream message before closing

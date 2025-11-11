@@ -66,16 +66,44 @@ class AsrWorker {
   constructor() {
     this.pubsub = createPubSubAdapterFromEnv();
     
+    // Check Exotel Bridge feature flag
+    const exoBridgeEnabled = process.env.EXO_BRIDGE_ENABLED === 'true';
+    
     // Validate provider configuration before creating
     // This ensures we fail fast if required env vars are missing
     if (ASR_PROVIDER === 'deepgram' && !process.env.DEEPGRAM_API_KEY) {
-      console.error('[ASRWorker] ❌ CRITICAL: ASR_PROVIDER=deepgram but DEEPGRAM_API_KEY is not set!');
-      console.error('[ASRWorker] The system will NOT fall back to mock provider.');
-      console.error('[ASRWorker] Please set DEEPGRAM_API_KEY environment variable or change ASR_PROVIDER to "mock".');
-      throw new Error(
-        'DEEPGRAM_API_KEY is required when ASR_PROVIDER=deepgram. ' +
-        'No fallback to mock provider - this ensures proper testing.'
-      );
+      if (exoBridgeEnabled) {
+        console.error('[ASRWorker] ❌ CRITICAL: EXO_BRIDGE_ENABLED=true but DEEPGRAM_API_KEY is not set!');
+        console.error('[ASRWorker] Exotel→Deepgram bridge requires DEEPGRAM_API_KEY. Disabling STT to avoid broken prod.');
+        console.error('[ASRWorker] Please set DEEPGRAM_API_KEY environment variable or set EXO_BRIDGE_ENABLED=false.');
+        // Don't throw - log warning and continue (bridge will be disabled)
+        console.warn('[ASRWorker] ⚠️ Continuing without Deepgram STT - bridge feature disabled');
+      } else {
+        console.error('[ASRWorker] ❌ CRITICAL: ASR_PROVIDER=deepgram but DEEPGRAM_API_KEY is not set!');
+        console.error('[ASRWorker] The system will NOT fall back to mock provider.');
+        console.error('[ASRWorker] Please set DEEPGRAM_API_KEY environment variable or change ASR_PROVIDER to "mock".');
+        throw new Error(
+          'DEEPGRAM_API_KEY is required when ASR_PROVIDER=deepgram. ' +
+          'No fallback to mock provider - this ensures proper testing.'
+        );
+      }
+    }
+    
+    // Log Exotel Bridge status
+    if (exoBridgeEnabled) {
+      const deepgramKey = process.env.DEEPGRAM_API_KEY;
+      const keyMasked = deepgramKey ? `${deepgramKey.substring(0, 8)}...${deepgramKey.substring(deepgramKey.length - 4)}` : 'NOT SET';
+      console.info('[ASRWorker] Exotel→Deepgram bridge: ENABLED', {
+        deepgramApiKey: keyMasked,
+        model: process.env.DG_MODEL || process.env.DEEPGRAM_MODEL || 'nova-3',
+        encoding: process.env.DG_ENCODING || 'linear16',
+        sampleRate: process.env.DG_SAMPLE_RATE || '8000',
+        channels: process.env.DG_CHANNELS || '1',
+        smartFormat: process.env.DG_SMART_FORMAT !== 'false',
+        diarize: process.env.DG_DIARIZE === 'true',
+      });
+    } else {
+      console.info('[ASRWorker] Exotel→Deepgram bridge: DISABLED (set EXO_BRIDGE_ENABLED=true to enable)');
     }
     
     try {
@@ -195,13 +223,39 @@ class AsrWorker {
 
     // Start HTTP server
     this.server.listen(PORT, () => {
+      const exoBridgeEnabled = process.env.EXO_BRIDGE_ENABLED === 'true';
       console.info(`[ASRWorker] Server listening on port ${PORT}`);
       console.info(`[ASRWorker] Metrics: http://localhost:${PORT}/metrics`);
       console.info(`[ASRWorker] Health: http://localhost:${PORT}/health`);
+      
+      // Log condensed config summary (mask secrets)
+      const configSummary: any = {
+        asrProvider: ASR_PROVIDER,
+        exoBridgeEnabled,
+      };
+      
+      if (exoBridgeEnabled && ASR_PROVIDER === 'deepgram') {
+        const deepgramKey = process.env.DEEPGRAM_API_KEY;
+        configSummary.deepgramApiKey = deepgramKey ? `${deepgramKey.substring(0, 8)}...${deepgramKey.substring(deepgramKey.length - 4)}` : 'NOT SET';
+        configSummary.model = process.env.DG_MODEL || process.env.DEEPGRAM_MODEL || 'nova-3';
+        configSummary.encoding = process.env.DG_ENCODING || 'linear16';
+        configSummary.sampleRate = process.env.DG_SAMPLE_RATE || '8000';
+        configSummary.channels = process.env.DG_CHANNELS || '1';
+        configSummary.diarize = process.env.DG_DIARIZE === 'true';
+      }
+      
+      console.info(`[ASRWorker] Configuration:`, configSummary);
     });
   }
 
   private async handleAudioFrame(msg: any): Promise<void> {
+    // Check Exotel Bridge feature flag - skip processing if bridge is disabled
+    const exoBridgeEnabled = process.env.EXO_BRIDGE_ENABLED === 'true';
+    if (!exoBridgeEnabled) {
+      console.debug('[ASRWorker] Bridge disabled, skipping audio frame processing');
+      return;
+    }
+
     try {
       // Validate audio field exists and is a string
       if (!msg.audio || typeof msg.audio !== 'string') {

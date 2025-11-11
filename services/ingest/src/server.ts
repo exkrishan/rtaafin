@@ -39,9 +39,17 @@ interface ServerConfig {
   supportExotel: boolean;
   pubsubAdapter: string;
   redisUrl?: string;
+  exoBridgeEnabled: boolean;
+  exoMaxBufferMs: number;
+  exoIdleCloseS: number;
 }
 
 function validateAndLoadConfig(): ServerConfig {
+  // Exotel Bridge feature flag
+  const exoBridgeEnabled = process.env.EXO_BRIDGE_ENABLED === 'true';
+  const exoMaxBufferMs = parseInt(process.env.EXO_MAX_BUFFER_MS || '500', 10);
+  const exoIdleCloseS = parseInt(process.env.EXO_IDLE_CLOSE_S || '10', 10);
+
   // PORT: Use process.env.PORT for cloud deployment (Render, etc.), default to 5000
   const port = parseInt(process.env.PORT || '5000', 10);
   if (isNaN(port) || port < 1 || port > 65535) {
@@ -83,6 +91,9 @@ function validateAndLoadConfig(): ServerConfig {
     supportExotel: process.env.SUPPORT_EXOTEL === 'true',
     pubsubAdapter,
     redisUrl: process.env.REDIS_URL,
+    exoBridgeEnabled,
+    exoMaxBufferMs,
+    exoIdleCloseS,
   };
 }
 
@@ -102,6 +113,9 @@ const BUFFER_DURATION_MS = config.bufferDurationMs;
 const ACK_INTERVAL = config.ackInterval;
 const SSL_KEY_PATH = config.sslKeyPath;
 const SSL_CERT_PATH = config.sslCertPath;
+const EXO_BRIDGE_ENABLED = config.exoBridgeEnabled;
+const EXO_MAX_BUFFER_MS = config.exoMaxBufferMs;
+const EXO_IDLE_CLOSE_S = config.exoIdleCloseS;
 
 interface Connection extends WebSocket {
   state?: ConnectionState;
@@ -221,12 +235,28 @@ class IngestionServer {
           'Content-Type': 'application/json',
           'Cache-Control': 'no-cache',
         });
-        res.end(JSON.stringify({
+        const healthResponse: any = {
           status: this.healthStatus.status,
           service: 'ingest',
           pubsub: this.healthStatus.pubsub,
           timestamp: new Date(this.healthStatus.timestamp).toISOString(),
-        }));
+          exotelBridge: EXO_BRIDGE_ENABLED ? 'enabled' : 'disabled',
+        };
+
+        // Add Exotel metrics if bridge is enabled
+        if (EXO_BRIDGE_ENABLED) {
+          const exotelMetrics = this.exotelHandler.getMetrics();
+          healthResponse.exotelMetrics = {
+            framesIn: exotelMetrics.framesIn,
+            bytesIn: exotelMetrics.bytesIn,
+            bufferDrops: exotelMetrics.bufferDrops,
+            publishFailures: exotelMetrics.publishFailures,
+            bufferDepth: exotelMetrics.bufferDepth,
+            activeBuffers: exotelMetrics.activeBuffers,
+          };
+        }
+        
+        res.end(JSON.stringify(healthResponse));
         return;
       }
       
@@ -344,14 +374,29 @@ class IngestionServer {
       console.info(`[server] ✅ Ingestion server listening on port ${PORT}`);
       console.info(`[server] WebSocket endpoint: ws${SSL_KEY_PATH ? 's' : ''}://localhost:${PORT}/v1/ingest`);
       console.info(`[server] Health check: http://localhost:${PORT}/health`);
-      console.info(`[server] Configuration:`, {
+      // Log condensed config summary (mask secrets)
+      const configSummary: any = {
         port: PORT,
         bufferDurationMs: BUFFER_DURATION_MS,
         ackInterval: ACK_INTERVAL,
         pubsubAdapter: config.pubsubAdapter,
         supportExotel: this.supportExotel,
         ssl: !!(SSL_KEY_PATH && SSL_CERT_PATH),
-      });
+        exoBridgeEnabled: EXO_BRIDGE_ENABLED,
+      };
+
+      if (EXO_BRIDGE_ENABLED) {
+        configSummary.exoMaxBufferMs = EXO_MAX_BUFFER_MS;
+        configSummary.exoIdleCloseS = EXO_IDLE_CLOSE_S;
+        console.info(`[server] Exotel→Deepgram bridge: ENABLED`, {
+          maxBufferMs: EXO_MAX_BUFFER_MS,
+          idleCloseS: EXO_IDLE_CLOSE_S,
+        });
+      } else {
+        console.info(`[server] Exotel→Deepgram bridge: DISABLED (set EXO_BRIDGE_ENABLED=true to enable)`);
+      }
+
+      console.info(`[server] Configuration:`, configSummary);
     });
   }
 
