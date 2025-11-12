@@ -131,7 +131,26 @@ class AsrWorker {
           service: 'asr-worker',
           provider: ASR_PROVIDER,
           activeBuffers: this.buffers.size,
+          subscriptions: this.subscriptions.length,
+          exoBridgeEnabled: process.env.EXO_BRIDGE_ENABLED === 'true',
         };
+        
+        // Add buffer details
+        const bufferDetails: any[] = [];
+        for (const [interactionId, buffer] of this.buffers.entries()) {
+          bufferDetails.push({
+            interactionId,
+            chunksCount: buffer.chunks.length,
+            totalAudioMs: buffer.chunks.length > 0 
+              ? ((buffer.chunks.reduce((sum, chunk) => sum + chunk.length, 0) / 2 / buffer.sampleRate) * 1000).toFixed(0)
+              : 0,
+            hasSentInitialChunk: buffer.hasSentInitialChunk,
+            lastChunkReceived: buffer.lastChunkReceived > 0 
+              ? `${Date.now() - buffer.lastChunkReceived}ms ago`
+              : 'never',
+          });
+        }
+        health.buffers = bufferDetails;
         
         // Safely check for Deepgram provider connections and metrics
         try {
@@ -194,7 +213,24 @@ class AsrWorker {
 
     try {
       const audioHandle = await this.pubsub.subscribe(audioTopicName, async (msg) => {
-        await this.handleAudioFrame(msg as any);
+        // CRITICAL: Log when message is received from Redis (diagnostic)
+        console.info(`[ASRWorker] 📨 Message received from Redis for topic ${audioTopicName}`, {
+          interaction_id: msg?.interaction_id || 'unknown',
+          seq: msg?.seq || 'unknown',
+          has_audio: !!msg?.audio,
+          audio_length: msg?.audio?.length || 0,
+          timestamp: new Date().toISOString(),
+        });
+        try {
+          await this.handleAudioFrame(msg as any);
+        } catch (error: any) {
+          console.error(`[ASRWorker] ❌ Error in handleAudioFrame:`, {
+            error: error.message,
+            stack: error.stack,
+            interaction_id: msg?.interaction_id,
+            seq: msg?.seq,
+          });
+        }
       });
       console.info(`[ASRWorker] ✅ Successfully subscribed to audio topic: ${audioTopicName}`, {
         subscriptionId: audioHandle.id,
@@ -253,7 +289,13 @@ class AsrWorker {
     // Check Exotel Bridge feature flag - skip processing if bridge is disabled
     const exoBridgeEnabled = process.env.EXO_BRIDGE_ENABLED === 'true';
     if (!exoBridgeEnabled) {
-      console.debug('[ASRWorker] Bridge disabled, skipping audio frame processing');
+      // CRITICAL: Log at info level so it's visible in production logs
+      console.warn('[ASRWorker] ⚠️ Bridge disabled (EXO_BRIDGE_ENABLED != true), skipping audio frame processing', {
+        interaction_id: msg?.interaction_id,
+        seq: msg?.seq,
+        env_value: process.env.EXO_BRIDGE_ENABLED || 'NOT SET',
+        note: 'Set EXO_BRIDGE_ENABLED=true to enable audio processing',
+      });
       return;
     }
 
@@ -741,29 +783,29 @@ class AsrWorker {
       const timeSinceLastContinuousSend = Date.now() - buffer.lastContinuousSendTime;
       
       // CRITICAL FIX: Updated thresholds for aggregation
-      // Minimum 100ms chunks, max 200ms gaps (prevents 8-9s gaps)
+      // Minimum 100ms chunks, max 500ms timeout fallback (prevents Deepgram timeouts)
       // These values are optimized for Deepgram's requirements:
       // - Deepgram recommends 20-250ms chunks
       // - Minimum 100ms ensures reliable transcription (20ms causes empty transcripts)
-      // - Max 200ms gaps prevent timeouts (Deepgram closes after ~5-10s inactivity)
+      // - Max 500ms timeout: if we wait too long, send what we have (prevents 1011 errors)
       const MIN_CHUNK_DURATION_MS = 100; // Minimum chunk size for reliable transcription
       const MAX_TIME_BETWEEN_SENDS_MS = 200; // Maximum gap between sends (prevents timeout)
-      // CRITICAL: Removed 20ms fallback - it causes empty transcripts
-      // Deepgram needs at least 100ms for reliable transcription
+      const TIMEOUT_FALLBACK_MS = 500; // If waiting > 500ms, send what we have (even if < 100ms)
+      const TIMEOUT_FALLBACK_MIN_MS = 20; // Minimum for timeout fallback (Deepgram's absolute minimum)
       
       const isTooLongSinceLastSend = timeSinceLastContinuousSend >= MAX_TIME_BETWEEN_SENDS_MS;
       const hasMinimumChunkSize = currentAudioDurationMs >= MIN_CHUNK_DURATION_MS;
       const exceedsMaxChunkSize = currentAudioDurationMs >= MAX_CHUNK_DURATION_MS;
+      const isTimeoutRisk = timeSinceLastContinuousSend >= TIMEOUT_FALLBACK_MS && currentAudioDurationMs >= TIMEOUT_FALLBACK_MIN_MS;
 
       // Process if:
       // 1. We have >= 100ms (normal case) - SEND
       // 2. Buffer exceeds max chunk size (250ms) - SEND (split)
-      // NOTE: Removed 20ms timeout prevention - it causes empty transcripts
-      // If we don't have 100ms yet, wait for more audio (timer will check again in 200ms)
-      const shouldProcess = hasMinimumChunkSize || exceedsMaxChunkSize;
+      // 3. Timeout risk: waited > 500ms AND have at least 20ms - SEND (prevent 1011)
+      const shouldProcess = hasMinimumChunkSize || exceedsMaxChunkSize || isTimeoutRisk;
 
-      // Minimum chunk for send: Always 100ms (no fallback to 20ms)
-      const minChunkForSend = MIN_CHUNK_DURATION_MS;
+      // Minimum chunk for send: 100ms normally, 20ms if timeout risk
+      const minChunkForSend = isTimeoutRisk ? TIMEOUT_FALLBACK_MIN_MS : MIN_CHUNK_DURATION_MS;
       
       if (shouldProcess && currentAudioDurationMs >= minChunkForSend) {
         // Enhanced logging for chunk aggregation decisions
@@ -851,6 +893,9 @@ class AsrWorker {
       
       // Determine required duration based on mode
       let requiredDuration: number;
+      const TIMEOUT_FALLBACK_MS = 500; // If waiting > 500ms, send what we have
+      const TIMEOUT_FALLBACK_MIN_MS = 20; // Minimum for timeout fallback
+      
       if (!buffer.hasSentInitialChunk) {
         // Initial chunk: Require 250ms burst OR send after 1s max wait (but still need 100ms minimum)
         const MAX_INITIAL_WAIT_MS = 1000;
@@ -861,9 +906,20 @@ class AsrWorker {
           requiredDuration = INITIAL_BURST_MS;
         }
       } else {
-        // Continuous mode: Always require 100ms minimum (removed 20ms fallback)
-        // If we don't have 100ms yet, wait for more audio
-        requiredDuration = MIN_CHUNK_DURATION_MS;
+        // Continuous mode: Require 100ms minimum, but allow timeout fallback
+        // If we've waited > 500ms and have at least 20ms, send to prevent Deepgram timeout
+        if (timeSinceLastSend >= TIMEOUT_FALLBACK_MS && totalAudioDurationMs >= TIMEOUT_FALLBACK_MIN_MS) {
+          // Timeout risk: send what we have (even if < 100ms) to prevent 1011 errors
+          requiredDuration = TIMEOUT_FALLBACK_MIN_MS;
+          console.warn(`[ASRWorker] ⚠️ Timeout risk: sending ${totalAudioDurationMs.toFixed(0)}ms chunk (minimum: ${TIMEOUT_FALLBACK_MIN_MS}ms) to prevent Deepgram timeout`, {
+            interaction_id: buffer.interactionId,
+            timeSinceLastSend,
+            totalAudioDurationMs: totalAudioDurationMs.toFixed(0),
+          });
+        } else {
+          // Normal case: wait for 100ms minimum
+          requiredDuration = MIN_CHUNK_DURATION_MS;
+        }
       }
       
       // Calculate how many bytes we need
