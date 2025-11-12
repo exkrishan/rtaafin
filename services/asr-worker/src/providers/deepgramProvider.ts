@@ -715,13 +715,38 @@ export class DeepgramProvider implements AsrProvider {
         // Wait for socket to be OPEN before marking as ready
         if (state.socket && typeof state.socket.readyState !== 'undefined') {
           // Socket is accessible - wait for it to be OPEN
+          const waitStartTime = Date.now();
+          const MAX_WAIT_MS = 5000; // 5 seconds max wait
+          
           const checkSocketReady = () => {
             const socketState = state.socket!.readyState;
+            const waitTime = Date.now() - waitStartTime;
+            
             if (socketState === 1) {
               // OPEN - mark as ready
+              console.info(`[DeepgramProvider] ✅ Socket is OPEN for ${interactionId} (waited ${waitTime}ms)`);
               markReadyAndInitialize();
             } else if (socketState === 0) {
               // CONNECTING - check again soon
+              if (waitTime >= MAX_WAIT_MS) {
+                // Socket stuck in CONNECTING for too long - close connection and let it be recreated
+                console.error(`[DeepgramProvider] ❌ Socket stuck in CONNECTING state for ${waitTime}ms (max: ${MAX_WAIT_MS}ms) for ${interactionId}. Closing connection.`, {
+                  socketReadyState: socketState,
+                  waitTimeMs: waitTime,
+                  maxWaitMs: MAX_WAIT_MS,
+                });
+                // Close the connection - it will be recreated on next sendAudioChunk call
+                this.connections.delete(interactionId);
+                if (state.connection && typeof state.connection.finish === 'function') {
+                  state.connection.finish();
+                }
+                if (state.keepAliveInterval) {
+                  clearInterval(state.keepAliveInterval);
+                }
+                // DO NOT mark as ready - connection will be recreated
+                return;
+              }
+              // Continue checking
               setTimeout(checkSocketReady, 50); // Check every 50ms
             } else if (socketState === 2 || socketState === 3) {
               // CLOSING or CLOSED - connection failed
@@ -729,12 +754,26 @@ export class DeepgramProvider implements AsrProvider {
                 readyState: socketState,
                 readyStateName: socketState === 2 ? 'CLOSING' : 'CLOSED',
               });
-              // Mark as ready anyway (connection will be recreated on next attempt)
-              markReadyAndInitialize();
+              // Close connection - it will be recreated on next sendAudioChunk call
+              this.connections.delete(interactionId);
+              if (state.connection && typeof state.connection.finish === 'function') {
+                state.connection.finish();
+              }
+              if (state.keepAliveInterval) {
+                clearInterval(state.keepAliveInterval);
+              }
+              // DO NOT mark as ready - connection will be recreated
             } else {
-              // Unknown state - mark as ready after timeout
-              console.warn(`[DeepgramProvider] ⚠️ Socket in unknown state ${socketState} for ${interactionId}, marking as ready after timeout`);
-              setTimeout(() => markReadyAndInitialize(), 1000); // Timeout after 1 second
+              // Unknown state - close connection
+              console.warn(`[DeepgramProvider] ⚠️ Socket in unknown state ${socketState} for ${interactionId}, closing connection`);
+              this.connections.delete(interactionId);
+              if (state.connection && typeof state.connection.finish === 'function') {
+                state.connection.finish();
+              }
+              if (state.keepAliveInterval) {
+                clearInterval(state.keepAliveInterval);
+              }
+              // DO NOT mark as ready - connection will be recreated
             }
           };
           
@@ -748,27 +787,40 @@ export class DeepgramProvider implements AsrProvider {
           } else {
             // Wait for OPEN
             checkSocketReady();
-            
-            // Fallback timeout: if socket doesn't become OPEN within 2 seconds, mark as ready anyway
-            setTimeout(() => {
-              if (!state.isReady) {
-                console.warn(`[DeepgramProvider] ⚠️ Socket did not become OPEN within 2 seconds for ${interactionId}, marking as ready anyway`, {
-                  socketReadyState: state.socket ? state.socket.readyState : 'no socket',
-                });
-                markReadyAndInitialize();
-              }
-            }, 2000);
           }
         } else {
-          // Socket not accessible - fallback to trusting SDK (but log warning)
-          console.warn(`[DeepgramProvider] ⚠️ Socket not accessible for ${interactionId}, marking as ready based on SDK Open event (may cause issues if socket is not OPEN)`, {
+          // Socket not accessible - wait a bit then verify state before marking ready
+          console.warn(`[DeepgramProvider] ⚠️ Socket not accessible for ${interactionId}, waiting 500ms then verifying state`, {
             hasSocket: !!state.socket,
             socketType: state.socket ? typeof state.socket : 'undefined',
           });
-          // Mark as ready after short delay to give socket time to open
+          // Wait longer to give socket time to open
           setTimeout(() => {
-            markReadyAndInitialize();
-          }, 100);
+            // Double-check socket state before marking ready
+            if (state.socket && typeof state.socket.readyState !== 'undefined') {
+              const socketState = state.socket.readyState;
+              if (socketState === 1) {
+                // Socket is OPEN - safe to mark as ready
+                console.info(`[DeepgramProvider] ✅ Socket is OPEN (verified after delay) for ${interactionId}`);
+                markReadyAndInitialize();
+              } else {
+                // Socket still not OPEN - close connection
+                console.error(`[DeepgramProvider] ❌ Socket not accessible and still not OPEN (state: ${socketState}) for ${interactionId}, closing connection`);
+                this.connections.delete(interactionId);
+                if (state.connection && typeof state.connection.finish === 'function') {
+                  state.connection.finish();
+                }
+                if (state.keepAliveInterval) {
+                  clearInterval(state.keepAliveInterval);
+                }
+                // DO NOT mark as ready - connection will be recreated
+              }
+            } else {
+              // Socket still not accessible - mark as ready (SDK should handle it, but log warning)
+              console.warn(`[DeepgramProvider] ⚠️ Socket still not accessible after delay for ${interactionId}, marking as ready based on SDK (may cause issues)`);
+              markReadyAndInitialize();
+            }
+          }, 500);
         }
       });
 
