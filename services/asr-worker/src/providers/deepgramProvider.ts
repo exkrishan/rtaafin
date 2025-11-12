@@ -214,12 +214,28 @@ export class DeepgramProvider implements AsrProvider {
       const smartFormat = process.env.DG_SMART_FORMAT !== 'false' && process.env.DEEPGRAM_SMART_FORMAT !== 'false'; // Default true
       const diarize = process.env.DG_DIARIZE === 'true'; // Default false
       
+      // CRITICAL FIX: Force sample rate to 8000 Hz for telephony
+      // Exotel telephony should always be 8000 Hz, regardless of what's passed or in env vars
+      // This prevents issues where Exotel sends incorrect sample rate (e.g., 1800)
+      let finalSampleRate = parseInt(process.env.DG_SAMPLE_RATE || String(sampleRate), 10);
+      if (finalSampleRate !== 8000) {
+        console.warn(`[DeepgramProvider] ⚠️ Invalid sample rate ${finalSampleRate} detected, forcing to 8000 Hz for telephony`, {
+          interactionId,
+          received_sample_rate: finalSampleRate,
+          env_DG_SAMPLE_RATE: process.env.DG_SAMPLE_RATE,
+          passed_sampleRate: sampleRate,
+          corrected_sample_rate: 8000,
+          note: 'Exotel telephony must use 8000 Hz. Forcing to 8000 regardless of input.',
+        });
+        finalSampleRate = 8000;
+      }
+      
       const connectionConfig = {
         model,
         language: process.env.DEEPGRAM_LANGUAGE || 'en-US',
         smart_format: smartFormat,
         interim_results: process.env.DEEPGRAM_INTERIM_RESULTS !== 'false', // Default true
-        sample_rate: parseInt(process.env.DG_SAMPLE_RATE || String(sampleRate), 10), // Use DG_SAMPLE_RATE if set, else use passed sampleRate
+        sample_rate: finalSampleRate, // CRITICAL: Always 8000 Hz for telephony
         encoding, // Support DG_ENCODING env var (default linear16)
         channels, // Support DG_CHANNELS env var (default 1)
         diarize, // Support DG_DIARIZE env var (default false)
@@ -228,6 +244,7 @@ export class DeepgramProvider implements AsrProvider {
       console.info(`[DeepgramProvider] Connection config:`, {
         interactionId,
         ...connectionConfig,
+        note: 'Sample rate forced to 8000 Hz for Exotel telephony',
       });
       
       const connection = this.client.listen.live(connectionConfig);
