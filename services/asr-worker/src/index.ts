@@ -46,6 +46,7 @@ interface AudioBuffer {
   sampleRate: number;
   chunks: Buffer[];
   timestamps: number[];
+  sequences: number[]; // Track sequence numbers from incoming audio frames
   lastProcessed: number;
   lastChunkReceived: number; // Timestamp of last audio chunk received
   hasSentInitialChunk: boolean; // Track if we've sent the initial 500ms chunk
@@ -326,6 +327,7 @@ class AsrWorker {
           sampleRate: sample_rate,
           chunks: [],
           timestamps: [],
+          sequences: [], // Track sequence numbers from incoming audio frames
           lastProcessed: Date.now(),
           lastChunkReceived: Date.now(),
           hasSentInitialChunk: false, // Haven't sent initial chunk yet
@@ -479,6 +481,7 @@ class AsrWorker {
 
       buffer.chunks.push(audioBuffer);
       buffer.timestamps.push(frame.timestamp_ms);
+      buffer.sequences.push(seq); // Track sequence number from incoming frame
       buffer.lastChunkReceived = Date.now(); // Update last chunk received time
 
       // CRITICAL: Start/restart processing timer to ensure frequent sends
@@ -741,28 +744,26 @@ class AsrWorker {
       // Minimum 100ms chunks, max 200ms gaps (prevents 8-9s gaps)
       // These values are optimized for Deepgram's requirements:
       // - Deepgram recommends 20-250ms chunks
-      // - Minimum 100ms ensures reliable transcription
+      // - Minimum 100ms ensures reliable transcription (20ms causes empty transcripts)
       // - Max 200ms gaps prevent timeouts (Deepgram closes after ~5-10s inactivity)
       const MIN_CHUNK_DURATION_MS = 100; // Minimum chunk size for reliable transcription
       const MAX_TIME_BETWEEN_SENDS_MS = 200; // Maximum gap between sends (prevents timeout)
-      const MIN_CHUNK_FOR_TIMEOUT_PREVENTION_MS = 20; // Minimum for timeout prevention (Deepgram's absolute minimum)
+      // CRITICAL: Removed 20ms fallback - it causes empty transcripts
+      // Deepgram needs at least 100ms for reliable transcription
       
       const isTooLongSinceLastSend = timeSinceLastContinuousSend >= MAX_TIME_BETWEEN_SENDS_MS;
       const hasMinimumChunkSize = currentAudioDurationMs >= MIN_CHUNK_DURATION_MS;
-      const hasEnoughForTimeoutPrevention = currentAudioDurationMs >= MIN_CHUNK_FOR_TIMEOUT_PREVENTION_MS;
       const exceedsMaxChunkSize = currentAudioDurationMs >= MAX_CHUNK_DURATION_MS;
 
       // Process if:
-      // 1. Gap > 200ms AND we have at least 20ms (timeout risk) - FORCE SEND
-      // 2. We have >= 100ms (normal case) - SEND
-      // 3. Buffer exceeds max chunk size (250ms) - SEND (split)
-      const shouldProcess = 
-        (isTooLongSinceLastSend && hasEnoughForTimeoutPrevention) ||
-        hasMinimumChunkSize ||
-        exceedsMaxChunkSize;
+      // 1. We have >= 100ms (normal case) - SEND
+      // 2. Buffer exceeds max chunk size (250ms) - SEND (split)
+      // NOTE: Removed 20ms timeout prevention - it causes empty transcripts
+      // If we don't have 100ms yet, wait for more audio (timer will check again in 200ms)
+      const shouldProcess = hasMinimumChunkSize || exceedsMaxChunkSize;
 
-      // Minimum chunk for send: 20ms if timeout risk, 100ms normally
-      const minChunkForSend = isTooLongSinceLastSend ? MIN_CHUNK_FOR_TIMEOUT_PREVENTION_MS : MIN_CHUNK_DURATION_MS;
+      // Minimum chunk for send: Always 100ms (no fallback to 20ms)
+      const minChunkForSend = MIN_CHUNK_DURATION_MS;
       
       if (shouldProcess && currentAudioDurationMs >= minChunkForSend) {
         // Enhanced logging for chunk aggregation decisions
@@ -851,34 +852,28 @@ class AsrWorker {
       // Determine required duration based on mode
       let requiredDuration: number;
       if (!buffer.hasSentInitialChunk) {
-        // Initial chunk: Require 250ms burst OR send after 1s max wait
+        // Initial chunk: Require 250ms burst OR send after 1s max wait (but still need 100ms minimum)
         const MAX_INITIAL_WAIT_MS = 1000;
-        if (timeSinceBufferCreation >= MAX_INITIAL_WAIT_MS && totalAudioDurationMs >= 20) {
-          // Force send if waited too long (prevent timeout)
-          requiredDuration = 20;
+        if (timeSinceBufferCreation >= MAX_INITIAL_WAIT_MS && totalAudioDurationMs >= MIN_CHUNK_DURATION_MS) {
+          // Force send if waited too long, but still require 100ms minimum
+          requiredDuration = MIN_CHUNK_DURATION_MS;
         } else {
           requiredDuration = INITIAL_BURST_MS;
         }
       } else {
-        // Continuous mode: Send if we have 100ms OR if 200ms has passed (prevent gaps)
-        if (timeSinceLastSend >= MAX_WAIT_MS && totalAudioDurationMs >= 20) {
-          // Force send to prevent gap > 200ms (timeout risk)
-          requiredDuration = 20;
-        } else {
-          // Normal case: wait for 100ms minimum
-          requiredDuration = MIN_CHUNK_DURATION_MS;
-        }
+        // Continuous mode: Always require 100ms minimum (removed 20ms fallback)
+        // If we don't have 100ms yet, wait for more audio
+        requiredDuration = MIN_CHUNK_DURATION_MS;
       }
       
       // Calculate how many bytes we need
       const requiredSamples = Math.floor((requiredDuration * buffer.sampleRate) / 1000);
       const requiredBytes = requiredSamples * 2; // 16-bit = 2 bytes per sample
       
-      // Check if we have enough audio OR if timeout risk forces send
+      // Check if we have enough audio
       const hasEnoughAudio = totalBytes >= requiredBytes;
-      const isTimeoutRisk = timeSinceLastSend >= MAX_WAIT_MS && totalAudioDurationMs >= 20;
       
-      if (!hasEnoughAudio && !isTimeoutRisk) {
+      if (!hasEnoughAudio) {
         console.debug(`[ASRWorker] ⏳ Buffer too small (${totalAudioDurationMs.toFixed(0)}ms < ${requiredDuration}ms), waiting for more audio`, {
           interaction_id: buffer.interactionId,
           chunksCount: buffer.chunks.length,
@@ -895,6 +890,7 @@ class AsrWorker {
       let bytesToSend = 0;
       let chunksToSend: Buffer[] = [];
       let timestampsToSend: number[] = [];
+      let sequencesToSend: number[] = [];
       
       // Collect chunks until we have enough audio
       for (let i = 0; i < buffer.chunks.length; i++) {
@@ -903,6 +899,7 @@ class AsrWorker {
           // Include this chunk (or first chunk even if it exceeds limit)
           chunksToSend.push(chunk);
           timestampsToSend.push(buffer.timestamps[i]);
+          sequencesToSend.push(buffer.sequences[i]);
           bytesToSend += chunk.length;
         } else {
           break; // Keep remaining chunks in buffer
@@ -916,7 +913,9 @@ class AsrWorker {
       // Combine chunks to send
       const audioToSend = Buffer.concat(chunksToSend);
       const audioDurationToSend = (audioToSend.length / 2 / buffer.sampleRate) * 1000;
-      const seq = chunksToSend.length;
+      // CRITICAL FIX: Use the maximum sequence number from the chunks being sent
+      // This preserves the actual sequence number from incoming audio frames
+      const seq = Math.max(...sequencesToSend);
       
       // Log audio details before sending
       console.info(`[ASRWorker] Processing audio buffer:`, {
@@ -945,6 +944,7 @@ class AsrWorker {
       // This allows new chunks to accumulate while we wait for transcript
       buffer.chunks = buffer.chunks.slice(chunksToSend.length);
       buffer.timestamps = buffer.timestamps.slice(timestampsToSend.length);
+      buffer.sequences = buffer.sequences.slice(sequencesToSend.length);
       
       // Update last processed time
       buffer.lastProcessed = Date.now();
