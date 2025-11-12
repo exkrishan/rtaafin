@@ -1293,39 +1293,26 @@ export class DeepgramProvider implements AsrProvider {
         // Convert Buffer to Uint8Array to ensure compatibility
         const audioData = audio instanceof Uint8Array ? audio : new Uint8Array(audio);
         
-        // CRITICAL: Verify socket is OPEN (state 1) before sending
-        // WebSocket states: 0=CONNECTING, 1=OPEN, 2=CLOSING, 3=CLOSED
+        // CRITICAL FIX: Trust the Deepgram SDK's isReady flag
+        // We've already verified isReady is true (lines 1228-1257), so we can trust the SDK
+        // The SDK manages its own WebSocket internally and connection.send() will handle the state
+        // DO NOT check socket.readyState here - it can be CONNECTING (0) even after Open event fires
+        // The SDK's connection.send() method will buffer internally if needed
+        // 
+        // ROOT CAUSE FIX: Previously, we were checking socket.readyState and queuing audio if it was
+        // CONNECTING (0), even though isReady was true. This caused audio to be queued but never sent,
+        // leading to 1011 timeouts and null transcripts. The fix is to trust the SDK's isReady flag.
+        
+        // Log socket state for debugging (but don't queue based on it)
         if (stateToUse.socket && socketReadyState !== 1 && socketReadyState !== 'unknown') {
           const stateName = socketReadyState === 0 ? 'CONNECTING' : socketReadyState === 2 ? 'CLOSING' : socketReadyState === 3 ? 'CLOSED' : `UNKNOWN(${socketReadyState})`;
-          console.warn(`[DeepgramProvider] ⚠️ Socket not OPEN before sending (state: ${stateName}, readyState: ${socketReadyState})`, {
+          console.debug(`[DeepgramProvider] ℹ️ Socket state is ${stateName} (readyState: ${socketReadyState}) but isReady=true, trusting SDK`, {
             interactionId,
             seq,
             socketReadyState,
             isReady: stateToUse.isReady,
-            hasConnection: !!stateToUse.connection,
-            hasSocket: !!stateToUse.socket,
-            note: 'Socket should be OPEN (1) for reliable audio transmission. Queuing audio if possible.',
+            note: 'SDK will handle WebSocket state internally via connection.send()',
           });
-          
-          // Queue audio if socket is CONNECTING (state 0) - it will be sent when socket opens
-          if (socketReadyState === 0) {
-            if (!stateToUse.pendingAudioQueue) {
-              stateToUse.pendingAudioQueue = [];
-            }
-            stateToUse.pendingAudioQueue.push({ 
-              audio: audioData, 
-              seq, 
-              sampleRate,
-              durationMs,
-              queuedAt: Date.now()
-            });
-            console.info(`[DeepgramProvider] 📦 Queued audio chunk (seq ${seq}) - will send when socket opens`, {
-              interactionId,
-              seq,
-              queueSize: stateToUse.pendingAudioQueue.length,
-            });
-            return; // Don't send now - will be sent when socket opens
-          }
         }
         
         console.info(`[DeepgramProvider] 📤 Sending audio chunk:`, {
