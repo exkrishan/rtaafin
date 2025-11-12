@@ -605,7 +605,8 @@ class AsrWorker {
         totalChunksInBuffer: buffer.chunks.length,
         totalAudioDurationMs: currentAudioDurationMs.toFixed(0),
         bufferAge: Date.now() - buffer.lastProcessed,
-        meetsMinimum: currentAudioDurationMs >= MIN_AUDIO_DURATION_MS,
+        meetsMinimum: currentAudioDurationMs >= CONTINUOUS_CHUNK_DURATION_MS, // Use CONTINUOUS_CHUNK_DURATION_MS (100ms) instead of MIN_AUDIO_DURATION_MS (200ms)
+        minRequiredForSend: CONTINUOUS_CHUNK_DURATION_MS,
       });
 
       // Record metrics
@@ -872,6 +873,20 @@ class AsrWorker {
       // Minimum chunk for send: 100ms normally, 20ms if timeout risk (absolute last resort)
       // Prioritize quality (100ms) over timeout prevention (20ms)
       const minChunkForSend = isTimeoutRisk ? TIMEOUT_FALLBACK_MIN_MS : MIN_CHUNK_DURATION_MS;
+      
+      // CRITICAL FIX: Log detailed state for debugging
+      if (currentAudioDurationMs >= MIN_CHUNK_DURATION_MS && !shouldProcess) {
+        console.warn(`[ASRWorker] ⚠️ Timer: Has ${currentAudioDurationMs.toFixed(0)}ms but not processing`, {
+          interactionId,
+          currentAudioDurationMs: currentAudioDurationMs.toFixed(0),
+          timeSinceLastSend: timeSinceLastContinuousSend,
+          hasMinimumChunkSize,
+          exceedsMaxChunkSize,
+          isTimeoutRisk,
+          shouldProcess,
+          chunksCount: buffer.chunks.length,
+        });
+      }
       
       if (shouldProcess && currentAudioDurationMs >= minChunkForSend) {
         // Enhanced logging for chunk aggregation decisions

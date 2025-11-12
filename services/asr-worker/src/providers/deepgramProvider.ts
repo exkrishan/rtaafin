@@ -1377,27 +1377,45 @@ export class DeepgramProvider implements AsrProvider {
         // Convert Buffer to Uint8Array to ensure compatibility
         const audioData = audio instanceof Uint8Array ? audio : new Uint8Array(audio);
         
-        // CRITICAL FIX: Trust the Deepgram SDK's isReady flag
-        // We've already verified isReady is true (lines 1228-1257), so we can trust the SDK
-        // The SDK manages its own WebSocket internally and connection.send() will handle the state
-        // DO NOT check socket.readyState here - it can be CONNECTING (0) even after Open event fires
-        // The SDK's connection.send() method will buffer internally if needed
-        // 
-        // ROOT CAUSE FIX: Previously, we were checking socket.readyState and queuing audio if it was
-        // CONNECTING (0), even though isReady was true. This caused audio to be queued but never sent,
-        // leading to 1011 timeouts and null transcripts. The fix is to trust the SDK's isReady flag.
-        
-        // Log socket state for debugging (but don't queue based on it)
-        if (stateToUse.socket && socketReadyState !== 1 && socketReadyState !== 'unknown') {
-          const stateName = socketReadyState === 0 ? 'CONNECTING' : socketReadyState === 2 ? 'CLOSING' : socketReadyState === 3 ? 'CLOSED' : `UNKNOWN(${socketReadyState})`;
-          console.debug(`[DeepgramProvider] ℹ️ Socket state is ${stateName} (readyState: ${socketReadyState}) but isReady=true, trusting SDK`, {
-            interactionId,
-            seq,
-            socketReadyState,
-            isReady: stateToUse.isReady,
-            note: 'SDK will handle WebSocket state internally via connection.send()',
-          });
+        // CRITICAL: Verify socket is actually OPEN before sending
+        // Even though isReady is true, the socket might still be CONNECTING
+        // This prevents audio from being queued internally but never sent
+        if (stateToUse.socket && typeof stateToUse.socket.readyState !== 'undefined') {
+          const actualSocketState = stateToUse.socket.readyState;
+          if (actualSocketState !== 1) {
+            // Socket is not OPEN - queue the audio
+            const stateName = actualSocketState === 0 ? 'CONNECTING' : actualSocketState === 2 ? 'CLOSING' : actualSocketState === 3 ? 'CLOSED' : `UNKNOWN(${actualSocketState})`;
+            console.warn(`[DeepgramProvider] ⚠️ Socket not OPEN (${stateName}), queuing audio chunk for ${interactionId}`, {
+              interactionId,
+              seq,
+              socketReadyState: actualSocketState,
+              isReady: stateToUse.isReady,
+              note: 'Audio will be sent when socket becomes OPEN',
+            });
+            
+            // Queue the audio
+            if (!stateToUse.pendingAudioQueue) {
+              stateToUse.pendingAudioQueue = [];
+            }
+            stateToUse.pendingAudioQueue.push({
+              audio: audioData,
+              seq,
+              sampleRate,
+              durationMs,
+              queuedAt: Date.now(),
+            });
+            
+            // Return empty transcript - will be resolved when audio is sent
+            return {
+              type: 'partial',
+              text: '',
+              isFinal: false,
+              confidence: 0,
+            };
+          }
         }
+        
+        // Socket is OPEN (or not accessible) - proceed with send
         
         console.info(`[DeepgramProvider] 📤 Sending audio chunk:`, {
           interactionId,
@@ -1458,12 +1476,42 @@ export class DeepgramProvider implements AsrProvider {
             });
           }
           
-          // Warn if audio is all zeros (silence)
-          if (allZeros && seq <= 3) {
-            console.warn(`[DeepgramProvider] ⚠️ Audio appears to be silence (all zeros) for ${interactionId}`, {
+          // Enhanced silence detection: calculate RMS energy
+          let audioEnergy = 0;
+          let maxAmplitude = 0;
+          let minAmplitude = 0;
+          if (sampleValues.length > 0 && !allZeros) {
+            // Calculate RMS (Root Mean Square) energy
+            const sumSquares = sampleValues.reduce((sum, val) => sum + (val * val), 0);
+            audioEnergy = Math.sqrt(sumSquares / sampleValues.length);
+            maxAmplitude = Math.max(...sampleValues.map(Math.abs));
+            minAmplitude = Math.min(...sampleValues.map(Math.abs));
+          }
+          
+          // Warn if audio is likely silence (but don't block - Deepgram will handle it)
+          const SILENCE_THRESHOLD = 100; // RMS energy threshold for silence (PCM16 range is -32768 to 32767)
+          const isLikelySilence = allZeros || (audioEnergy < SILENCE_THRESHOLD);
+          
+          if (isLikelySilence && seq <= 5) {
+            const logLevel = seq <= 3 ? 'warn' : 'debug';
+            const logFn = logLevel === 'warn' ? console.warn : console.debug;
+            logFn(`[DeepgramProvider] ⚠️ Audio appears to be silence for ${interactionId}`, {
               seq,
+              rmsEnergy: audioEnergy.toFixed(2),
+              maxAmplitude,
+              allZeros,
+              silenceThreshold: SILENCE_THRESHOLD,
+              note: 'Deepgram will return empty transcript for silence - this is normal',
+            });
+          } else if (!isLikelySilence && seq <= 3) {
+            // Log audio quality metrics for first few chunks
+            console.debug(`[DeepgramProvider] 📊 Audio quality metrics for ${interactionId}`, {
+              seq,
+              audioEnergy: audioEnergy.toFixed(2),
+              maxAmplitude,
+              minAmplitude,
               samplesChecked: sampleCount,
-              note: 'This is normal for silence, but may cause empty transcripts.',
+              note: 'Audio has sufficient energy for transcription.',
             });
           }
         }
