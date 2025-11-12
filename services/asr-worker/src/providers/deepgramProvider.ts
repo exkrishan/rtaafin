@@ -1289,6 +1289,45 @@ export class DeepgramProvider implements AsrProvider {
         const connectionReadyState = connectionAny?.getReadyState?.() ?? connectionAny?.readyState ?? 'unknown';
         const socketReadyState = stateToUse.socket?.readyState ?? 'unknown';
         
+        // Deepgram SDK expects Uint8Array or Buffer for binary audio
+        // Convert Buffer to Uint8Array to ensure compatibility
+        const audioData = audio instanceof Uint8Array ? audio : new Uint8Array(audio);
+        
+        // CRITICAL: Verify socket is OPEN (state 1) before sending
+        // WebSocket states: 0=CONNECTING, 1=OPEN, 2=CLOSING, 3=CLOSED
+        if (stateToUse.socket && socketReadyState !== 1 && socketReadyState !== 'unknown') {
+          const stateName = socketReadyState === 0 ? 'CONNECTING' : socketReadyState === 2 ? 'CLOSING' : socketReadyState === 3 ? 'CLOSED' : `UNKNOWN(${socketReadyState})`;
+          console.warn(`[DeepgramProvider] ⚠️ Socket not OPEN before sending (state: ${stateName}, readyState: ${socketReadyState})`, {
+            interactionId,
+            seq,
+            socketReadyState,
+            isReady: stateToUse.isReady,
+            hasConnection: !!stateToUse.connection,
+            hasSocket: !!stateToUse.socket,
+            note: 'Socket should be OPEN (1) for reliable audio transmission. Queuing audio if possible.',
+          });
+          
+          // Queue audio if socket is CONNECTING (state 0) - it will be sent when socket opens
+          if (socketReadyState === 0) {
+            if (!stateToUse.pendingAudioQueue) {
+              stateToUse.pendingAudioQueue = [];
+            }
+            stateToUse.pendingAudioQueue.push({ 
+              audio: audioData, 
+              seq, 
+              sampleRate,
+              durationMs,
+              queuedAt: Date.now()
+            });
+            console.info(`[DeepgramProvider] 📦 Queued audio chunk (seq ${seq}) - will send when socket opens`, {
+              interactionId,
+              seq,
+              queueSize: stateToUse.pendingAudioQueue.length,
+            });
+            return; // Don't send now - will be sent when socket opens
+          }
+        }
+        
         console.info(`[DeepgramProvider] 📤 Sending audio chunk:`, {
           interactionId,
           seq,
@@ -1300,17 +1339,13 @@ export class DeepgramProvider implements AsrProvider {
           encoding: 'linear16',
           isReady: stateToUse.isReady,
           connectionReadyState,
-          socketReadyState,
+          socketReadyState: socketReadyState === 1 ? 'OPEN' : socketReadyState,
           timeSinceLastSend: stateToUse.lastSendTime ? (Date.now() - stateToUse.lastSendTime) + 'ms' : 'first',
           hasConnection: !!stateToUse.connection,
           hasSocket: !!stateToUse.socket,
           connectionType: typeof stateToUse.connection,
           connectionHasSend: typeof stateToUse.connection?.send === 'function',
         });
-        
-        // Deepgram SDK expects Uint8Array or Buffer for binary audio
-        // Convert Buffer to Uint8Array to ensure compatibility
-        const audioData = audio instanceof Uint8Array ? audio : new Uint8Array(audio);
         
         // CRITICAL: Comprehensive PCM16 format validation
         // Validate that audio is truly PCM16 (16-bit signed integers, little-endian)

@@ -53,6 +53,7 @@ interface AudioBuffer {
   isProcessing: boolean; // Prevent concurrent processing of the same buffer
   lastContinuousSendTime: number; // Timestamp of last continuous chunk send (doesn't reset on buffer clear)
   processTimer?: NodeJS.Timeout; // Timer for periodic processing (ensures sends every 200ms)
+  lastExpectedSeq?: number; // Track last expected sequence number for gap detection
 }
 
 class AsrWorker {
@@ -510,17 +511,78 @@ class AsrWorker {
           });
         }
         
-        // Warn if audio is all zeros (silence) - this is normal but worth noting
-        if (allZeros && seq <= 3) {
-          console.debug('[ASRWorker] ℹ️ Audio appears to be silence (all zeros)', {
+        // Enhanced audio quality validation: calculate energy/amplitude
+        let audioEnergy = 0;
+        let maxAmplitude = 0;
+        let minAmplitude = 0;
+        if (sampleValues.length > 0) {
+          // Calculate RMS (Root Mean Square) energy
+          const sumSquares = sampleValues.reduce((sum, val) => sum + (val * val), 0);
+          audioEnergy = Math.sqrt(sumSquares / sampleValues.length);
+          maxAmplitude = Math.max(...sampleValues.map(Math.abs));
+          minAmplitude = Math.min(...sampleValues.map(Math.abs));
+        }
+        
+        // Warn if audio is all zeros (silence) - enhanced detection
+        const SILENCE_THRESHOLD = 100; // RMS energy threshold for silence (PCM16 range is -32768 to 32767)
+        const isSilence = allZeros || audioEnergy < SILENCE_THRESHOLD;
+        
+        if (isSilence) {
+          // Log at info level for first few chunks, debug level for later chunks
+          const logLevel = seq <= 5 ? 'info' : 'debug';
+          const logFn = logLevel === 'info' ? console.info : console.debug;
+          logFn(`[ASRWorker] ℹ️ Audio appears to be silence (energy: ${audioEnergy.toFixed(2)}, max: ${maxAmplitude}, allZeros: ${allZeros})`, {
             interaction_id,
             seq,
             samplesChecked: sampleCount,
+            audioEnergy: audioEnergy.toFixed(2),
+            maxAmplitude,
+            minAmplitude,
+            allZeros,
+            silenceThreshold: SILENCE_THRESHOLD,
             note: 'This is normal for silence, but may cause empty transcripts from Deepgram.',
+          });
+        } else if (seq <= 5) {
+          // Log audio quality metrics for first few chunks
+          console.debug('[ASRWorker] 📊 Audio quality metrics', {
+            interaction_id,
+            seq,
+            audioEnergy: audioEnergy.toFixed(2),
+            maxAmplitude,
+            minAmplitude,
+            samplesChecked: sampleCount,
+            note: 'Audio has sufficient energy for transcription.',
           });
         }
       }
 
+      // CRITICAL: Sequence gap detection - track expected vs. actual sequence numbers
+      const SEQUENCE_GAP_THRESHOLD = 10; // Warn if gap exceeds this
+      if (buffer.lastExpectedSeq !== undefined) {
+        const expectedSeq = buffer.lastExpectedSeq + 1;
+        const gap = seq - expectedSeq;
+        if (gap > SEQUENCE_GAP_THRESHOLD) {
+          console.warn(`[ASRWorker] ⚠️ Sequence gap detected: expected ${expectedSeq}, received ${seq} (gap: ${gap})`, {
+            interaction_id,
+            expectedSeq,
+            actualSeq: seq,
+            gap,
+            threshold: SEQUENCE_GAP_THRESHOLD,
+            note: 'Large sequence gaps may indicate chunks are being lost or arriving out of order.',
+          });
+        } else if (gap < 0) {
+          // Negative gap means sequence went backwards (out of order or duplicate)
+          console.warn(`[ASRWorker] ⚠️ Sequence out of order: expected ${expectedSeq}, received ${seq} (gap: ${gap})`, {
+            interaction_id,
+            expectedSeq,
+            actualSeq: seq,
+            gap,
+            note: 'Sequence numbers should be monotonically increasing. This may indicate out-of-order delivery or duplicate frames.',
+          });
+        }
+      }
+      buffer.lastExpectedSeq = seq; // Update last expected sequence
+      
       buffer.chunks.push(audioBuffer);
       buffer.timestamps.push(frame.timestamp_ms);
       buffer.sequences.push(seq); // Track sequence number from incoming frame
@@ -787,10 +849,11 @@ class AsrWorker {
       // These values are optimized for Deepgram's requirements:
       // - Deepgram recommends 20-250ms chunks
       // - Minimum 100ms ensures reliable transcription (20ms causes empty transcripts)
-      // - Max 500ms timeout: if we wait too long, send what we have (prevents 1011 errors)
+      // - Max 2000ms timeout: if we wait too long, send what we have (prevents 1011 errors)
+      // Increased from 500ms to 2000ms to allow chunks to accumulate to 100ms+
       const MIN_CHUNK_DURATION_MS = 100; // Minimum chunk size for reliable transcription
       const MAX_TIME_BETWEEN_SENDS_MS = 200; // Maximum gap between sends (prevents timeout)
-      const TIMEOUT_FALLBACK_MS = 500; // If waiting > 500ms, send what we have (even if < 100ms)
+      const TIMEOUT_FALLBACK_MS = 2000; // If waiting > 2000ms, send what we have (even if < 100ms)
       const TIMEOUT_FALLBACK_MIN_MS = 20; // Minimum for timeout fallback (Deepgram's absolute minimum)
       
       const isTooLongSinceLastSend = timeSinceLastContinuousSend >= MAX_TIME_BETWEEN_SENDS_MS;
@@ -799,12 +862,15 @@ class AsrWorker {
       const isTimeoutRisk = timeSinceLastContinuousSend >= TIMEOUT_FALLBACK_MS && currentAudioDurationMs >= TIMEOUT_FALLBACK_MIN_MS;
 
       // Process if:
-      // 1. We have >= 100ms (normal case) - SEND
+      // 1. We have >= 100ms (normal case) - SEND (prioritize this)
       // 2. Buffer exceeds max chunk size (250ms) - SEND (split)
-      // 3. Timeout risk: waited > 500ms AND have at least 20ms - SEND (prevent 1011)
+      // 3. Timeout risk: waited > 2000ms AND have at least 20ms - SEND (prevent 1011, last resort)
+      // Prioritize chunk size over timeout - only use timeout fallback as absolute last resort
+      // This ensures chunks accumulate to 100ms+ before sending, improving transcription quality
       const shouldProcess = hasMinimumChunkSize || exceedsMaxChunkSize || isTimeoutRisk;
 
-      // Minimum chunk for send: 100ms normally, 20ms if timeout risk
+      // Minimum chunk for send: 100ms normally, 20ms if timeout risk (absolute last resort)
+      // Prioritize quality (100ms) over timeout prevention (20ms)
       const minChunkForSend = isTimeoutRisk ? TIMEOUT_FALLBACK_MIN_MS : MIN_CHUNK_DURATION_MS;
       
       if (shouldProcess && currentAudioDurationMs >= minChunkForSend) {
@@ -906,15 +972,19 @@ class AsrWorker {
           requiredDuration = INITIAL_BURST_MS;
         }
       } else {
-        // Continuous mode: Require 100ms minimum, but allow timeout fallback
-        // If we've waited > 500ms and have at least 20ms, send to prevent Deepgram timeout
+        // Continuous mode: Require 100ms minimum, but allow timeout fallback after extended wait
+        // If we've waited > 2000ms and have at least 20ms, send to prevent Deepgram timeout
+        // This gives chunks time to accumulate to 100ms+ before timeout fallback triggers
         if (timeSinceLastSend >= TIMEOUT_FALLBACK_MS && totalAudioDurationMs >= TIMEOUT_FALLBACK_MIN_MS) {
           // Timeout risk: send what we have (even if < 100ms) to prevent 1011 errors
+          // This is absolute last resort after 2+ seconds of waiting
           requiredDuration = TIMEOUT_FALLBACK_MIN_MS;
-          console.warn(`[ASRWorker] ⚠️ Timeout risk: sending ${totalAudioDurationMs.toFixed(0)}ms chunk (minimum: ${TIMEOUT_FALLBACK_MIN_MS}ms) to prevent Deepgram timeout`, {
+          console.warn(`[ASRWorker] ⚠️ Timeout risk: sending ${totalAudioDurationMs.toFixed(0)}ms chunk (minimum: ${TIMEOUT_FALLBACK_MIN_MS}ms) to prevent Deepgram timeout after ${timeSinceLastSend}ms wait`, {
             interaction_id: buffer.interactionId,
             timeSinceLastSend,
             totalAudioDurationMs: totalAudioDurationMs.toFixed(0),
+            chunksInBuffer: buffer.chunks.length,
+            note: 'This should be rare - chunks should accumulate to 100ms+ before this triggers',
           });
         } else {
           // Normal case: wait for 100ms minimum
@@ -998,9 +1068,40 @@ class AsrWorker {
       
       // CRITICAL: Remove sent chunks from buffer immediately (don't wait for transcript)
       // This allows new chunks to accumulate while we wait for transcript
-      buffer.chunks = buffer.chunks.slice(chunksToSend.length);
-      buffer.timestamps = buffer.timestamps.slice(timestampsToSend.length);
-      buffer.sequences = buffer.sequences.slice(sequencesToSend.length);
+      const chunksBeforeClear = buffer.chunks.length;
+      const timestampsBeforeClear = buffer.timestamps.length;
+      const sequencesBeforeClear = buffer.sequences.length;
+      
+      // Validate that we're only removing chunks that were actually sent
+      if (chunksToSend.length > chunksBeforeClear) {
+        console.error(`[ASRWorker] ❌ CRITICAL: Attempting to remove more chunks (${chunksToSend.length}) than exist in buffer (${chunksBeforeClear})`, {
+          interaction_id: buffer.interactionId,
+          chunksToSend: chunksToSend.length,
+          chunksInBuffer: chunksBeforeClear,
+          timestampsToSend: timestampsToSend.length,
+          sequencesToSend: sequencesToSend.length,
+        });
+        // Safety: only remove what exists
+        buffer.chunks = [];
+        buffer.timestamps = [];
+        buffer.sequences = [];
+      } else {
+        buffer.chunks = buffer.chunks.slice(chunksToSend.length);
+        buffer.timestamps = buffer.timestamps.slice(timestampsToSend.length);
+        buffer.sequences = buffer.sequences.slice(sequencesToSend.length);
+      }
+      
+      // Log buffer state transition for debugging
+      console.debug(`[ASRWorker] 🔄 Buffer cleared: removed ${chunksToSend.length} chunks, ${buffer.chunks.length} remaining`, {
+        interaction_id: buffer.interactionId,
+        chunksRemoved: chunksToSend.length,
+        chunksRemaining: buffer.chunks.length,
+        timestampsRemoved: timestampsToSend.length,
+        timestampsRemaining: buffer.timestamps.length,
+        sequencesRemoved: sequencesToSend.length,
+        sequencesRemaining: buffer.sequences.length,
+        validation: chunksToSend.length === timestampsToSend.length && timestampsToSend.length === sequencesToSend.length ? 'OK' : 'MISMATCH',
+      });
       
       // Update last processed time
       buffer.lastProcessed = Date.now();
