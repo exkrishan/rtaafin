@@ -113,7 +113,18 @@ export class ExotelHandler {
     event: ExotelStartEvent
   ): void {
     const { stream_sid, start } = event;
-    const sampleRate = parseInt(start.media_format.sample_rate, 10) || 8000;
+    // CRITICAL FIX: Exotel telephony should always be 8000 Hz
+    // If Exotel sends incorrect sample rate (e.g., 1800), force it to 8000
+    let sampleRate = parseInt(start.media_format.sample_rate, 10) || 8000;
+    if (sampleRate !== 8000) {
+      console.warn(`[exotel] ⚠️ Invalid sample rate ${sampleRate} from Exotel, forcing to 8000 Hz for telephony`, {
+        stream_sid,
+        call_sid: start.call_sid,
+        received_sample_rate: start.media_format.sample_rate,
+        corrected_sample_rate: 8000,
+      });
+      sampleRate = 8000;
+    }
 
     const state: ExotelConnectionState = {
       streamSid: stream_sid,

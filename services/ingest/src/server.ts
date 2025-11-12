@@ -463,7 +463,19 @@ class IngestionServer {
             exotelState.streamSid = json.stream_sid || json.start.stream_sid || exotelState.streamSid;
             exotelState.callSid = json.start.call_sid || exotelState.callSid;
             exotelState.accountSid = json.start.account_sid || exotelState.accountSid;
-            exotelState.sampleRate = parseInt(json.start.media_format?.sample_rate || '8000', 10);
+            // CRITICAL FIX: Exotel telephony should always be 8000 Hz
+            // If Exotel sends incorrect sample rate (e.g., 1800), force it to 8000
+            let parsedSampleRate = parseInt(json.start.media_format?.sample_rate || '8000', 10);
+            if (parsedSampleRate !== 8000) {
+              console.warn(`[exotel] ⚠️ Invalid sample rate ${parsedSampleRate} from Exotel, forcing to 8000 Hz for telephony`, {
+                stream_sid: exotelState.streamSid,
+                call_sid: exotelState.callSid,
+                received_sample_rate: json.start.media_format?.sample_rate,
+                corrected_sample_rate: 8000,
+              });
+              parsedSampleRate = 8000;
+            }
+            exotelState.sampleRate = parsedSampleRate;
             exotelState.encoding = json.start.media_format?.encoding || 'pcm16';
             exotelState.started = true;
             console.info('[exotel] Start event received via JSON', {
