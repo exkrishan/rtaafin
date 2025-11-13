@@ -137,18 +137,33 @@ export class ElevenLabsProvider implements AsrProvider {
 
         // Create Scribe connection
         // Note: SDK requires sampleRate parameter
-        const connection = Scribe.connect({
-          token: this.apiKey,
-          modelId: this.model,
+        console.info(`[ElevenLabsProvider] 🔌 Attempting to connect to ElevenLabs for ${interactionId}`, {
+          model: this.model,
           languageCode: this.languageCode,
           audioFormat: audioFormat,
           sampleRate: sampleRate,
-          commitStrategy: CommitStrategy.VAD,
-          vadSilenceThresholdSecs: parseFloat(process.env.ELEVENLABS_VAD_SILENCE_THRESHOLD || '1.5'),
-          vadThreshold: parseFloat(process.env.ELEVENLABS_VAD_THRESHOLD || '0.4'),
-          minSpeechDurationMs: parseInt(process.env.ELEVENLABS_MIN_SPEECH_DURATION_MS || '100', 10),
-          minSilenceDurationMs: parseInt(process.env.ELEVENLABS_MIN_SILENCE_DURATION_MS || '100', 10),
+          apiKeyPrefix: this.apiKey.substring(0, 10) + '...',
         });
+        
+        let connection;
+        try {
+          connection = Scribe.connect({
+            token: this.apiKey,
+            modelId: this.model,
+            languageCode: this.languageCode,
+            audioFormat: audioFormat,
+            sampleRate: sampleRate,
+            commitStrategy: CommitStrategy.VAD,
+            vadSilenceThresholdSecs: parseFloat(process.env.ELEVENLABS_VAD_SILENCE_THRESHOLD || '1.5'),
+            vadThreshold: parseFloat(process.env.ELEVENLABS_VAD_THRESHOLD || '0.4'),
+            minSpeechDurationMs: parseInt(process.env.ELEVENLABS_MIN_SPEECH_DURATION_MS || '100', 10),
+            minSilenceDurationMs: parseInt(process.env.ELEVENLABS_MIN_SILENCE_DURATION_MS || '100', 10),
+          });
+          console.info(`[ElevenLabsProvider] ✅ Scribe.connect() succeeded for ${interactionId}`);
+        } catch (connectError: any) {
+          console.error(`[ElevenLabsProvider] ❌ Scribe.connect() failed for ${interactionId}:`, connectError);
+          throw new Error(`Failed to create ElevenLabs connection: ${connectError.message}`);
+        }
 
         // Create connection state
         const newState: ConnectionState = {
@@ -216,16 +231,22 @@ export class ElevenLabsProvider implements AsrProvider {
         });
 
         // Wait for session to start (with timeout)
-        await Promise.race([
-          sessionStartedPromise,
-          new Promise<void>((_, reject) => 
-            setTimeout(() => reject(new Error('Session start timeout')), 10000)
-          ),
-        ]).catch((error) => {
-          console.warn(`[ElevenLabsProvider] Session start timeout or error for ${interactionId}:`, error);
-          // Mark as ready anyway - connection might still work
-          newState.isReady = true;
-        });
+        let sessionStarted = false;
+        try {
+          await Promise.race([
+            sessionStartedPromise,
+            new Promise<void>((_, reject) => 
+              setTimeout(() => reject(new Error('Session start timeout')), 10000)
+            ),
+          ]);
+          sessionStarted = true;
+          console.info(`[ElevenLabsProvider] ✅ Session started successfully for ${interactionId}`);
+        } catch (error: any) {
+          console.warn(`[ElevenLabsProvider] ⚠️ Session start timeout or error for ${interactionId}:`, error.message);
+          // Don't mark as ready if session didn't start - connection won't work
+          // The connection will be retried on next send attempt
+          throw new Error(`Failed to establish ElevenLabs session: ${error.message}`);
+        }
 
         this.metrics.connectionsCreated++;
         this.connections.set(interactionId, newState);
@@ -404,7 +425,16 @@ export class ElevenLabsProvider implements AsrProvider {
     // Send audio to ElevenLabs
     // Convert Buffer to base64 and send via connection.send()
     try {
+      // Verify connection is actually ready before sending
+      if (!stateToUse.connection) {
+        throw new Error(`Connection object is null for ${interactionId}`);
+      }
+      
+      // Check if connection has a valid state (ElevenLabs SDK internal check)
+      // The SDK will throw "WebSocket is not connected" if not ready
       const audioBase64 = audio.toString('base64');
+      
+      // Try to send - if it fails, we'll catch and retry connection
       stateToUse.connection.send({
         audioBase64: audioBase64,
         commit: false,
@@ -422,6 +452,15 @@ export class ElevenLabsProvider implements AsrProvider {
     } catch (error: any) {
       console.error(`[ElevenLabsProvider] Error sending audio for ${interactionId}:`, error);
       this.metrics.errors++;
+      
+      // If WebSocket is not connected, close the connection and it will be recreated on next attempt
+      if (error.message && error.message.includes('WebSocket is not connected')) {
+        console.warn(`[ElevenLabsProvider] ⚠️ WebSocket not connected for ${interactionId}, closing connection for retry`);
+        this.closeConnection(interactionId).catch((e) => {
+          console.error(`[ElevenLabsProvider] Error closing connection after send failure:`, e);
+        });
+      }
+      
       throw error;
     }
 
