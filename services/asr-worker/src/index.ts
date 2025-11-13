@@ -798,8 +798,8 @@ class AsrWorker {
       console.info(`[ASRWorker] 🚀 Starting timer for ${interactionId} (checks every 200ms)`);
     }
 
-    // Start new timer: check every 200ms
-    const PROCESSING_TIMER_INTERVAL_MS = 200; // Check every 200ms
+    // Start new timer: check every 500ms (reduced frequency to match new send frequency)
+    const PROCESSING_TIMER_INTERVAL_MS = 500; // Check every 500ms (increased from 200ms to reduce overhead)
     const timer = setInterval(async () => {
       const buffer = this.buffers.get(interactionId);
       if (!buffer) {
