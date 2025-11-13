@@ -282,8 +282,22 @@ class AsrWorker {
           seq: msg?.seq || 'unknown',
           has_audio: !!msg?.audio,
           audio_length: msg?.audio?.length || 0,
+          audio_type: typeof msg?.audio,
+          msg_keys: Object.keys(msg || {}),
+          msg_preview: JSON.stringify(msg).substring(0, 500),
           timestamp: new Date().toISOString(),
         });
+        
+        // CRITICAL: Log message structure to diagnose parsing issues
+        if (!msg?.audio && !msg?.audio_data && !msg?.data) {
+          console.warn(`[ASRWorker] ⚠️ Message missing audio field!`, {
+            interaction_id: msg?.interaction_id,
+            seq: msg?.seq,
+            all_keys: Object.keys(msg || {}),
+            msg_structure: JSON.stringify(msg, null, 2).substring(0, 1000),
+          });
+        }
+        
         try {
           await this.handleAudioFrame(msg as any);
         } catch (error: any) {
@@ -292,6 +306,7 @@ class AsrWorker {
             stack: error.stack,
             interaction_id: msg?.interaction_id,
             seq: msg?.seq,
+            error_name: error.name,
           });
         }
       });
@@ -352,7 +367,7 @@ class AsrWorker {
     const interactionId = msg?.interaction_id;
     const seq = msg?.seq;
     
-    // CRITICAL: Log entry into handler for debugging
+    // CRITICAL: Log entry into handler for debugging - THIS MUST APPEAR IN LOGS
     console.info(`[ASRWorker] 🎵 Processing audio for ${interactionId}`, {
       interaction_id: interactionId,
       seq,
@@ -360,13 +375,18 @@ class AsrWorker {
       audio_length: msg?.audio?.length || 0,
       audio_type: typeof msg?.audio,
       msg_keys: Object.keys(msg || {}),
+      has_audio_key: 'audio' in (msg || {}),
+      has_audio_data_key: 'audio_data' in (msg || {}),
+      has_data_key: 'data' in (msg || {}),
+      msg_preview: JSON.stringify(msg).substring(0, 300),
     });
     
     // CRITICAL: Stop processing if call has ended - log this so we know why it's skipped
     if (interactionId && this.endedCalls.has(interactionId)) {
-      console.debug(`[ASRWorker] ⏸️ Skipping audio - call has ended for ${interactionId}`, {
+      console.info(`[ASRWorker] ⏸️ Skipping audio - call has ended for ${interactionId}`, {
         interaction_id: interactionId,
         seq,
+        ended_calls_count: this.endedCalls.size,
       });
       return;
     }
@@ -374,30 +394,56 @@ class AsrWorker {
     // Check Exotel Bridge feature flag - skip processing if bridge is disabled
     const exoBridgeEnabled = process.env.EXO_BRIDGE_ENABLED === 'true';
     if (!exoBridgeEnabled) {
-      // CRITICAL: Log at info level so it's visible in production logs
-      console.warn('[ASRWorker] ⚠️ Bridge disabled (EXO_BRIDGE_ENABLED != true), skipping audio frame processing', {
+      // CRITICAL: Log at ERROR level so it's definitely visible in production logs
+      console.error('[ASRWorker] ❌ CRITICAL: Bridge disabled (EXO_BRIDGE_ENABLED != true), skipping audio frame processing', {
         interaction_id: interactionId,
         seq: msg?.seq,
         env_value: process.env.EXO_BRIDGE_ENABLED || 'NOT SET',
+        env_all_keys: Object.keys(process.env).filter(k => k.includes('EXO') || k.includes('BRIDGE')).join(', '),
         note: 'Set EXO_BRIDGE_ENABLED=true to enable audio processing',
       });
       return;
     }
 
     try {
+      // CRITICAL: Check for alternative field names (audio_data, data, payload)
+      let audioData: string | undefined = msg.audio;
+      if (!audioData && msg.audio_data) {
+        console.info(`[ASRWorker] ℹ️ Using audio_data field instead of audio for ${interactionId}`);
+        audioData = msg.audio_data;
+      }
+      if (!audioData && msg.data && typeof msg.data === 'string') {
+        console.info(`[ASRWorker] ℹ️ Using data field instead of audio for ${interactionId}`);
+        audioData = msg.data;
+      }
+      if (!audioData && msg.payload && typeof msg.payload === 'string') {
+        console.info(`[ASRWorker] ℹ️ Using payload field instead of audio for ${interactionId}`);
+        audioData = msg.payload;
+      }
+      
       // Validate audio field exists and is a string
-      if (!msg.audio || typeof msg.audio !== 'string') {
-        console.error('[ASRWorker] ❌ Invalid audio field in message:', {
+      if (!audioData || typeof audioData !== 'string') {
+        console.error('[ASRWorker] ❌ CRITICAL: Invalid or missing audio field in message:', {
           interaction_id: msg.interaction_id,
           seq: msg.seq,
           audio_type: typeof msg.audio,
+          audio_data_type: typeof msg.audio_data,
+          data_type: typeof msg.data,
           audio_length: msg.audio?.length,
+          audio_data_length: msg.audio_data?.length,
+          data_length: msg.data?.length,
           msg_keys: Object.keys(msg),
           has_audio_key: 'audio' in msg,
-          msg_preview: JSON.stringify(msg).substring(0, 200),
+          has_audio_data_key: 'audio_data' in msg,
+          has_data_key: 'data' in msg,
+          msg_preview: JSON.stringify(msg).substring(0, 500),
+          note: 'Message must contain audio, audio_data, data, or payload field with base64-encoded audio',
         });
         return;
       }
+      
+      // Use the found audio data
+      msg.audio = audioData;
       
       // Log that we're proceeding with audio validation
       console.debug(`[ASRWorker] 🔍 Audio validation starting for ${interactionId}`, {
