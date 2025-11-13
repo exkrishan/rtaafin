@@ -402,7 +402,7 @@ class AsrWorker {
       // Log that we're proceeding with audio validation
       console.debug(`[ASRWorker] 🔍 Audio validation starting for ${interactionId}`, {
         interaction_id: interactionId,
-        seq,
+        seq: msg?.seq,
         audio_length: msg.audio.length,
       });
 
@@ -754,10 +754,7 @@ class AsrWorker {
       // This ensures we check every 500ms if we should send, regardless of chunk arrival frequency
       this.startBufferProcessingTimer(interaction_id);
 
-      // Calculate current audio duration in buffer
-      const totalSamples = buffer.chunks.reduce((sum, chunk) => sum + chunk.length, 0) / 2; // 16-bit = 2 bytes per sample
-      const currentAudioDurationMs = (totalSamples / sample_rate) * 1000;
-      
+      // Reuse totalAudioDurationMs already calculated above for logging
       // Log new chunk arrival to verify new audio is coming in
       console.info(`[ASRWorker] 📥 Received audio chunk:`, {
         interaction_id,
@@ -765,9 +762,9 @@ class AsrWorker {
         audioSize: audioBuffer.length,
         chunkDurationMs: ((audioBuffer.length / 2) / sample_rate) * 1000,
         totalChunksInBuffer: buffer.chunks.length,
-        totalAudioDurationMs: currentAudioDurationMs.toFixed(0),
+        totalAudioDurationMs: totalAudioDurationMs.toFixed(0),
         bufferAge: Date.now() - buffer.lastProcessed,
-        meetsMinimum: currentAudioDurationMs >= CONTINUOUS_CHUNK_DURATION_MS, // Use CONTINUOUS_CHUNK_DURATION_MS (100ms) instead of MIN_AUDIO_DURATION_MS (200ms)
+        meetsMinimum: totalAudioDurationMs >= CONTINUOUS_CHUNK_DURATION_MS, // Use CONTINUOUS_CHUNK_DURATION_MS (100ms) instead of MIN_AUDIO_DURATION_MS (200ms)
         minRequiredForSend: CONTINUOUS_CHUNK_DURATION_MS,
       });
 
@@ -794,11 +791,11 @@ class AsrWorker {
         // If audio arrives slowly, don't wait forever - send after 1 second max
         const timeSinceBufferCreation = Date.now() - buffer.lastProcessed;
         const MAX_INITIAL_WAIT_MS = 1000; // Send first chunk within 1 second max
-        const hasEnoughAudio = currentAudioDurationMs >= INITIAL_CHUNK_DURATION_MS;
+        const hasEnoughAudio = totalAudioDurationMs >= INITIAL_CHUNK_DURATION_MS;
         const hasWaitedTooLong = timeSinceBufferCreation >= MAX_INITIAL_WAIT_MS;
         
         // Send if we have enough audio OR if we've waited too long (prevent timeout)
-        if (hasEnoughAudio || (hasWaitedTooLong && currentAudioDurationMs >= 20)) {
+        if (hasEnoughAudio || (hasWaitedTooLong && totalAudioDurationMs >= 20)) {
           // CRITICAL: Don't await processBuffer - it sends audio asynchronously
           // This prevents buffer from being locked during 5-second transcript wait
           buffer.isProcessing = true;
@@ -813,9 +810,9 @@ class AsrWorker {
             });
             buffer.lastContinuousSendTime = Date.now();
             if (hasWaitedTooLong) {
-              console.warn(`[ASRWorker] ⚠️ First chunk sent early (${currentAudioDurationMs.toFixed(0)}ms) due to timeout risk (${timeSinceBufferCreation}ms wait)`, {
+              console.warn(`[ASRWorker] ⚠️ First chunk sent early (${totalAudioDurationMs.toFixed(0)}ms) due to timeout risk (${timeSinceBufferCreation}ms wait)`, {
                 interaction_id,
-                audioDuration: currentAudioDurationMs.toFixed(0),
+                audioDuration: totalAudioDurationMs.toFixed(0),
                 waitTime: timeSinceBufferCreation,
               });
             }
@@ -840,9 +837,9 @@ class AsrWorker {
         const timeSinceLastSend = buffer.lastContinuousSendTime > 0 ? Date.now() - buffer.lastContinuousSendTime : 'never';
         console.debug(`[ASRWorker] 📥 Chunk received (continuous mode) - timer will handle sending for ${interaction_id}`, {
           chunksCount: buffer.chunks.length,
-          totalAudioDurationMs: currentAudioDurationMs.toFixed(0),
+          totalAudioDurationMs: totalAudioDurationMs.toFixed(0),
           timeSinceLastSend: timeSinceLastSend,
-          note: 'Timer checks every 200ms and sends when needed',
+          note: 'Timer checks every 500ms and sends when needed',
         });
       }
     } catch (error: any) {
