@@ -38,7 +38,7 @@ const BUFFER_WINDOW_MS = parseInt(process.env.BUFFER_WINDOW_MS || '1000', 10);
 // Stale buffer timeout: if no new audio arrives for this duration, clean up the buffer
 // This prevents processing old audio after a call has ended
 const STALE_BUFFER_TIMEOUT_MS = parseInt(process.env.STALE_BUFFER_TIMEOUT_MS || '5000', 10); // 5 seconds
-const ASR_PROVIDER = (process.env.ASR_PROVIDER || 'mock') as 'mock' | 'deepgram' | 'whisper';
+const ASR_PROVIDER = (process.env.ASR_PROVIDER || 'mock') as 'mock' | 'deepgram' | 'whisper' | 'google' | 'elevenlabs';
 
 interface AudioBuffer {
   interactionId: string;
@@ -89,6 +89,16 @@ class AsrWorker {
           'No fallback to mock provider - this ensures proper testing.'
         );
       }
+    }
+    
+    if (ASR_PROVIDER === 'elevenlabs' && !process.env.ELEVENLABS_API_KEY) {
+      console.error('[ASRWorker] ❌ CRITICAL: ASR_PROVIDER=elevenlabs but ELEVENLABS_API_KEY is not set!');
+      console.error('[ASRWorker] The system will NOT fall back to mock provider.');
+      console.error('[ASRWorker] Please set ELEVENLABS_API_KEY environment variable or change ASR_PROVIDER to "mock".');
+      throw new Error(
+        'ELEVENLABS_API_KEY is required when ASR_PROVIDER=elevenlabs. ' +
+        'No fallback to mock provider - this ensures proper testing.'
+      );
     }
     
     // Log Exotel Bridge status
