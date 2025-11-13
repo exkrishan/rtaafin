@@ -951,12 +951,12 @@ class AsrWorker {
     }
 
     try {
-      // CRITICAL FIX: Aggregation to prevent 20ms chunks with 8-9s gaps
-      // Deepgram requires continuous stream with <500ms gaps
-      // Strategy: Aggregate to minimum 100ms chunks, send after max 200ms wait
-      const MIN_CHUNK_DURATION_MS = 100; // Minimum 100ms for reliable transcription
-      const MAX_WAIT_MS = 200; // Maximum 200ms between sends (prevents gaps)
-      const INITIAL_BURST_MS = 250; // Initial burst 200-300ms for faster first transcript
+      // CRITICAL FIX: Updated to match timer settings (250ms chunks, 1000ms send frequency)
+      // These values MUST match the timer settings to prevent backlog buildup
+      // Strategy: Aggregate to minimum 250ms chunks, send after max 1000ms wait
+      const MIN_CHUNK_DURATION_MS = 250; // Increased from 100ms - matches timer setting
+      const MAX_WAIT_MS = 1000; // Increased from 200ms - matches timer setting
+      const INITIAL_BURST_MS = 250; // Initial burst 250ms for faster first transcript
       
       // Calculate total audio in buffer
       const totalBytes = buffer.chunks.reduce((sum, chunk) => sum + chunk.length, 0);
@@ -973,24 +973,24 @@ class AsrWorker {
       
       // Determine required duration based on mode
       let requiredDuration: number;
-      const TIMEOUT_FALLBACK_MS = 500; // If waiting > 500ms, send what we have
-      const TIMEOUT_FALLBACK_MIN_MS = 20; // Minimum for timeout fallback
+      const TIMEOUT_FALLBACK_MS = 2000; // If waiting > 2000ms, send what we have (matches timer)
+      const TIMEOUT_FALLBACK_MIN_MS = 150; // Increased from 20ms - matches timer setting
       
       if (!buffer.hasSentInitialChunk) {
-        // Initial chunk: Require 250ms burst OR send after 1s max wait (but still need 100ms minimum)
+        // Initial chunk: Require 250ms burst OR send after 1s max wait (but still need 250ms minimum)
         const MAX_INITIAL_WAIT_MS = 1000;
         if (timeSinceBufferCreation >= MAX_INITIAL_WAIT_MS && totalAudioDurationMs >= MIN_CHUNK_DURATION_MS) {
-          // Force send if waited too long, but still require 100ms minimum
+          // Force send if waited too long, but still require 250ms minimum
           requiredDuration = MIN_CHUNK_DURATION_MS;
         } else {
           requiredDuration = INITIAL_BURST_MS;
         }
       } else {
-        // Continuous mode: Require 100ms minimum, but allow timeout fallback after extended wait
-        // If we've waited > 2000ms and have at least 20ms, send to prevent Deepgram timeout
-        // This gives chunks time to accumulate to 100ms+ before timeout fallback triggers
+        // Continuous mode: Require 250ms minimum, but allow timeout fallback after extended wait
+        // If we've waited > 2000ms and have at least 150ms, send to prevent Deepgram timeout
+        // This gives chunks time to accumulate to 250ms+ before timeout fallback triggers
         if (timeSinceLastSend >= TIMEOUT_FALLBACK_MS && totalAudioDurationMs >= TIMEOUT_FALLBACK_MIN_MS) {
-          // Timeout risk: send what we have (even if < 100ms) to prevent 1011 errors
+          // Timeout risk: send what we have (even if < 250ms) to prevent 1011 errors
           // This is absolute last resort after 2+ seconds of waiting
           requiredDuration = TIMEOUT_FALLBACK_MIN_MS;
           console.warn(`[ASRWorker] ⚠️ Timeout risk: sending ${totalAudioDurationMs.toFixed(0)}ms chunk (minimum: ${TIMEOUT_FALLBACK_MIN_MS}ms) to prevent Deepgram timeout after ${timeSinceLastSend}ms wait`, {
@@ -998,10 +998,10 @@ class AsrWorker {
             timeSinceLastSend,
             totalAudioDurationMs: totalAudioDurationMs.toFixed(0),
             chunksInBuffer: buffer.chunks.length,
-            note: 'This should be rare - chunks should accumulate to 100ms+ before this triggers',
+            note: 'This should be rare - chunks should accumulate to 250ms+ before this triggers',
           });
         } else {
-          // Normal case: wait for 100ms minimum
+          // Normal case: wait for 250ms minimum (matches timer setting)
           requiredDuration = MIN_CHUNK_DURATION_MS;
         }
       }
