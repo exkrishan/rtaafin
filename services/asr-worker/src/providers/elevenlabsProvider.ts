@@ -182,18 +182,21 @@ export class ElevenLabsProvider implements AsrProvider {
         // ElevenLabs SDK uses RealtimeEvents constants
         const { RealtimeEvents } = require('@elevenlabs/client');
         
-        // Wait for session to start before marking as ready
-        const sessionStartedPromise = new Promise<void>((resolve) => {
-          connection.on(RealtimeEvents.SESSION_STARTED, (data: any) => {
-            console.info(`[ElevenLabsProvider] Session started for ${interactionId}`, data);
-            newState.isReady = true;
+        // Wait for WebSocket to open first, then wait for session to start
+        const connectionOpenedPromise = new Promise<void>((resolve) => {
+          connection.on(RealtimeEvents.OPEN, () => {
+            console.info(`[ElevenLabsProvider] ✅ Connection opened for ${interactionId}`);
             resolve();
           });
         });
         
-        // Also wait for connection to open
-        connection.on(RealtimeEvents.OPEN, () => {
-          console.info(`[ElevenLabsProvider] Connection opened for ${interactionId}`);
+        // Wait for session to start after connection opens
+        const sessionStartedPromise = new Promise<void>((resolve) => {
+          connection.on(RealtimeEvents.SESSION_STARTED, (data: any) => {
+            console.info(`[ElevenLabsProvider] ✅ Session started for ${interactionId}`, data);
+            newState.isReady = true;
+            resolve();
+          });
         });
         
         connection.on(RealtimeEvents.PARTIAL_TRANSCRIPT, (data: any) => {
@@ -230,8 +233,21 @@ export class ElevenLabsProvider implements AsrProvider {
           this.connections.delete(interactionId);
         });
 
-        // Wait for session to start (with timeout)
-        let sessionStarted = false;
+        // Wait for connection to open first (with timeout)
+        try {
+          await Promise.race([
+            connectionOpenedPromise,
+            new Promise<void>((_, reject) => 
+              setTimeout(() => reject(new Error('Connection open timeout')), 5000)
+            ),
+          ]);
+          console.info(`[ElevenLabsProvider] ✅ WebSocket connection opened for ${interactionId}`);
+        } catch (error: any) {
+          console.warn(`[ElevenLabsProvider] ⚠️ Connection open timeout for ${interactionId}:`, error.message);
+          throw new Error(`Failed to open ElevenLabs WebSocket connection: ${error.message}`);
+        }
+        
+        // Wait for session to start after connection opens (with timeout)
         try {
           await Promise.race([
             sessionStartedPromise,
@@ -239,12 +255,10 @@ export class ElevenLabsProvider implements AsrProvider {
               setTimeout(() => reject(new Error('Session start timeout')), 10000)
             ),
           ]);
-          sessionStarted = true;
           console.info(`[ElevenLabsProvider] ✅ Session started successfully for ${interactionId}`);
         } catch (error: any) {
-          console.warn(`[ElevenLabsProvider] ⚠️ Session start timeout or error for ${interactionId}:`, error.message);
+          console.warn(`[ElevenLabsProvider] ⚠️ Session start timeout for ${interactionId}:`, error.message);
           // Don't mark as ready if session didn't start - connection won't work
-          // The connection will be retried on next send attempt
           throw new Error(`Failed to establish ElevenLabs session: ${error.message}`);
         }
 
