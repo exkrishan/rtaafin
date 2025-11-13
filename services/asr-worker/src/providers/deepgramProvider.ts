@@ -419,7 +419,7 @@ export class DeepgramProvider implements AsrProvider {
                   clearInterval(state.keepAliveInterval);
                 }
                 return;
-              } else {
+          } else {
                 // Still CONNECTING - check again
                 setTimeout(checkReady, 50); // Check every 50ms
               }
@@ -452,14 +452,14 @@ export class DeepgramProvider implements AsrProvider {
               this.metrics.keepAliveSuccess++;
               return true;
             } catch (error: any) {
-              state.keepAliveFailureCount++;
-              this.metrics.keepAliveFailures++;
+            state.keepAliveFailureCount++;
+            this.metrics.keepAliveFailures++;
               console.error(`[DeepgramProvider] ❌ Failed to send KeepAlive for ${interactionId}:`, error);
-              return false;
-            }
-          };
-          
-          // Send initial KeepAlive
+            return false;
+          }
+        };
+        
+        // Send initial KeepAlive
           try {
             sendKeepAlive();
             console.info(`[DeepgramProvider] 📡 Sent initial KeepAlive for ${interactionId}`);
@@ -469,25 +469,25 @@ export class DeepgramProvider implements AsrProvider {
           
           // SDK's send() method automatically flushes its internal buffer when connection opens
           // No need to manually flush - SDK handles it
-          if (state.pendingAudioQueue && state.pendingAudioQueue.length > 0) {
+        if (state.pendingAudioQueue && state.pendingAudioQueue.length > 0) {
             console.info(`[DeepgramProvider] ℹ️ Connection opened with ${state.pendingAudioQueue.length} queued chunks - SDK will handle buffering automatically for ${interactionId}`);
             // Clear our manual queue since SDK handles buffering
             state.pendingAudioQueue = [];
-          }
-          
-          // Set up periodic KeepAlive (every 3 seconds) to prevent timeout during silence
-          // This is CRITICAL - Deepgram closes connections if no data is received within timeout
-          // KeepAlive must be JSON format sent as TEXT frame via underlying WebSocket
-          const keepAliveIntervalMs = parseInt(process.env.DEEPGRAM_KEEPALIVE_INTERVAL_MS || '3000', 10);
-          const keepAliveEnabled = process.env.DEEPGRAM_KEEPALIVE_ENABLED !== 'false'; // Default true
-          
-          if (keepAliveEnabled) {
-            state.keepAliveInterval = setInterval(() => {
-              if (!state.isReady || !state.connection) {
-                return;
-              }
-              
-              try {
+        }
+        
+        // Set up periodic KeepAlive (every 3 seconds) to prevent timeout during silence
+        // This is CRITICAL - Deepgram closes connections if no data is received within timeout
+        // KeepAlive must be JSON format sent as TEXT frame via underlying WebSocket
+        const keepAliveIntervalMs = parseInt(process.env.DEEPGRAM_KEEPALIVE_INTERVAL_MS || '3000', 10);
+        const keepAliveEnabled = process.env.DEEPGRAM_KEEPALIVE_ENABLED !== 'false'; // Default true
+        
+        if (keepAliveEnabled) {
+          state.keepAliveInterval = setInterval(() => {
+            if (!state.isReady || !state.connection) {
+              return;
+            }
+            
+            try {
                 // Check connection state using SDK method
                 const readyState = connection.getReadyState();
                 if (readyState >= 2) {
@@ -501,39 +501,39 @@ export class DeepgramProvider implements AsrProvider {
                 }
                 
                 const success = sendKeepAlive();
-                if (success) {
-                  console.debug(`[DeepgramProvider] 📡 KeepAlive sent (success: ${state.keepAliveSuccessCount}, failures: ${state.keepAliveFailureCount})`);
-                } else {
-                  console.warn(`[DeepgramProvider] ⚠️ KeepAlive failed (success: ${state.keepAliveSuccessCount}, failures: ${state.keepAliveFailureCount})`);
-                  
-                  // If too many failures, log critical warning
-                  if (state.keepAliveFailureCount > 5 && state.keepAliveFailureCount % 10 === 0) {
-                    console.error(`[DeepgramProvider] ❌ CRITICAL: KeepAlive failing repeatedly (${state.keepAliveFailureCount} failures). Connection may timeout.`);
-                  }
-                }
-              } catch (error: any) {
-                console.error(`[DeepgramProvider] ❌ Failed to send periodic KeepAlive for ${interactionId}:`, error);
-                state.keepAliveFailureCount++;
-                this.metrics.keepAliveFailures++;
+              if (success) {
+                console.debug(`[DeepgramProvider] 📡 KeepAlive sent (success: ${state.keepAliveSuccessCount}, failures: ${state.keepAliveFailureCount})`);
+              } else {
+                console.warn(`[DeepgramProvider] ⚠️ KeepAlive failed (success: ${state.keepAliveSuccessCount}, failures: ${state.keepAliveFailureCount})`);
                 
+                // If too many failures, log critical warning
+                if (state.keepAliveFailureCount > 5 && state.keepAliveFailureCount % 10 === 0) {
+                  console.error(`[DeepgramProvider] ❌ CRITICAL: KeepAlive failing repeatedly (${state.keepAliveFailureCount} failures). Connection may timeout.`);
+                }
+              }
+            } catch (error: any) {
+              console.error(`[DeepgramProvider] ❌ Failed to send periodic KeepAlive for ${interactionId}:`, error);
+              state.keepAliveFailureCount++;
+              this.metrics.keepAliveFailures++;
+              
                 // Check connection state - if closed, clear interval
                 try {
                   const readyState = connection.getReadyState();
                   if (readyState >= 2) {
-                    if (state.keepAliveInterval) {
-                      clearInterval(state.keepAliveInterval);
-                      state.keepAliveInterval = undefined;
+                if (state.keepAliveInterval) {
+                  clearInterval(state.keepAliveInterval);
+                  state.keepAliveInterval = undefined;
                       console.debug(`[DeepgramProvider] Cleared KeepAlive interval (connection closed) for ${interactionId}`);
-                    }
+                }
                   }
                 } catch (e) {
                   // Ignore errors checking readyState
-                }
               }
-            }, keepAliveIntervalMs);
-          } else {
-            console.warn(`[DeepgramProvider] ⚠️ KeepAlive disabled via DEEPGRAM_KEEPALIVE_ENABLED=false for ${interactionId}`);
-          }
+            }
+          }, keepAliveIntervalMs);
+        } else {
+          console.warn(`[DeepgramProvider] ⚠️ KeepAlive disabled via DEEPGRAM_KEEPALIVE_ENABLED=false for ${interactionId}`);
+        }
         };
         
         // Use SDK's getReadyState() to verify connection is ready
@@ -1327,10 +1327,45 @@ export class DeepgramProvider implements AsrProvider {
         }
         
         try {
-        // Send audio via Deepgram SDK connection.send()
-        // SDK's send() method automatically buffers if not connected, so we can trust it
-        // No need to manually queue or check socket state - SDK handles it
-        stateToUse.connection.send(audioData);
+          // Explicit connection state check (following Deepgram starter pattern)
+          // This matches the starter's approach: check getReadyState() before sending
+          const readyState = stateToUse.connection.getReadyState();
+          
+          if (readyState === 1) {
+            // OPEN - send directly (matches starter pattern)
+            stateToUse.connection.send(audioData);
+          } else if (readyState >= 2) {
+            // CLOSING or CLOSED - connection is invalid, need to reconnect
+            // This matches starter pattern: if >= 2, finish and recreate
+            console.warn(`[DeepgramProvider] ⚠️ Connection closed (readyState: ${readyState}) for ${interactionId}, closing and will recreate on next attempt`);
+            
+            // Close the connection (matches starter: deepgram.finish())
+            if (stateToUse.connection && typeof stateToUse.connection.finish === 'function') {
+              stateToUse.connection.finish();
+            }
+            
+            // Clear KeepAlive interval
+            if (stateToUse.keepAliveInterval) {
+              clearInterval(stateToUse.keepAliveInterval);
+              stateToUse.keepAliveInterval = undefined;
+            }
+            
+            // Remove from connections map - will be recreated on next sendAudioChunk call
+            this.connections.delete(interactionId);
+            
+            // Return empty transcript - connection will be recreated on next chunk
+            return {
+              type: 'partial',
+              text: '',
+              isFinal: false,
+              confidence: 0,
+            };
+          } else {
+            // CONNECTING (0) - SDK will buffer automatically, but log for visibility
+            // SDK's send() method handles buffering internally, so this is safe
+            console.debug(`[DeepgramProvider] Connection CONNECTING (readyState: 0), SDK will buffer audio for ${interactionId}`);
+            stateToUse.connection.send(audioData); // SDK handles buffering
+          }
           const sendDuration = Date.now() - sendStartTime;
           
           // COMPREHENSIVE FLOW TRACKING: Log after successful send
@@ -1544,7 +1579,7 @@ export class DeepgramProvider implements AsrProvider {
         if (state.connection && typeof state.connection.requestClose === 'function') {
           state.connection.requestClose();
           console.info(`[DeepgramProvider] 📤 Sent CloseStream via SDK requestClose() for ${interactionId}`);
-          // Wait a brief moment for Deepgram to process CloseStream
+        // Wait a brief moment for Deepgram to process CloseStream
           await new Promise(resolve => setTimeout(resolve, 100));
         } else if (state.connection && typeof state.connection.finish === 'function') {
           // Fallback to finish() if requestClose() not available (older SDK versions)
