@@ -77,6 +77,41 @@ export class ElevenLabsProvider implements AsrProvider {
     });
   }
 
+  /**
+   * Create a single-use token for Scribe realtime API
+   * According to ElevenLabs docs, server-side implementations must use single-use tokens
+   * Tokens expire after 15 minutes
+   */
+  private async createSingleUseToken(): Promise<string> {
+    try {
+      const response = await fetch(
+        'https://api.elevenlabs.io/v1/single-use-token/realtime_scribe',
+        {
+          method: 'POST',
+          headers: {
+            'xi-api-key': this.apiKey,
+          },
+        }
+      );
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Failed to create single-use token: ${response.status} ${errorText}`);
+      }
+
+      const data = await response.json() as { token?: string };
+      if (!data.token) {
+        throw new Error('No token in response from single-use-token endpoint');
+      }
+
+      console.info('[ElevenLabsProvider] ✅ Created single-use token (expires in 15 minutes)');
+      return data.token;
+    } catch (error: any) {
+      console.error('[ElevenLabsProvider] ❌ Failed to create single-use token:', error);
+      throw new Error(`Failed to create ElevenLabs single-use token: ${error.message}`);
+    }
+  }
+
   private async getOrCreateConnection(
     interactionId: string,
     sampleRate: number
@@ -135,20 +170,24 @@ export class ElevenLabsProvider implements AsrProvider {
           sampleRate = 16000;
         }
 
-        // Create Scribe connection
-        // Note: SDK requires sampleRate parameter
+        // Create single-use token first (required for server-side implementation)
+        // According to ElevenLabs docs, never expose API key directly to Scribe.connect()
+        console.info(`[ElevenLabsProvider] 🔑 Creating single-use token for ${interactionId}...`);
+        const singleUseToken = await this.createSingleUseToken();
+
+        // Create Scribe connection using the single-use token
         console.info(`[ElevenLabsProvider] 🔌 Attempting to connect to ElevenLabs for ${interactionId}`, {
           model: this.model,
           languageCode: this.languageCode,
           audioFormat: audioFormat,
           sampleRate: sampleRate,
-          apiKeyPrefix: this.apiKey.substring(0, 10) + '...',
         });
         
         let connection;
         try {
+          // Use single-use token (not API key) as per ElevenLabs documentation
           connection = Scribe.connect({
-            token: this.apiKey,
+            token: singleUseToken,  // Use single-use token, not API key
             modelId: this.model,
             languageCode: this.languageCode,
             audioFormat: audioFormat,
@@ -211,9 +250,9 @@ export class ElevenLabsProvider implements AsrProvider {
           console.error(`[ElevenLabsProvider] ❌ Authentication error for ${interactionId}:`, error);
           console.error(`[ElevenLabsProvider] API Key (first 10 chars): ${this.apiKey.substring(0, 10)}...`);
           console.error(`[ElevenLabsProvider] Please verify:`);
-          console.error(`[ElevenLabsProvider]   1. API key is correct: ${this.apiKey.substring(0, 10)}...`);
-          console.error(`[ElevenLabsProvider]   2. API key has Speech-to-Text permissions`);
-          console.error(`[ElevenLabsProvider]   3. API key is not expired`);
+          console.error(`[ElevenLabsProvider]   1. API key is correct and has Speech-to-Text permissions`);
+          console.error(`[ElevenLabsProvider]   2. Single-use token was created successfully`);
+          console.error(`[ElevenLabsProvider]   3. Account subscription includes Speech-to-Text access`);
           this.metrics.errors++;
           this.handleConnectionError(interactionId, new Error(`Authentication failed: ${JSON.stringify(error)}`));
         });
