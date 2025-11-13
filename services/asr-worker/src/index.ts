@@ -350,10 +350,24 @@ class AsrWorker {
 
   private async handleAudioFrame(msg: any): Promise<void> {
     const interactionId = msg?.interaction_id;
+    const seq = msg?.seq;
     
-    // CRITICAL: Stop processing if call has ended - no logs, no processing
+    // CRITICAL: Log entry into handler for debugging
+    console.info(`[ASRWorker] 🎵 Processing audio for ${interactionId}`, {
+      interaction_id: interactionId,
+      seq,
+      has_audio: !!msg?.audio,
+      audio_length: msg?.audio?.length || 0,
+      audio_type: typeof msg?.audio,
+      msg_keys: Object.keys(msg || {}),
+    });
+    
+    // CRITICAL: Stop processing if call has ended - log this so we know why it's skipped
     if (interactionId && this.endedCalls.has(interactionId)) {
-      // Silently skip - call has ended, don't process or log anything
+      console.debug(`[ASRWorker] ⏸️ Skipping audio - call has ended for ${interactionId}`, {
+        interaction_id: interactionId,
+        seq,
+      });
       return;
     }
     
@@ -379,9 +393,18 @@ class AsrWorker {
           audio_type: typeof msg.audio,
           audio_length: msg.audio?.length,
           msg_keys: Object.keys(msg),
+          has_audio_key: 'audio' in msg,
+          msg_preview: JSON.stringify(msg).substring(0, 200),
         });
         return;
       }
+      
+      // Log that we're proceeding with audio validation
+      console.debug(`[ASRWorker] 🔍 Audio validation starting for ${interactionId}`, {
+        interaction_id: interactionId,
+        seq,
+        audio_length: msg.audio.length,
+      });
 
       // Log raw audio field for first few frames to debug
       if (msg.seq === undefined || msg.seq < 3) {
@@ -708,9 +731,27 @@ class AsrWorker {
       buffer.timestamps.push(frame.timestamp_ms);
       buffer.sequences.push(seq); // Track sequence number from incoming frame
       buffer.lastChunkReceived = Date.now(); // Update last chunk received time
+      
+      // Update buffer stats in BufferManager
+      const totalSamples = buffer.chunks.reduce((sum, chunk) => sum + chunk.length, 0) / 2;
+      const totalAudioDurationMs = (totalSamples / buffer.sampleRate) * 1000;
+      this.bufferManager.updateBufferStats(interaction_id, {
+        chunksCount: buffer.chunks.length,
+        totalAudioMs: totalAudioDurationMs,
+      });
+
+      // Log chunk added to buffer
+      console.info(`[ASRWorker] 📥 Added chunk to buffer for ${interaction_id}`, {
+        interaction_id,
+        seq,
+        chunksCount: buffer.chunks.length,
+        totalAudioDurationMs: totalAudioDurationMs.toFixed(0),
+        bufferSize: buffer.chunks.length,
+        hasSentInitialChunk: buffer.hasSentInitialChunk,
+      });
 
       // CRITICAL: Start/restart processing timer to ensure frequent sends
-      // This ensures we check every 200ms if we should send, regardless of chunk arrival frequency
+      // This ensures we check every 500ms if we should send, regardless of chunk arrival frequency
       this.startBufferProcessingTimer(interaction_id);
 
       // Calculate current audio duration in buffer
@@ -937,7 +978,11 @@ class AsrWorker {
       clearInterval(existingTimer);
       console.debug(`[ASRWorker] 🔄 Restarting timer for ${interactionId}`);
     } else {
-      console.info(`[ASRWorker] 🚀 Starting timer for ${interactionId} (checks every 500ms)`);
+      console.info(`[ASRWorker] 🚀 Starting timer for ${interactionId} (checks every 500ms)`, {
+        interaction_id: interactionId,
+        provider: ASR_PROVIDER,
+        note: 'Timer will check every 500ms if audio should be sent to ASR provider',
+      });
     }
 
     // Start new timer: check every 500ms (reduced frequency to match new send frequency)
