@@ -221,6 +221,33 @@ export class ElevenLabsProvider implements AsrProvider {
         // ElevenLabs SDK uses RealtimeEvents constants
         const { RealtimeEvents } = require('@elevenlabs/client');
         
+        // Debug: Log all events to understand what ElevenLabs is sending
+        const allEventNames = Object.keys(RealtimeEvents).filter(key => 
+          typeof RealtimeEvents[key] === 'string'
+        );
+        console.debug(`[ElevenLabsProvider] Available RealtimeEvents:`, allEventNames);
+        
+        // Listen to all events for debugging
+        allEventNames.forEach(eventName => {
+          const eventValue = RealtimeEvents[eventName];
+          if (eventValue && eventValue !== RealtimeEvents.PARTIAL_TRANSCRIPT && 
+              eventValue !== RealtimeEvents.COMMITTED_TRANSCRIPT &&
+              eventValue !== RealtimeEvents.OPEN &&
+              eventValue !== RealtimeEvents.SESSION_STARTED &&
+              eventValue !== RealtimeEvents.AUTH_ERROR &&
+              eventValue !== RealtimeEvents.ERROR &&
+              eventValue !== RealtimeEvents.CLOSE) {
+            connection.on(eventValue, (data: any) => {
+              console.debug(`[ElevenLabsProvider] 🔔 Received ${eventName} event for ${interactionId}:`, {
+                event: eventName,
+                hasData: !!data,
+                dataType: typeof data,
+                dataKeys: data && typeof data === 'object' ? Object.keys(data) : [],
+              });
+            });
+          }
+        });
+        
         // Wait for WebSocket to open first, then wait for session to start
         const connectionOpenedPromise = new Promise<void>((resolve) => {
           connection.on(RealtimeEvents.OPEN, () => {
@@ -239,10 +266,26 @@ export class ElevenLabsProvider implements AsrProvider {
         });
         
         connection.on(RealtimeEvents.PARTIAL_TRANSCRIPT, (data: any) => {
+          console.info(`[ElevenLabsProvider] 📨 Received PARTIAL_TRANSCRIPT event for ${interactionId}:`, {
+            hasTranscript: !!data.transcript,
+            hasText: !!data.text, // Legacy support
+            transcriptLength: data.transcript?.length || 0,
+            textLength: data.text?.length || 0,
+            transcriptPreview: data.transcript ? data.transcript.substring(0, 50) : (data.text ? data.text.substring(0, 50) : '(empty)'),
+            dataKeys: Object.keys(data),
+          });
           this.handleTranscript(interactionId, { ...data, isFinal: false });
         });
 
         connection.on(RealtimeEvents.COMMITTED_TRANSCRIPT, (data: any) => {
+          console.info(`[ElevenLabsProvider] 📨 Received COMMITTED_TRANSCRIPT event for ${interactionId}:`, {
+            hasTranscript: !!data.transcript,
+            hasText: !!data.text, // Legacy support
+            transcriptLength: data.transcript?.length || 0,
+            textLength: data.text?.length || 0,
+            transcriptPreview: data.transcript ? data.transcript.substring(0, 50) : (data.text ? data.text.substring(0, 50) : '(empty)'),
+            dataKeys: Object.keys(data),
+          });
           this.handleTranscript(interactionId, { ...data, isFinal: true });
         });
 
@@ -330,10 +373,23 @@ export class ElevenLabsProvider implements AsrProvider {
 
     try {
       // Extract transcript text and metadata from ElevenLabs response
-      // ElevenLabs returns: { text: string, ... } for partial/committed transcripts
-      const transcriptText = data.text || '';
+      // ElevenLabs SDK returns: { transcript: string, ... } for partial/committed transcripts
+      // According to SDK docs: data.transcript (not data.text)
+      const transcriptText = data.transcript || data.text || '';
       const isFinal = data.isFinal !== undefined ? data.isFinal : false;
       const confidence = data.confidence || 0.9;
+      
+      // Debug: Log the actual data structure to verify
+      console.debug(`[ElevenLabsProvider] 📋 Transcript event data structure:`, {
+        interactionId,
+        hasTranscript: !!data.transcript,
+        hasText: !!data.text,
+        transcriptLength: data.transcript?.length || 0,
+        textLength: data.text?.length || 0,
+        allKeys: Object.keys(data),
+        transcriptPreview: data.transcript ? data.transcript.substring(0, 50) : '(none)',
+        textPreview: data.text ? data.text.substring(0, 50) : '(none)',
+      });
 
       // Track pending sends for latency calculation
       let processingTime = 0;
@@ -488,19 +544,26 @@ export class ElevenLabsProvider implements AsrProvider {
       const audioBase64 = audio.toString('base64');
       
       // Try to send - if it fails, we'll catch and retry connection
-      stateToUse.connection.send({
+      const sendPayload = {
         audioBase64: audioBase64,
         commit: false,
         sampleRate: sampleRate,
-      });
+      };
+      
+      stateToUse.connection.send(sendPayload);
       this.metrics.audioChunksSent++;
 
-      console.debug(`[ElevenLabsProvider] 📤 Sent audio chunk:`, {
+      console.info(`[ElevenLabsProvider] 📤 Sent audio chunk to ElevenLabs:`, {
         interactionId,
         seq,
         size: audio.length,
         durationMs: durationMs.toFixed(2),
         sampleRate,
+        base64Length: audioBase64.length,
+        hasConnection: !!stateToUse.connection,
+        connectionReady: stateToUse.isReady,
+        pendingResolvers: stateToUse.pendingResolvers.length,
+        queuedTranscripts: stateToUse.transcriptQueue.length,
       });
     } catch (error: any) {
       console.error(`[ElevenLabsProvider] Error sending audio for ${interactionId}:`, error);
