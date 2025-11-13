@@ -795,7 +795,7 @@ class AsrWorker {
       clearInterval(existingTimer);
       console.debug(`[ASRWorker] 🔄 Restarting timer for ${interactionId}`);
     } else {
-      console.info(`[ASRWorker] 🚀 Starting timer for ${interactionId} (checks every 200ms)`);
+      console.info(`[ASRWorker] 🚀 Starting timer for ${interactionId} (checks every 500ms)`);
     }
 
     // Start new timer: check every 500ms (reduced frequency to match new send frequency)
