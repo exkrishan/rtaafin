@@ -54,7 +54,10 @@ export function createAsrProvider(type?: ProviderType, config?: any): AsrProvide
           'The system will NOT fall back to mock provider - this is intentional for testing.'
         );
       }
-      return new ElevenLabsProvider(elevenLabsApiKey);
+      return new ElevenLabsProvider(elevenLabsApiKey, {
+        circuitBreaker: config?.circuitBreaker,
+        connectionHealthMonitor: config?.connectionHealthMonitor,
+      });
 
     default:
       throw new Error(`Unknown ASR provider: ${providerType}`);

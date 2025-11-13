@@ -11,6 +11,9 @@ import { audioTopic, transcriptTopic, callEndTopic } from '@rtaa/pubsub/topics';
 import { createAsrProvider } from './providers';
 import { AudioFrameMessage, TranscriptMessage } from './types';
 import { MetricsCollector } from './metrics';
+import { BufferManager } from './buffer-manager';
+import { ConnectionHealthMonitor } from './connection-health-monitor';
+import { ElevenLabsCircuitBreaker } from './circuit-breaker';
 
 // Load environment variables from project root .env.local
 require('dotenv').config({ path: require('path').join(__dirname, '../../../.env.local') });
@@ -64,6 +67,10 @@ class AsrWorker {
   private server: ReturnType<typeof createServer>;
   private subscriptions: any[] = [];
   private bufferTimers: Map<string, NodeJS.Timeout> = new Map(); // Track timers per buffer for cleanup
+  private endedCalls: Set<string> = new Set(); // Track ended calls to stop processing/logging
+  private bufferManager: BufferManager; // Comprehensive buffer lifecycle management
+  private connectionHealthMonitor: ConnectionHealthMonitor; // Connection health monitoring
+  private circuitBreaker: ElevenLabsCircuitBreaker; // Circuit breaker for ElevenLabs API
 
   constructor() {
     this.pubsub = createPubSubAdapterFromEnv();
@@ -118,16 +125,29 @@ class AsrWorker {
       console.info('[ASRWorker] Exotel→Deepgram bridge: DISABLED (set EXO_BRIDGE_ENABLED=true to enable)');
     }
     
+    this.metrics = new MetricsCollector();
+
+    // Initialize buffer manager, connection health monitor, and circuit breaker
+    this.bufferManager = new BufferManager();
+    this.connectionHealthMonitor = new ConnectionHealthMonitor();
+    this.circuitBreaker = new ElevenLabsCircuitBreaker({
+      failureThreshold: parseInt(process.env.CIRCUIT_BREAKER_THRESHOLD || '5', 10),
+      timeout: parseInt(process.env.CIRCUIT_BREAKER_TIMEOUT || '60000', 10),
+      resetTimeout: parseInt(process.env.CIRCUIT_BREAKER_RESET_TIMEOUT || '300000', 10),
+    });
+
+    // Create ASR provider with circuit breaker and connection health monitor (for ElevenLabs)
     try {
-      this.asrProvider = createAsrProvider(ASR_PROVIDER);
+      this.asrProvider = createAsrProvider(ASR_PROVIDER, {
+        circuitBreaker: this.circuitBreaker,
+        connectionHealthMonitor: this.connectionHealthMonitor,
+      });
     } catch (error: any) {
       console.error('[ASRWorker] ❌ Failed to create ASR provider:', error.message);
       console.error('[ASRWorker] Provider type:', ASR_PROVIDER);
       console.error('[ASRWorker] This is a fatal error - service will not start.');
       throw error; // Re-throw to fail fast
     }
-    
-    this.metrics = new MetricsCollector();
 
     // Create HTTP server for metrics endpoint
     this.server = createServer((req, res) => {
@@ -198,7 +218,39 @@ class AsrWorker {
           health.activeConnections = 'N/A';
         }
         
-        res.end(JSON.stringify(health));
+        // Add buffer manager health
+        const bufferHealth = this.bufferManager.getSystemHealth();
+        health.bufferManager = {
+          totalBuffers: bufferHealth.totalBuffers,
+          activeBuffers: bufferHealth.activeBuffers,
+          staleBuffers: bufferHealth.staleBuffers,
+          memoryUsage: {
+            heapUsed: Math.round(bufferHealth.memoryUsage.heapUsed / 1024 / 1024) + 'MB',
+            heapTotal: Math.round(bufferHealth.memoryUsage.heapTotal / 1024 / 1024) + 'MB',
+            rss: Math.round(bufferHealth.memoryUsage.rss / 1024 / 1024) + 'MB',
+          },
+        };
+        
+        // Add connection health monitor stats
+        const connectionHealth = this.connectionHealthMonitor.performHealthCheck();
+        health.connectionHealth = {
+          totalConnections: connectionHealth.totalConnections,
+          healthyConnections: connectionHealth.healthyConnections,
+          unhealthyConnections: connectionHealth.unhealthyConnections,
+          unhealthyDetails: connectionHealth.unhealthyDetails,
+        };
+        
+        // Add circuit breaker stats
+        const circuitBreakerStats = this.circuitBreaker.getStats();
+        health.circuitBreaker = {
+          state: circuitBreakerStats.state,
+          failureCount: circuitBreakerStats.failureCount,
+          threshold: circuitBreakerStats.threshold,
+          timeSinceLastFailure: Math.round(circuitBreakerStats.timeSinceLastFailure / 1000) + 's',
+          timeout: Math.round(circuitBreakerStats.timeout / 1000) + 's',
+        };
+        
+        res.end(JSON.stringify(health, null, 2));
       } else {
         res.writeHead(404);
         res.end('Not Found');
@@ -297,12 +349,20 @@ class AsrWorker {
   }
 
   private async handleAudioFrame(msg: any): Promise<void> {
+    const interactionId = msg?.interaction_id;
+    
+    // CRITICAL: Stop processing if call has ended - no logs, no processing
+    if (interactionId && this.endedCalls.has(interactionId)) {
+      // Silently skip - call has ended, don't process or log anything
+      return;
+    }
+    
     // Check Exotel Bridge feature flag - skip processing if bridge is disabled
     const exoBridgeEnabled = process.env.EXO_BRIDGE_ENABLED === 'true';
     if (!exoBridgeEnabled) {
       // CRITICAL: Log at info level so it's visible in production logs
       console.warn('[ASRWorker] ⚠️ Bridge disabled (EXO_BRIDGE_ENABLED != true), skipping audio frame processing', {
-        interaction_id: msg?.interaction_id,
+        interaction_id: interactionId,
         seq: msg?.seq,
         env_value: process.env.EXO_BRIDGE_ENABLED || 'NOT SET',
         note: 'Set EXO_BRIDGE_ENABLED=true to enable audio processing',
@@ -371,16 +431,38 @@ class AsrWorker {
         audio: msg.audio, // base64 string
       };
       
-      // CRITICAL: Force 8000 Hz for Exotel telephony if sample_rate is missing or invalid
-      if (!msg.sample_rate || (msg.sample_rate !== 8000 && msg.sample_rate !== 16000)) {
-        console.warn(`[ASRWorker] ⚠️ Invalid or missing sample_rate (${msg.sample_rate || 'missing'}), forcing to 8000 Hz for telephony`, {
+      // CRITICAL: Validate sample rate - support both 8kHz (telephony) and 16kHz (optimal for transcription)
+      // Exotel can send 8kHz, 16kHz, or 24kHz (per Exotel docs)
+      // ElevenLabs supports 8kHz and 16kHz - 16kHz is recommended for better transcription quality
+      // However, 8kHz is standard for telephony and may be required for compatibility
+      const PREFERRED_SAMPLE_RATE = parseInt(process.env.ELEVENLABS_PREFERRED_SAMPLE_RATE || '8000', 10);
+      const ALLOWED_SAMPLE_RATES = [8000, 16000];
+      
+      if (!msg.sample_rate || !ALLOWED_SAMPLE_RATES.includes(msg.sample_rate)) {
+        // If sample rate is missing or invalid, use preferred rate (default 8000 for telephony)
+        const correctedRate = ALLOWED_SAMPLE_RATES.includes(PREFERRED_SAMPLE_RATE) 
+          ? PREFERRED_SAMPLE_RATE 
+          : 8000; // Fallback to 8000 if env var is invalid
+        
+        console.warn(`[ASRWorker] ⚠️ Invalid or missing sample_rate (${msg.sample_rate || 'missing'}), using ${correctedRate} Hz`, {
           interaction_id: msg.interaction_id,
           seq: msg.seq,
           received_sample_rate: msg.sample_rate,
-          corrected_sample_rate: 8000,
-          note: 'Exotel telephony must use 8000 Hz. Forcing to 8000 regardless of input.',
+          corrected_sample_rate: correctedRate,
+          preferred_sample_rate: PREFERRED_SAMPLE_RATE,
+          note: correctedRate === 8000 
+            ? 'Using 8kHz for telephony compatibility. Set ELEVENLABS_PREFERRED_SAMPLE_RATE=16000 for better transcription quality.'
+            : 'Using 16kHz for optimal transcription quality. Note: Ensure Exotel is configured to send 16kHz audio.',
         });
-        frame.sample_rate = 8000;
+        frame.sample_rate = correctedRate;
+      } else if (msg.sample_rate === 16000 && PREFERRED_SAMPLE_RATE === 8000) {
+        // If Exotel sends 16kHz but we prefer 8kHz, log a note
+        console.debug(`[ASRWorker] ℹ️ Exotel sent 16kHz audio (optimal for transcription)`, {
+          interaction_id: msg.interaction_id,
+          seq: msg.seq,
+          sample_rate: msg.sample_rate,
+          note: '16kHz provides better transcription quality than 8kHz. Consider setting ELEVENLABS_PREFERRED_SAMPLE_RATE=16000.',
+        });
       }
 
       const { interaction_id, tenant_id, seq, sample_rate, audio } = frame;
@@ -388,6 +470,15 @@ class AsrWorker {
       // Get or create buffer for this interaction
       let buffer = this.buffers.get(interaction_id);
       if (!buffer) {
+        // If this is a new buffer, remove from endedCalls (in case same interaction_id is reused)
+        if (this.endedCalls.has(interaction_id)) {
+          this.endedCalls.delete(interaction_id);
+          console.debug(`[ASRWorker] Removed ${interaction_id} from endedCalls - new call started`);
+        }
+        
+        // Create buffer in BufferManager
+        this.bufferManager.createBuffer(interaction_id, tenant_id, sample_rate);
+        
         buffer = {
           interactionId: interaction_id,
           tenantId: tenant_id,
@@ -402,10 +493,16 @@ class AsrWorker {
           lastContinuousSendTime: 0, // Will be set after initial chunk
         };
         this.buffers.set(interaction_id, buffer);
+      } else {
+        // Update buffer activity in BufferManager
+        this.bufferManager.updateBufferActivity(interaction_id);
       }
 
       // Update last chunk received timestamp
       buffer.lastChunkReceived = Date.now();
+      
+      // Update buffer activity and stats in BufferManager
+      this.bufferManager.updateBufferActivity(interaction_id);
 
       // Decode base64 audio
       let audioBuffer: Buffer;
@@ -669,6 +766,10 @@ class AsrWorker {
             buffer.isProcessing = false;
             buffer.lastProcessed = Date.now();
             buffer.hasSentInitialChunk = true;
+            // Update buffer stats in BufferManager
+            this.bufferManager.updateBufferStats(interaction_id, {
+              hasSentInitialChunk: true,
+            });
             buffer.lastContinuousSendTime = Date.now();
             if (hasWaitedTooLong) {
               console.warn(`[ASRWorker] ⚠️ First chunk sent early (${currentAudioDurationMs.toFixed(0)}ms) due to timeout risk (${timeSinceBufferCreation}ms wait)`, {
@@ -717,15 +818,29 @@ class AsrWorker {
         return;
       }
 
-      console.info('[ASRWorker] Call end event received', {
+      // CRITICAL: Mark call as ended to stop all processing and logging
+      this.endedCalls.add(interactionId);
+      console.info('[ASRWorker] Call end event received - stopping all processing and logging', {
         interaction_id: interactionId,
         reason: msg.reason,
         call_sid: msg.call_sid,
       });
 
+      // Use BufferManager to handle call end (includes comprehensive logging)
+      this.bufferManager.handleCallEnd(interactionId);
+
       // Clean up buffer for this interaction
       const buffer = this.buffers.get(interactionId);
       if (buffer) {
+        // Update buffer stats in BufferManager before cleanup
+        const totalSamples = buffer.chunks.reduce((sum, chunk) => sum + chunk.length, 0) / 2;
+        const totalAudioMs = (totalSamples / buffer.sampleRate) * 1000;
+        this.bufferManager.updateBufferStats(interactionId, {
+          chunksCount: buffer.chunks.length,
+          totalAudioMs,
+          hasSentInitialChunk: buffer.hasSentInitialChunk,
+        });
+        
         console.info('[ASRWorker] Cleaning up buffer for ended call', {
           interaction_id: interactionId,
           chunksCount: buffer.chunks.length,
@@ -743,17 +858,20 @@ class AsrWorker {
         
         // Close ASR provider connection for this specific interaction if supported
         try {
-          // Check if provider supports closing a specific connection (e.g., Deepgram)
+          // Check if provider supports closing a specific connection (e.g., Deepgram, ElevenLabs)
           if (typeof (this.asrProvider as any).closeConnection === 'function') {
             await (this.asrProvider as any).closeConnection(interactionId);
           }
         } catch (error: any) {
           console.warn('[ASRWorker] Error closing ASR provider connection:', error.message);
         }
+        
+        // Untrack connection in health monitor
+        this.connectionHealthMonitor.untrackConnection(interactionId);
       } else {
-        console.debug('[ASRWorker] No buffer found for ended call', {
-          interaction_id: interactionId,
-        });
+        // BufferManager already logged the "No buffer found" warning with detailed diagnostics
+        // Just ensure connection is untracked
+        this.connectionHealthMonitor.untrackConnection(interactionId);
       }
     } catch (error: any) {
       console.error('[ASRWorker] Error handling call end event:', error);
@@ -828,6 +946,14 @@ class AsrWorker {
       const buffer = this.buffers.get(interactionId);
       if (!buffer) {
         // Buffer was cleaned up, clear timer
+        clearInterval(timer);
+        this.bufferTimers.delete(interactionId);
+        return;
+      }
+
+      // CRITICAL: Stop processing if call has ended - no logs, no processing
+      if (this.endedCalls.has(interactionId)) {
+        // Silently skip - call has ended, clear timer and stop
         clearInterval(timer);
         this.bufferTimers.delete(interactionId);
         return;
@@ -970,6 +1096,12 @@ class AsrWorker {
   }
 
   private async processBuffer(buffer: AudioBuffer, isTimeoutRisk: boolean = false): Promise<void> {
+    // CRITICAL: Stop processing if call has ended - no logs, no processing
+    if (this.endedCalls.has(buffer.interactionId)) {
+      // Silently skip - call has ended, don't process or log anything
+      return;
+    }
+
     if (buffer.chunks.length === 0) {
       return;
     }
@@ -1230,9 +1362,20 @@ class AsrWorker {
   }
 
   async stop(): Promise<void> {
+    console.info('[ASRWorker] 🛑 Stopping ASR Worker service...');
+    
     // Unsubscribe from all topics
     for (const handle of this.subscriptions) {
       await handle.unsubscribe();
+    }
+
+    // Clean up buffer manager, connection health monitor, and circuit breaker
+    try {
+      this.bufferManager.destroy();
+      this.connectionHealthMonitor.destroy();
+      console.info('[ASRWorker] ✅ Cleaned up buffer manager and connection health monitor');
+    } catch (error: any) {
+      console.error('[ASRWorker] Error cleaning up managers:', error);
     }
 
     // Close ASR provider
