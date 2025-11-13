@@ -995,16 +995,14 @@ class AsrWorker {
 
       const timeSinceLastContinuousSend = Date.now() - buffer.lastContinuousSendTime;
       
-      // CRITICAL FIX: Updated thresholds to reduce Deepgram backlog and improve latency
-      // Further increased minimum chunk size to 250ms and send frequency to 1000ms to reduce load
-      // These values are optimized to prevent Deepgram backlog buildup:
-      // - Minimum 250ms chunks: Larger chunks are more efficient for Deepgram processing
-      // - Max 1000ms between sends: Reduces number of requests by 80% vs original, prevents backlog buildup
-      // - Max 2000ms timeout: If we wait too long, send what we have (prevents 1011 errors)
-      const MIN_CHUNK_DURATION_MS = 250; // Increased from 200ms - larger chunks reduce Deepgram load further
-      const MAX_TIME_BETWEEN_SENDS_MS = 1000; // Increased from 500ms - reduces send frequency by 50% to prevent backlog
-      const TIMEOUT_FALLBACK_MS = 2000; // If waiting > 2000ms, send what we have (even if < 250ms)
-      const TIMEOUT_FALLBACK_MIN_MS = 150; // Increased from 100ms - minimum for timeout fallback
+      // Provider-specific thresholds
+      // ElevenLabs can handle smaller chunks (100ms) and needs more frequent sends (500ms)
+      // Deepgram prefers larger chunks (250ms) and can wait longer (1000ms)
+      const isElevenLabs = ASR_PROVIDER === 'elevenlabs';
+      const MIN_CHUNK_DURATION_MS = isElevenLabs ? 100 : 250; // ElevenLabs: 100ms, Deepgram: 250ms
+      const MAX_TIME_BETWEEN_SENDS_MS = isElevenLabs ? 500 : 1000; // ElevenLabs: 500ms, Deepgram: 1000ms
+      const TIMEOUT_FALLBACK_MS = isElevenLabs ? 1000 : 2000; // ElevenLabs: 1000ms, Deepgram: 2000ms
+      const TIMEOUT_FALLBACK_MIN_MS = isElevenLabs ? 50 : 150; // ElevenLabs: 50ms, Deepgram: 150ms
       
       const isTooLongSinceLastSend = timeSinceLastContinuousSend >= MAX_TIME_BETWEEN_SENDS_MS;
       const hasMinimumChunkSize = currentAudioDurationMs >= MIN_CHUNK_DURATION_MS;
@@ -1012,31 +1010,50 @@ class AsrWorker {
       const isTimeoutRisk = timeSinceLastContinuousSend >= TIMEOUT_FALLBACK_MS && currentAudioDurationMs >= TIMEOUT_FALLBACK_MIN_MS;
 
       // Process if:
-      // 1. We have >= 250ms (normal case) - SEND (prioritize this)
-      // 2. Buffer exceeds max chunk size (250ms) - SEND (split)
-      // 3. Timeout risk: waited > 2000ms AND have at least 150ms - SEND (prevent 1011, last resort)
-      // Prioritize chunk size over timeout - only use timeout fallback as absolute last resort
-      // This ensures chunks accumulate to 250ms+ before sending, reducing Deepgram load
-      const shouldProcess = hasMinimumChunkSize || exceedsMaxChunkSize || isTimeoutRisk;
+      // 1. We have minimum chunk size (100ms for ElevenLabs, 250ms for Deepgram) - SEND
+      // 2. Buffer exceeds max chunk size - SEND (split)
+      // 3. Timeout risk: waited too long AND have minimum audio - SEND (prevent timeout)
+      // 4. Timeout: waited >= MAX_TIME_BETWEEN_SENDS_MS - SEND (force send to prevent timeout)
+      const hasTimedOut = timeSinceLastContinuousSend >= MAX_TIME_BETWEEN_SENDS_MS;
+      const shouldProcess = hasMinimumChunkSize || exceedsMaxChunkSize || isTimeoutRisk || hasTimedOut;
 
-      // Minimum chunk for send: 250ms normally, 150ms if timeout risk (absolute last resort)
-      // Prioritize quality (250ms) over timeout prevention (150ms)
+      // Minimum chunk for send: provider-specific minimum normally, timeout fallback minimum if timeout risk
       const minChunkForSend = isTimeoutRisk ? TIMEOUT_FALLBACK_MIN_MS : MIN_CHUNK_DURATION_MS;
       
-      // CRITICAL FIX: Log detailed state for debugging
-      if (currentAudioDurationMs >= MIN_CHUNK_DURATION_MS && !shouldProcess) {
-        console.warn(`[ASRWorker] ⚠️ Timer: Has ${currentAudioDurationMs.toFixed(0)}ms but not processing`, {
+      // CRITICAL FIX: Log why we're processing or not processing
+      if (shouldProcess) {
+        console.info(`[ASRWorker] 📤 Timer: Triggering send for ${interactionId}`, {
           interactionId,
           currentAudioDurationMs: currentAudioDurationMs.toFixed(0),
           timeSinceLastSend: timeSinceLastContinuousSend,
           hasMinimumChunkSize,
           exceedsMaxChunkSize,
           isTimeoutRisk,
-          shouldProcess,
+          hasTimedOut,
           chunksCount: buffer.chunks.length,
+          minRequired: minChunkForSend,
+          provider: ASR_PROVIDER,
+          reason: hasTimedOut ? 'timeout' : (isTimeoutRisk ? 'timeout-risk' : (exceedsMaxChunkSize ? 'max-size' : 'optimal-chunk')),
+        });
+      } else {
+        // Log why we're NOT processing (for debugging)
+        console.debug(`[ASRWorker] ⏸️ Timer: Not sending for ${interactionId}`, {
+          interactionId,
+          currentAudioDurationMs: currentAudioDurationMs.toFixed(0),
+          timeSinceLastSend: timeSinceLastContinuousSend,
+          hasMinimumChunkSize,
+          exceedsMaxChunkSize,
+          isTimeoutRisk,
+          hasTimedOut,
+          chunksCount: buffer.chunks.length,
+          minRequired: MIN_CHUNK_DURATION_MS,
+          provider: ASR_PROVIDER,
+          reason: !hasMinimumChunkSize ? `need ${MIN_CHUNK_DURATION_MS}ms, have ${currentAudioDurationMs.toFixed(0)}ms` : 
+                  (timeSinceLastContinuousSend < MAX_TIME_BETWEEN_SENDS_MS ? `waiting for timeout (${MAX_TIME_BETWEEN_SENDS_MS}ms)` : 'unknown'),
         });
       }
       
+      // CRITICAL FIX: Actually send if conditions are met
       if (shouldProcess && currentAudioDurationMs >= minChunkForSend) {
         // Enhanced logging for chunk aggregation decisions
         console.debug(`[ASRWorker] 🎯 Timer: Processing buffer for ${interactionId}`, {
@@ -1107,12 +1124,11 @@ class AsrWorker {
     }
 
     try {
-      // CRITICAL FIX: Updated to match timer settings (250ms chunks, 1000ms send frequency)
-      // These values MUST match the timer settings to prevent backlog buildup
-      // Strategy: Aggregate to minimum 250ms chunks, send after max 1000ms wait
-      const MIN_CHUNK_DURATION_MS = 250; // Increased from 100ms - matches timer setting
-      const MAX_WAIT_MS = 1000; // Increased from 200ms - matches timer setting
-      const INITIAL_BURST_MS = 250; // Initial burst 250ms for faster first transcript
+      // Provider-specific thresholds (must match timer settings)
+      const isElevenLabs = ASR_PROVIDER === 'elevenlabs';
+      const MIN_CHUNK_DURATION_MS = isElevenLabs ? 100 : 250; // ElevenLabs: 100ms, Deepgram: 250ms
+      const MAX_WAIT_MS = isElevenLabs ? 500 : 1000; // ElevenLabs: 500ms, Deepgram: 1000ms
+      const INITIAL_BURST_MS = isElevenLabs ? 100 : 250; // ElevenLabs: 100ms, Deepgram: 250ms
       
       // Calculate total audio in buffer
       const totalBytes = buffer.chunks.reduce((sum, chunk) => sum + chunk.length, 0);
@@ -1127,37 +1143,44 @@ class AsrWorker {
       // Calculate time since buffer creation (for initial chunk)
       const timeSinceBufferCreation = Date.now() - buffer.lastProcessed;
       
-      // Determine required duration based on mode
+      // Determine required duration based on mode and provider
       let requiredDuration: number;
-      const TIMEOUT_FALLBACK_MS = 2000; // If waiting > 2000ms, send what we have (matches timer)
-      const TIMEOUT_FALLBACK_MIN_MS = 150; // Increased from 20ms - matches timer setting
+      const TIMEOUT_FALLBACK_MS = isElevenLabs ? 1000 : 2000; // ElevenLabs: 1000ms, Deepgram: 2000ms
+      const TIMEOUT_FALLBACK_MIN_MS = isElevenLabs ? 50 : 150; // ElevenLabs: 50ms, Deepgram: 150ms
       
       if (!buffer.hasSentInitialChunk) {
-        // Initial chunk: Require 250ms burst OR send after 1s max wait (but still need 250ms minimum)
-        const MAX_INITIAL_WAIT_MS = 1000;
+        // Initial chunk: Require provider-specific burst OR send after timeout
+        const MAX_INITIAL_WAIT_MS = MAX_WAIT_MS;
         if (timeSinceBufferCreation >= MAX_INITIAL_WAIT_MS && totalAudioDurationMs >= MIN_CHUNK_DURATION_MS) {
-          // Force send if waited too long, but still require 250ms minimum
+          // Force send if waited too long, but still require minimum
           requiredDuration = MIN_CHUNK_DURATION_MS;
         } else {
           requiredDuration = INITIAL_BURST_MS;
         }
       } else {
-        // Continuous mode: Require 250ms minimum, but allow timeout fallback after extended wait
-        // If we've waited > 2000ms and have at least 150ms, send to prevent Deepgram timeout
-        // This gives chunks time to accumulate to 250ms+ before timeout fallback triggers
+        // Continuous mode: Provider-specific minimum, with timeout fallback
         if (timeSinceLastSend >= TIMEOUT_FALLBACK_MS && totalAudioDurationMs >= TIMEOUT_FALLBACK_MIN_MS) {
-          // Timeout risk: send what we have (even if < 250ms) to prevent 1011 errors
-          // This is absolute last resort after 2+ seconds of waiting
+          // Timeout risk: send what we have (even if < minimum) to prevent timeout
           requiredDuration = TIMEOUT_FALLBACK_MIN_MS;
-          console.warn(`[ASRWorker] ⚠️ Timeout risk: sending ${totalAudioDurationMs.toFixed(0)}ms chunk (minimum: ${TIMEOUT_FALLBACK_MIN_MS}ms) to prevent Deepgram timeout after ${timeSinceLastSend}ms wait`, {
+          console.warn(`[ASRWorker] ⚠️ Timeout risk: sending ${totalAudioDurationMs.toFixed(0)}ms chunk (minimum: ${TIMEOUT_FALLBACK_MIN_MS}ms) to prevent ${ASR_PROVIDER} timeout after ${timeSinceLastSend}ms wait`, {
             interaction_id: buffer.interactionId,
+            provider: ASR_PROVIDER,
             timeSinceLastSend,
             totalAudioDurationMs: totalAudioDurationMs.toFixed(0),
             chunksInBuffer: buffer.chunks.length,
-            note: 'This should be rare - chunks should accumulate to 250ms+ before this triggers',
+            note: isElevenLabs ? 'ElevenLabs can handle smaller chunks - sending to prevent timeout' : 'This should be rare - chunks should accumulate to 250ms+ before this triggers',
+          });
+        } else if (timeSinceLastSend >= MAX_WAIT_MS && totalAudioDurationMs >= MIN_CHUNK_DURATION_MS) {
+          // Normal timeout: waited max time and have minimum audio - send
+          requiredDuration = MIN_CHUNK_DURATION_MS;
+          console.info(`[ASRWorker] ⏰ Max wait reached: sending ${totalAudioDurationMs.toFixed(0)}ms chunk after ${timeSinceLastSend}ms wait`, {
+            interaction_id: buffer.interactionId,
+            provider: ASR_PROVIDER,
+            timeSinceLastSend,
+            totalAudioDurationMs: totalAudioDurationMs.toFixed(0),
           });
         } else {
-          // Normal case: wait for 250ms minimum (matches timer setting)
+          // Normal case: wait for provider-specific minimum
           requiredDuration = MIN_CHUNK_DURATION_MS;
         }
       }
