@@ -654,10 +654,29 @@ export class DeepgramProvider implements AsrProvider {
             });
             
             // Remove corresponding pending send
+            // CRITICAL FIX: Match oldest pending send (Deepgram processes in order, but may have delays)
+            // When transcripts arrive late, they correspond to the oldest pending send
             if (state.pendingSends && state.pendingSends.length > 0) {
+              // Match oldest pending send (first in queue) - this is correct for in-order processing
+              // Even if transcripts arrive late, they still correspond to the oldest pending send
               const completedSend = state.pendingSends.shift();
               if (completedSend) {
                 const processingTime = Date.now() - completedSend.sendTime;
+                
+                // Log backlog warning if processing time is excessive
+                if (processingTime > 10000) { // >10 seconds
+                  console.warn(`[DeepgramProvider] ⚠️ WARNING: Excessive processing latency detected`, {
+                    interactionId,
+                    processingTime: processingTime + 'ms',
+                    seq: completedSend.seq,
+                    pendingSendsCount: state.pendingSends.length,
+                    oldestPendingAge: state.pendingSends.length > 0 
+                      ? (Date.now() - state.pendingSends[0].sendTime) + 'ms' 
+                      : 'none',
+                    note: 'Deepgram backlog may be too high - consider reducing send frequency',
+                  });
+                }
+                
                 console.info(`[DeepgramProvider] ⏱️ Processing Time: ${processingTime}ms (from send to transcript)`, {
                   interactionId,
                   seq: completedSend.seq,
@@ -745,10 +764,26 @@ export class DeepgramProvider implements AsrProvider {
             }
             
             // Remove corresponding pending send
+            // CRITICAL FIX: Match oldest pending send (same logic as non-empty transcripts)
             if (state.pendingSends && state.pendingSends.length > 0) {
               const completedSend = state.pendingSends.shift();
               if (completedSend) {
                 const processingTime = Date.now() - completedSend.sendTime;
+                
+                // Log backlog warning if processing time is excessive
+                if (processingTime > 10000) { // >10 seconds
+                  console.warn(`[DeepgramProvider] ⚠️ WARNING: Excessive processing latency for empty transcript`, {
+                    interactionId,
+                    processingTime: processingTime + 'ms',
+                    seq: completedSend.seq,
+                    pendingSendsCount: state.pendingSends.length,
+                    oldestPendingAge: state.pendingSends.length > 0 
+                      ? (Date.now() - state.pendingSends[0].sendTime) + 'ms' 
+                      : 'none',
+                    note: 'Deepgram backlog may be too high - consider reducing send frequency',
+                  });
+                }
+                
                 console.info(`[DeepgramProvider] ⏱️ Processing Time: ${processingTime}ms (from send to empty transcript)`, {
                   interactionId,
                   seq: completedSend.seq,
@@ -1422,10 +1457,37 @@ export class DeepgramProvider implements AsrProvider {
           }
           stateToUse.pendingSends.push(pendingSend);
           
+          // CRITICAL FIX: Backlog monitoring and alerting
+          const BACKLOG_WARNING_THRESHOLD = 50;
+          const BACKLOG_CRITICAL_THRESHOLD = 100;
+          const pendingCount = stateToUse.pendingSends.length;
+          
+          if (pendingCount > BACKLOG_CRITICAL_THRESHOLD) {
+            const oldestSend = stateToUse.pendingSends[0];
+            const oldestAge = oldestSend ? Date.now() - oldestSend.sendTime : 0;
+            console.error(`[DeepgramProvider] 🔴 CRITICAL: Deepgram backlog too high`, {
+              interactionId,
+              pendingSends: pendingCount,
+              oldestSeq: oldestSend?.seq || 'unknown',
+              newestSeq: pendingSend.seq,
+              oldestAge: oldestAge + 'ms',
+              note: 'Deepgram is processing audio slower than we are sending. Consider reducing send frequency.',
+              recommendation: 'Increase MAX_TIME_BETWEEN_SENDS_MS to 500ms or higher',
+            });
+          } else if (pendingCount > BACKLOG_WARNING_THRESHOLD) {
+            console.warn(`[DeepgramProvider] ⚠️ WARNING: Deepgram backlog growing`, {
+              interactionId,
+              pendingSends: pendingCount,
+              newestSeq: pendingSend.seq,
+              note: 'Backlog is increasing - monitor for latency issues',
+            });
+          }
+          
           // Log pending sends count
-          console.info(`[DeepgramProvider] 📊 Pending transcript requests: ${stateToUse.pendingSends.length}`, {
+          console.info(`[DeepgramProvider] 📊 Pending transcript requests: ${pendingCount}`, {
             interactionId,
-            pendingSeqs: stateToUse.pendingSends.map(s => s.seq).join(', '),
+            pendingSeqs: stateToUse.pendingSends.map(s => s.seq).slice(-10).join(', '), // Show last 10 to avoid log spam
+            totalPending: pendingCount,
           });
         } catch (sendError: any) {
           console.error(`[DeepgramProvider] ❌ Error during connection.send() for ${interactionId}:`, {
