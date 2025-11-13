@@ -846,15 +846,15 @@ class AsrWorker {
       const timeSinceLastContinuousSend = Date.now() - buffer.lastContinuousSendTime;
       
       // CRITICAL FIX: Updated thresholds to reduce Deepgram backlog and improve latency
-      // Increased minimum chunk size to 200ms and send frequency to 500ms to reduce load
+      // Further increased minimum chunk size to 250ms and send frequency to 1000ms to reduce load
       // These values are optimized to prevent Deepgram backlog buildup:
-      // - Minimum 200ms chunks: Larger chunks are more efficient for Deepgram processing
-      // - Max 500ms between sends: Reduces number of requests, prevents backlog buildup
+      // - Minimum 250ms chunks: Larger chunks are more efficient for Deepgram processing
+      // - Max 1000ms between sends: Reduces number of requests by 80% vs original, prevents backlog buildup
       // - Max 2000ms timeout: If we wait too long, send what we have (prevents 1011 errors)
-      const MIN_CHUNK_DURATION_MS = 200; // Increased from 100ms - larger chunks reduce Deepgram load
-      const MAX_TIME_BETWEEN_SENDS_MS = 500; // Increased from 200ms - reduces send frequency to prevent backlog
-      const TIMEOUT_FALLBACK_MS = 2000; // If waiting > 2000ms, send what we have (even if < 200ms)
-      const TIMEOUT_FALLBACK_MIN_MS = 100; // Increased from 20ms - minimum for timeout fallback
+      const MIN_CHUNK_DURATION_MS = 250; // Increased from 200ms - larger chunks reduce Deepgram load further
+      const MAX_TIME_BETWEEN_SENDS_MS = 1000; // Increased from 500ms - reduces send frequency by 50% to prevent backlog
+      const TIMEOUT_FALLBACK_MS = 2000; // If waiting > 2000ms, send what we have (even if < 250ms)
+      const TIMEOUT_FALLBACK_MIN_MS = 150; // Increased from 100ms - minimum for timeout fallback
       
       const isTooLongSinceLastSend = timeSinceLastContinuousSend >= MAX_TIME_BETWEEN_SENDS_MS;
       const hasMinimumChunkSize = currentAudioDurationMs >= MIN_CHUNK_DURATION_MS;
@@ -862,15 +862,15 @@ class AsrWorker {
       const isTimeoutRisk = timeSinceLastContinuousSend >= TIMEOUT_FALLBACK_MS && currentAudioDurationMs >= TIMEOUT_FALLBACK_MIN_MS;
 
       // Process if:
-      // 1. We have >= 200ms (normal case) - SEND (prioritize this)
+      // 1. We have >= 250ms (normal case) - SEND (prioritize this)
       // 2. Buffer exceeds max chunk size (250ms) - SEND (split)
-      // 3. Timeout risk: waited > 2000ms AND have at least 100ms - SEND (prevent 1011, last resort)
+      // 3. Timeout risk: waited > 2000ms AND have at least 150ms - SEND (prevent 1011, last resort)
       // Prioritize chunk size over timeout - only use timeout fallback as absolute last resort
-      // This ensures chunks accumulate to 200ms+ before sending, reducing Deepgram load
+      // This ensures chunks accumulate to 250ms+ before sending, reducing Deepgram load
       const shouldProcess = hasMinimumChunkSize || exceedsMaxChunkSize || isTimeoutRisk;
 
-      // Minimum chunk for send: 200ms normally, 100ms if timeout risk (absolute last resort)
-      // Prioritize quality (200ms) over timeout prevention (100ms)
+      // Minimum chunk for send: 250ms normally, 150ms if timeout risk (absolute last resort)
+      // Prioritize quality (250ms) over timeout prevention (150ms)
       const minChunkForSend = isTimeoutRisk ? TIMEOUT_FALLBACK_MIN_MS : MIN_CHUNK_DURATION_MS;
       
       // CRITICAL FIX: Log detailed state for debugging
