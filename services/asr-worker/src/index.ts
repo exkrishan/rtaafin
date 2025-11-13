@@ -359,15 +359,29 @@ class AsrWorker {
       }
 
       // Parse audio frame message
+      // CRITICAL: Default to 8000 Hz for telephony (Exotel), not 24000
+      // Exotel telephony audio is always 8000 Hz
       const frame: AudioFrameMessage = {
         tenant_id: msg.tenant_id,
         interaction_id: msg.interaction_id,
         seq: msg.seq,
         timestamp_ms: msg.timestamp_ms || Date.now(),
-        sample_rate: msg.sample_rate || 24000,
+        sample_rate: msg.sample_rate || 8000, // Changed from 24000 to 8000 for telephony
         encoding: msg.encoding || 'pcm16',
         audio: msg.audio, // base64 string
       };
+      
+      // CRITICAL: Force 8000 Hz for Exotel telephony if sample_rate is missing or invalid
+      if (!msg.sample_rate || (msg.sample_rate !== 8000 && msg.sample_rate !== 16000)) {
+        console.warn(`[ASRWorker] ⚠️ Invalid or missing sample_rate (${msg.sample_rate || 'missing'}), forcing to 8000 Hz for telephony`, {
+          interaction_id: msg.interaction_id,
+          seq: msg.seq,
+          received_sample_rate: msg.sample_rate,
+          corrected_sample_rate: 8000,
+          note: 'Exotel telephony must use 8000 Hz. Forcing to 8000 regardless of input.',
+        });
+        frame.sample_rate = 8000;
+      }
 
       const { interaction_id, tenant_id, seq, sample_rate, audio } = frame;
 

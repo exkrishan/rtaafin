@@ -120,9 +120,22 @@ export class ElevenLabsProvider implements AsrProvider {
     let state = this.connections.get(interactionId);
 
     if (state && state.isReady && state.connection) {
-      this.metrics.connectionsReused++;
-      console.debug(`[ElevenLabsProvider] Reusing existing connection for ${interactionId}`);
-      return state;
+      // CRITICAL: Check if sample rate matches - if not, recreate connection
+      if (state.sampleRate !== sampleRate) {
+        console.warn(`[ElevenLabsProvider] ⚠️ Sample rate mismatch for ${interactionId}:`, {
+          existingSampleRate: state.sampleRate,
+          requestedSampleRate: sampleRate,
+          action: 'Closing and recreating connection',
+        });
+        await this.closeConnection(interactionId);
+        state = undefined; // Force recreation
+      } else {
+        this.metrics.connectionsReused++;
+        console.debug(`[ElevenLabsProvider] Reusing existing connection for ${interactionId}`, {
+          sampleRate: state.sampleRate,
+        });
+        return state;
+      }
     }
 
     // Check if another call is creating a connection
@@ -314,6 +327,28 @@ export class ElevenLabsProvider implements AsrProvider {
           });
           this.connections.delete(interactionId);
         });
+
+        // CRITICAL DEBUG: Listen to ALL events via raw WebSocket messages to see what's actually being sent
+        // This helps debug if events aren't being received
+        if (connection._websocket || (connection as any).websocket) {
+          const ws = connection._websocket || (connection as any).websocket;
+          if (ws && typeof ws.addEventListener === 'function') {
+            ws.addEventListener('message', (event: MessageEvent) => {
+              try {
+                const data = JSON.parse(event.data);
+                console.info(`[ElevenLabsProvider] 🔍 RAW WebSocket message received for ${interactionId}:`, {
+                  messageType: data.message_type || data.type || 'unknown',
+                  hasTranscript: !!data.transcript,
+                  hasText: !!data.text,
+                  allKeys: Object.keys(data),
+                  dataPreview: JSON.stringify(data).substring(0, 200),
+                });
+              } catch (e) {
+                console.debug(`[ElevenLabsProvider] Raw WebSocket message (non-JSON) for ${interactionId}:`, event.data?.substring?.(0, 100));
+              }
+            });
+          }
+        }
 
         // Wait for connection to open first (with timeout)
         try {
@@ -543,11 +578,24 @@ export class ElevenLabsProvider implements AsrProvider {
       // The SDK will throw "WebSocket is not connected" if not ready
       const audioBase64 = audio.toString('base64');
       
+      // CRITICAL: Verify sample rate matches connection sample rate
+      if (stateToUse.sampleRate !== sampleRate) {
+        console.error(`[ElevenLabsProvider] ❌ CRITICAL: Sample rate mismatch when sending audio!`, {
+          interactionId,
+          connectionSampleRate: stateToUse.sampleRate,
+          audioSampleRate: sampleRate,
+          seq,
+          note: 'This will cause ElevenLabs to not process audio correctly. Closing connection to recreate.',
+        });
+        await this.closeConnection(interactionId);
+        throw new Error(`Sample rate mismatch: connection=${stateToUse.sampleRate}Hz, audio=${sampleRate}Hz`);
+      }
+      
       // Try to send - if it fails, we'll catch and retry connection
       const sendPayload = {
         audioBase64: audioBase64,
         commit: false,
-        sampleRate: sampleRate,
+        sampleRate: sampleRate, // Should match connection sampleRate
       };
       
       stateToUse.connection.send(sendPayload);
@@ -559,6 +607,8 @@ export class ElevenLabsProvider implements AsrProvider {
         size: audio.length,
         durationMs: durationMs.toFixed(2),
         sampleRate,
+        connectionSampleRate: stateToUse.sampleRate,
+        sampleRateMatch: stateToUse.sampleRate === sampleRate,
         base64Length: audioBase64.length,
         hasConnection: !!stateToUse.connection,
         connectionReady: stateToUse.isReady,
