@@ -21,6 +21,9 @@
   "dependencies": {
     "@supabase/supabase-js": "latest",
     "@types/lodash": "^4.17.20",
+    "@types/node": "latest",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
     "autoprefixer": "^10.4.21",
     "dotenv": "latest",
     "lodash": "^4.17.21",
@@ -29,13 +32,11 @@
     "react": "latest",
     "react-dom": "latest",
     "tailwindcss": "^3.4.18",
+    "typescript": "latest",
     "zod": "latest"
   },
   "devDependencies": {
     "@types/jsonwebtoken": "^9.0.10",
-    "@types/node": "latest",
-    "@types/react": "latest",
-    "@types/react-dom": "latest",
     "eslint": "latest",
     "eslint-config-next": "latest",
     "husky": "latest",
@@ -43,7 +44,6 @@
     "lint-staged": "latest",
     "prettier": "latest",
     "tsx": "latest",
-    "typescript": "latest",
     "undici": "^7.16.0"
   },
   "optionalDependencies": {

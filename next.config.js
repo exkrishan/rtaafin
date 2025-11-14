@@ -6,9 +6,8 @@ module.exports = {
   // Note: instrumentationHook is no longer needed in Next.js 16+
   // The instrumentation.ts file is automatically detected
   
-  // Exclude optional dependencies from server-side bundling
-  // These are loaded dynamically at runtime via require()
-  serverComponentsExternalPackages: ['kafkajs', 'ioredis'],
+  // Note: serverComponentsExternalPackages is not recognized in Next.js 16 with Turbopack
+  // Using webpack externals instead for non-Turbopack builds
   
   webpack: (config, { isServer }) => {
     // Exclude optional dependencies from webpack bundling (for non-Turbopack builds)
