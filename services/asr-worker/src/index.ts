@@ -713,9 +713,18 @@ class AsrWorker {
           minAmplitude = Math.min(...sampleValues.map(Math.abs));
         }
         
-        // Warn if audio is all zeros (silence) - enhanced detection
-        const SILENCE_THRESHOLD = 100; // RMS energy threshold for silence (PCM16 range is -32768 to 32767)
-        const isSilence = allZeros || audioEnergy < SILENCE_THRESHOLD;
+        // CRITICAL FIX: Use sample-rate-specific silence thresholds
+        // 8kHz telephony audio has much lower energy than 16kHz audio
+        const SILENCE_THRESHOLD_8KHZ = 25;   // Lower threshold for 8kHz telephony
+        const SILENCE_THRESHOLD_16KHZ = 100; // Standard threshold for 16kHz
+        const SILENCE_THRESHOLD = sample_rate === 8000 ? SILENCE_THRESHOLD_8KHZ : SILENCE_THRESHOLD_16KHZ;
+        
+        // Amplitude thresholds also need to be lower for telephony
+        const MIN_AMPLITUDE_8KHZ = 50;   // Lower for 8kHz telephony
+        const MIN_AMPLITUDE_16KHZ = 150; // Standard for 16kHz
+        const MIN_AMPLITUDE = sample_rate === 8000 ? MIN_AMPLITUDE_8KHZ : MIN_AMPLITUDE_16KHZ;
+        
+        const isSilence = allZeros || audioEnergy < SILENCE_THRESHOLD || maxAmplitude < MIN_AMPLITUDE;
         
         if (isSilence) {
           // Log at info level for first few chunks, debug level for later chunks
@@ -724,13 +733,17 @@ class AsrWorker {
           logFn(`[ASRWorker] ℹ️ Audio appears to be silence (energy: ${audioEnergy.toFixed(2)}, max: ${maxAmplitude}, allZeros: ${allZeros})`, {
             interaction_id,
             seq,
+            sample_rate,
             samplesChecked: sampleCount,
             audioEnergy: audioEnergy.toFixed(2),
             maxAmplitude,
             minAmplitude,
             allZeros,
             silenceThreshold: SILENCE_THRESHOLD,
-            note: 'This is normal for silence, but may cause empty transcripts from Deepgram.',
+            minAmplitude: MIN_AMPLITUDE,
+            note: sample_rate === 8000
+              ? '8kHz telephony audio detected as silence. Lower thresholds applied. This audio will be skipped to prevent empty transcripts.'
+              : 'Audio detected as silence. This may cause empty transcripts from ASR provider.',
           });
         } else if (seq <= 5) {
           // Log audio quality metrics for first few chunks

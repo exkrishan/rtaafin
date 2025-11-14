@@ -612,6 +612,44 @@ export class ElevenLabsProvider implements AsrProvider {
     });
   }
 
+  /**
+   * Amplify low-energy telephony audio to improve transcription quality
+   * Telephony audio (8kHz) often has lower energy levels that can be improved with amplification
+   */
+  private amplifyTelephonyAudio(audio: Buffer, sampleRate: number): Buffer {
+    // Only amplify 8kHz telephony audio
+    if (sampleRate !== 8000) {
+      return audio;
+    }
+
+    // Check if amplification is enabled (default: true for telephony)
+    const amplifyEnabled = process.env.ELEVENLABS_AMPLIFY_TELEPHONY !== 'false';
+    if (!amplifyEnabled) {
+      return audio;
+    }
+
+    // Amplification factor (default: 2x for telephony)
+    const amplificationFactor = parseFloat(process.env.ELEVENLABS_AMPLIFICATION_FACTOR || '2.0');
+
+    // Convert Buffer to Int16Array for processing
+    const samples = new Int16Array(audio.length / 2);
+    const dataView = new DataView(audio.buffer, audio.byteOffset, audio.byteLength);
+
+    // Read samples as little-endian signed 16-bit integers
+    for (let i = 0; i < samples.length; i++) {
+      const sample = dataView.getInt16(i * 2, true); // little-endian
+      
+      // Amplify the sample
+      const amplified = Math.round(sample * amplificationFactor);
+      
+      // Clamp to PCM16 range [-32768, 32767]
+      samples[i] = Math.max(-32768, Math.min(32767, amplified));
+    }
+
+    // Convert back to Buffer
+    return Buffer.from(samples.buffer);
+  }
+
   async sendAudioChunk(
     audio: Buffer,
     opts: { interactionId: string; seq: number; sampleRate: number }
@@ -647,6 +685,27 @@ export class ElevenLabsProvider implements AsrProvider {
     const bytesPerSample = 2; // 16-bit = 2 bytes
     const samples = audio.length / bytesPerSample;
     const durationMs = (samples / sampleRate) * 1000;
+
+    // CRITICAL FIX: Amplify low-energy telephony audio before validation
+    // This improves transcription quality for 8kHz telephony audio
+    let processedAudio = audio;
+    if (sampleRate === 8000) {
+      processedAudio = this.amplifyTelephonyAudio(audio, sampleRate);
+      
+      // Log amplification if audio was actually amplified
+      if (processedAudio !== audio && seq <= 5) {
+        console.info(`[ElevenLabsProvider] 🔊 Amplified 8kHz telephony audio`, {
+          interactionId,
+          seq,
+          originalLength: audio.length,
+          amplifiedLength: processedAudio.length,
+          amplificationFactor: process.env.ELEVENLABS_AMPLIFICATION_FACTOR || '2.0',
+        });
+      }
+    }
+
+    // Use processed audio for all subsequent operations
+    audio = processedAudio;
 
     // COMPREHENSIVE PRE-SEND VALIDATION (Based on ElevenLabs troubleshooting guide)
     // Validate audio format and quality before sending to prevent empty transcripts
@@ -728,23 +787,24 @@ export class ElevenLabsProvider implements AsrProvider {
     }
 
     // 5. Check for silence (common cause of empty transcripts)
-    // Telephony-specific thresholds: 8kHz audio typically has lower energy than 16kHz
-    // Adjust thresholds based on sample rate for better detection
-    const SILENCE_THRESHOLD_8KHZ = 50;  // Lower threshold for 8kHz telephony audio
+    // CRITICAL FIX: Telephony-specific thresholds - 8kHz audio has much lower energy
+    // Lower thresholds to prevent false silence detection for telephony audio
+    const SILENCE_THRESHOLD_8KHZ = 25;   // Much lower for 8kHz telephony (was 50)
     const SILENCE_THRESHOLD_16KHZ = 100; // Standard threshold for 16kHz audio
     const SILENCE_THRESHOLD = sampleRate === 8000 ? SILENCE_THRESHOLD_8KHZ : SILENCE_THRESHOLD_16KHZ;
     
-    // For 8kHz telephony, also check amplitude (telephony audio can have lower energy)
-    const MIN_AMPLITUDE_8KHZ = 500;  // Minimum amplitude for 8kHz telephony
-    const MIN_AMPLITUDE_16KHZ = 1000; // Minimum amplitude for 16kHz
+    // For 8kHz telephony, use much lower amplitude thresholds
+    const MIN_AMPLITUDE_8KHZ = 50;   // Much lower for 8kHz telephony (was 500)
+    const MIN_AMPLITUDE_16KHZ = 1000; // Standard threshold for 16kHz
     const MIN_AMPLITUDE = sampleRate === 8000 ? MIN_AMPLITUDE_8KHZ : MIN_AMPLITUDE_16KHZ;
     
     const isSilence = allZeros || audioEnergy < SILENCE_THRESHOLD || maxAmplitude < MIN_AMPLITUDE;
     
+    // CRITICAL FIX: Skip sending silence to ElevenLabs - it will return empty transcripts
     if (isSilence) {
       const logLevel = seq <= 5 ? 'warn' : 'debug';
       const logFn = logLevel === 'warn' ? console.warn : console.debug;
-      logFn(`[ElevenLabsProvider] ⚠️ Audio appears to be silence - may cause empty transcripts`, {
+      logFn(`[ElevenLabsProvider] ⏸️ Skipping silence - not sending to ElevenLabs`, {
         interactionId,
         seq,
         sampleRate,
@@ -755,9 +815,17 @@ export class ElevenLabsProvider implements AsrProvider {
         minAmplitude: MIN_AMPLITUDE,
         durationMs: durationMs.toFixed(2),
         note: sampleRate === 8000 
-          ? '8kHz telephony audio detected. Lower thresholds applied. Silence will not produce transcripts.'
-          : 'Silence will not produce transcripts. Ensure audio contains actual speech.',
+          ? '8kHz telephony audio detected as silence. Lower thresholds applied. Skipping send to prevent empty transcripts.'
+          : 'Audio detected as silence. Skipping send to prevent empty transcripts.',
       });
+      
+      // Return empty transcript immediately - don't send silence to ElevenLabs
+      // This prevents wasting API calls and getting empty transcripts
+      return {
+        type: 'partial',
+        text: '',
+        isFinal: false,
+      };
     }
 
     // 6. Log audio quality metrics for debugging (first few chunks)
