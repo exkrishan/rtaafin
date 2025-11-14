@@ -385,7 +385,6 @@ export default function TestAgentAssistPage() {
           customer={mockCustomer}
           callDuration="00:00"
           isCallActive={isCallActive}
-          useSse={true}
           onKbArticlesUpdate={handleKbArticlesUpdate}
           onTranscriptEvent={handleTranscriptEvent}
           triggerKBSearch={handleKBSearch}
