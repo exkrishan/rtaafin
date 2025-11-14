@@ -312,18 +312,24 @@ export async function uploadToGoogleDrive(
     // Read file
     const fileContent = await readFile(filePath);
 
-    // Upload file
-    const response = await driveClient.files.create({
-      requestBody: {
-        name: fileName,
-        parents: [callFolderId],
-      },
-      media: {
-        mimeType,
-        body: fileContent,
-      },
-      fields: 'id, name, webViewLink',
-    });
+    // Upload file with retry logic
+    const maxRetries = 3;
+    let lastError: any = null;
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        const response = await driveClient.files.create({
+          requestBody: {
+            name: fileName,
+            parents: [callFolderId],
+          },
+          media: {
+            mimeType,
+            body: fileContent,
+          },
+          fields: 'id, name, webViewLink',
+          timeout: 15000, // 15 second timeout for uploads
+        });
 
         const fileId = response.data.id;
         const webLink = response.data.webViewLink;
