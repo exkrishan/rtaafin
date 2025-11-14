@@ -42,6 +42,11 @@ export default function TestAgentAssistPage() {
   const [isPaused] = useState(false);
   const [callEnded] = useState(false);
   
+  // Auto-discovery state
+  const [activeCalls, setActiveCalls] = useState<Array<{ interactionId: string; lastActivity?: string }>>([]);
+  const [autoDiscoveryEnabled, setAutoDiscoveryEnabled] = useState(true);
+  const [lastDiscoveredCallId, setLastDiscoveredCallId] = useState<string | null>(null);
+  
   // Disposition API test states
   const [parentDispositions, setParentDispositions] = useState<DispositionTestResult>({ status: 'loading' });
   const [subDispositions, setSubDispositions] = useState<DispositionTestResult>({ status: 'loading' });
@@ -93,6 +98,41 @@ export default function TestAgentAssistPage() {
   useEffect(() => {
     testParentDispositions();
   }, []);
+
+  // Auto-discover active calls and auto-select latest
+  useEffect(() => {
+    if (!autoDiscoveryEnabled) return;
+
+    const discoverActiveCalls = async () => {
+      try {
+        const response = await fetch('/api/calls/active?limit=10');
+        const data = await response.json();
+        
+        if (data.ok && data.calls && data.calls.length > 0) {
+          setActiveCalls(data.calls);
+          
+          // Auto-select the latest call if it's different from current
+          if (data.latestCall && data.latestCall !== callId) {
+            console.log('[Test] 🎯 Auto-discovered new call:', data.latestCall);
+            setCallId(data.latestCall);
+            setLastDiscoveredCallId(data.latestCall);
+          }
+        } else {
+          setActiveCalls([]);
+        }
+      } catch (err: any) {
+        console.error('[Test] Failed to discover active calls:', err);
+      }
+    };
+
+    // Initial discovery
+    discoverActiveCalls();
+
+    // Poll every 5 seconds for new calls
+    const interval = setInterval(discoverActiveCalls, 5000);
+
+    return () => clearInterval(interval);
+  }, [autoDiscoveryEnabled, callId]);
 
   // Handle KB search
   const handleKBSearch = async (query: string, context: { interactionId: string; recentUtterance?: string }): Promise<KBArticle[]> => {
