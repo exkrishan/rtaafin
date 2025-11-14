@@ -21,11 +21,14 @@
   "dependencies": {
     "@supabase/supabase-js": "latest",
     "@types/lodash": "^4.17.20",
+    "autoprefixer": "^10.4.21",
     "dotenv": "latest",
     "lodash": "^4.17.21",
     "next": "latest",
+    "postcss": "^8.5.6",
     "react": "latest",
     "react-dom": "latest",
+    "tailwindcss": "^3.4.18",
     "zod": "latest"
   },
   "devDependencies": {
@@ -33,18 +36,18 @@
     "@types/node": "latest",
     "@types/react": "latest",
     "@types/react-dom": "latest",
-    "autoprefixer": "^10.4.21",
     "eslint": "latest",
     "eslint-config-next": "latest",
     "husky": "latest",
     "jsonwebtoken": "^9.0.2",
     "lint-staged": "latest",
-    "postcss": "^8.5.6",
     "prettier": "latest",
-    "tailwindcss": "^3.4.18",
     "tsx": "latest",
     "typescript": "latest",
     "undici": "^7.16.0"
+  },
+  "optionalDependencies": {
+    "kafkajs": "^2.2.4"
   },
   "lint-staged": {
     "*.{js,jsx,ts,tsx,json,md}": [
