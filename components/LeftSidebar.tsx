@@ -36,16 +36,7 @@ export default function LeftSidebar({
     <div className="w-16 bg-white border-r border-gray-200 flex flex-col items-center py-4 gap-0">
       {/* Exotel Logo at top */}
       <div className="mb-4 px-2 flex items-center justify-center">
-        <svg 
-          width="99" 
-          height="30" 
-          viewBox="0 0 99 30" 
-          fill="none" 
-          xmlns="http://www.w3.org/2000/svg"
-          className="w-full h-auto"
-          style={{ maxWidth: '120px', height: 'auto' }}
-          aria-label="Exotel"
-        >
+        <svg width="99" height="30" viewBox="0 0 99 30" fill="none" xmlns="http://www.w3.org/2000/svg" className="w-full h-auto" style={{ maxWidth: '120px', height: 'auto' }} aria-label="Exotel">
           <mask id="mask0_58947_303832" maskUnits="userSpaceOnUse" x="0" y="0" width="99" height="30" style={{ maskType: 'luminance' }}>
             <path d="M99 0.5H0V29.5H99V0.5Z" fill="white"></path>
           </mask>

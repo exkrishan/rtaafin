@@ -91,7 +91,7 @@ export default function AgentAssistPanelV2({
   const lastFetchedDispositionIdRef = useRef<string | null>(null);
   const [healthStatus, setHealthStatus] = useState<'healthy' | 'slow' | 'error'>('healthy');
   const [healthLatency, setHealthLatency] = useState<number>(0);
-  const [wsConnected, setWsConnected] = useState(true);
+  const [wsConnected, setWsConnected] = useState(false); // Start as false, only set to true when connection is actually established
   const transcriptEndRef = useRef<HTMLDivElement>(null);
   const transcriptContainerRef = useRef<HTMLDivElement>(null);
   const [manualScroll, setManualScroll] = useState(false);
@@ -213,14 +213,17 @@ export default function AgentAssistPanelV2({
         delete (eventSource as any)._errorTimeout;
       }
       
-      console.log('[AgentAssistPanel] ✅ SSE connection opened', {
-        interactionId,
-        readyState: eventSource.readyState, // Should be 1 (OPEN)
-        timestamp: new Date().toISOString()
-      });
-      setWsConnected(true);
-      setHealthStatus('healthy');
-      onConnectionStateChange?.(true, eventSource.readyState);
+      // Only set connected to true when connection is actually OPEN
+      if (eventSource.readyState === EventSource.OPEN) {
+        console.log('[AgentAssistPanel] ✅ SSE connection opened', {
+          interactionId,
+          readyState: eventSource.readyState, // Should be 1 (OPEN)
+          timestamp: new Date().toISOString()
+        });
+        setWsConnected(true);
+        setHealthStatus('healthy');
+        onConnectionStateChange?.(true, eventSource.readyState);
+      }
     };
 
     eventSource.onerror = (err) => {

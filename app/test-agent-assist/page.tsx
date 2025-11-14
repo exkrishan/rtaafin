@@ -7,12 +7,6 @@ import AgentAssistPanelV2, { Customer, KBArticle, DispositionData } from '@/comp
 import AutoDispositionModal, { Suggestion } from '@/components/AutoDispositionModal';
 import ToastContainer from '@/components/ToastContainer';
 
-interface DispositionTestResult {
-  status: 'loading' | 'success' | 'error';
-  data?: any;
-  error?: string;
-}
-
 // Mock customer data for test page (same as demo)
 const mockCustomer: Customer = {
   name: 'Manish Sharma',
@@ -46,58 +40,6 @@ export default function TestAgentAssistPage() {
   const [activeCalls, setActiveCalls] = useState<Array<{ interactionId: string; lastActivity?: string }>>([]);
   const [autoDiscoveryEnabled, setAutoDiscoveryEnabled] = useState(true);
   const [lastDiscoveredCallId, setLastDiscoveredCallId] = useState<string | null>(null);
-  
-  // Disposition API test states
-  const [parentDispositions, setParentDispositions] = useState<DispositionTestResult>({ status: 'loading' });
-  const [subDispositions, setSubDispositions] = useState<DispositionTestResult>({ status: 'loading' });
-  const [selectedParentCode, setSelectedParentCode] = useState<string>('');
-  const [showDispositionTesting, setShowDispositionTesting] = useState(true);
-
-  // Test Parent Dispositions API
-  const testParentDispositions = async () => {
-    setParentDispositions({ status: 'loading' });
-    try {
-      const response = await fetch('/api/dispositions');
-      const data = await response.json();
-      if (data.ok) {
-        setParentDispositions({ status: 'success', data });
-        if (data.dispositions && data.dispositions.length > 0 && !selectedParentCode) {
-          setSelectedParentCode(data.dispositions[0].code);
-        }
-      } else {
-        setParentDispositions({ status: 'error', error: data.error || 'Failed to fetch' });
-      }
-    } catch (err: any) {
-      setParentDispositions({ status: 'error', error: err.message });
-    }
-  };
-
-  // Test Sub-Dispositions API
-  const testSubDispositions = async (parentCode?: string) => {
-    const code = parentCode || selectedParentCode;
-    if (!code) {
-      setSubDispositions({ status: 'error', error: 'Please select a parent disposition first' });
-      return;
-    }
-    
-    setSubDispositions({ status: 'loading' });
-    try {
-      const response = await fetch(`/api/sub-dispositions?dispositionCode=${encodeURIComponent(code)}`);
-      const data = await response.json();
-      if (data.ok) {
-        setSubDispositions({ status: 'success', data });
-      } else {
-        setSubDispositions({ status: 'error', error: data.error || 'Failed to fetch' });
-      }
-    } catch (err: any) {
-      setSubDispositions({ status: 'error', error: err.message });
-    }
-  };
-
-  // Load parent dispositions on mount
-  useEffect(() => {
-    testParentDispositions();
-  }, []);
 
   // Auto-discover active calls and auto-select latest
   useEffect(() => {
@@ -242,187 +184,65 @@ export default function TestAgentAssistPage() {
 
         {/* Main Content Area */}
         <div className="flex-1 flex flex-col pr-[376px]">
-          {/* Disposition Taxonomy Testing Section - Collapsible */}
-          {showDispositionTesting && (
-            <div className="bg-white border-b border-gray-200 p-4">
-              <div className="flex items-center justify-between mb-3">
-                <h2 className="text-lg font-semibold">🧪 Disposition Taxonomy Testing</h2>
-                <button
-                  onClick={() => setShowDispositionTesting(false)}
-                  className="text-gray-500 hover:text-gray-700"
-                  aria-label="Collapse testing section"
-                >
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                  </svg>
-                </button>
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-                {/* Parent Dispositions */}
-                <div className="bg-gray-50 p-4 rounded border">
-                  <div className="flex items-center justify-between mb-2">
-                    <h3 className="font-medium text-sm">Parent Dispositions</h3>
-                    <button
-                      onClick={testParentDispositions}
-                      className="px-3 py-1 text-xs bg-blue-500 text-white rounded hover:bg-blue-600"
-                    >
-                      Test API
-                    </button>
-                  </div>
-                  {parentDispositions.status === 'loading' && (
-                    <p className="text-xs text-gray-500">Loading...</p>
-                  )}
-                  {parentDispositions.status === 'success' && parentDispositions.data && (
-                    <div className="text-xs">
-                      <p className="text-green-600 mb-2">
-                        ✅ Found {parentDispositions.data.count || 0} parent dispositions
-                      </p>
-                      <select
-                        value={selectedParentCode}
-                        onChange={(e) => {
-                          setSelectedParentCode(e.target.value);
-                          testSubDispositions(e.target.value);
-                        }}
-                        className="w-full rounded border border-gray-300 px-2 py-1 text-xs"
-                      >
-                        <option value="">Select parent disposition...</option>
-                        {parentDispositions.data.dispositions?.map((d: any) => (
-                          <option key={d.code} value={d.code}>
-                            {d.title} ({d.code}) {d.id ? `[ID: ${d.id}]` : ''}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  )}
-                  {parentDispositions.status === 'error' && (
-                    <p className="text-xs text-red-600">❌ {parentDispositions.error}</p>
-                  )}
-                </div>
-
-                {/* Sub-Dispositions */}
-                <div className="bg-gray-50 p-4 rounded border">
-                  <div className="flex items-center justify-between mb-2">
-                    <h3 className="font-medium text-sm">Sub-Dispositions</h3>
-                    <button
-                      onClick={() => testSubDispositions()}
-                      disabled={!selectedParentCode}
-                      className="px-3 py-1 text-xs bg-blue-500 text-white rounded hover:bg-blue-600 disabled:bg-gray-300 disabled:cursor-not-allowed"
-                    >
-                      Test API
-                    </button>
-                  </div>
-                  {subDispositions.status === 'loading' && (
-                    <p className="text-xs text-gray-500">Loading...</p>
-                  )}
-                  {subDispositions.status === 'success' && subDispositions.data && (
-                    <div className="text-xs">
-                      <p className="text-green-600 mb-2">
-                        ✅ Found {subDispositions.data.count || 0} sub-dispositions
-                      </p>
-                      <div className="max-h-32 overflow-y-auto">
-                        {subDispositions.data.subDispositions?.map((sd: any) => (
-                          <div key={sd.code} className="py-1 border-b border-gray-100">
-                            <span className="font-medium">{sd.title || sd.label}</span>
-                            <span className="text-gray-500 ml-2">
-                              ({sd.code}) {sd.id ? `[ID: ${sd.id}]` : ''}
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                  {subDispositions.status === 'error' && (
-                    <p className="text-xs text-red-600">❌ {subDispositions.error}</p>
-                  )}
-                </div>
+          {/* Auto-discovery controls - Simple header */}
+          <div className="bg-white border-b border-gray-200 p-3">
+            <div className="flex items-center gap-4">
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  id="autoDiscovery"
+                  checked={autoDiscoveryEnabled}
+                  onChange={(e) => setAutoDiscoveryEnabled(e.target.checked)}
+                  className="rounded"
+                />
+                <label htmlFor="autoDiscovery" className="text-sm font-medium text-gray-700">
+                  Auto-discover active calls
+                </label>
               </div>
               
-              {/* Test Inputs */}
-              <div className="space-y-3">
+              {autoDiscoveryEnabled && activeCalls.length > 0 && (
                 <div className="flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    id="autoDiscovery"
-                    checked={autoDiscoveryEnabled}
-                    onChange={(e) => setAutoDiscoveryEnabled(e.target.checked)}
-                    className="rounded"
-                  />
-                  <label htmlFor="autoDiscovery" className="text-xs font-medium text-gray-700">
-                    Auto-discover active calls (polls every 5s)
-                  </label>
+                  <label className="text-sm font-medium text-gray-700">Active Call:</label>
+                  <select
+                    value={callId}
+                    onChange={(e) => setCallId(e.target.value)}
+                    className="rounded-md border border-gray-300 px-2 py-1 text-sm"
+                  >
+                    {activeCalls.map((call) => (
+                      <option key={call.interactionId} value={call.interactionId}>
+                        {call.interactionId}
+                      </option>
+                    ))}
+                  </select>
+                  {lastDiscoveredCallId && lastDiscoveredCallId === callId && (
+                    <span className="text-xs text-green-600">✓ Auto-selected</span>
+                  )}
                 </div>
-                
-                {autoDiscoveryEnabled && activeCalls.length > 0 && (
-                  <div>
-                    <label className="block text-xs font-medium text-gray-700 mb-1">
-                      Active Calls ({activeCalls.length})
-                    </label>
-                    <select
-                      value={callId}
-                      onChange={(e) => setCallId(e.target.value)}
-                      className="w-full rounded-md border border-gray-300 px-2 py-1 text-xs"
-                    >
-                      {activeCalls.map((call) => (
-                        <option key={call.interactionId} value={call.interactionId}>
-                          {call.interactionId} {call.lastActivity ? `(Active)` : ''}
-                        </option>
-                      ))}
-                    </select>
-                    {lastDiscoveredCallId && lastDiscoveredCallId === callId && (
-                      <p className="text-xs text-green-600 mt-1">
-                        ✓ Auto-selected latest call
-                      </p>
-                    )}
-                  </div>
-                )}
-                
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label htmlFor="callId" className="block text-xs font-medium text-gray-700 mb-1">
-                      Call ID {!autoDiscoveryEnabled && '(Manual)'}
-                    </label>
-                    <input
-                      id="callId"
-                      type="text"
-                      value={callId}
-                      onChange={(e) => setCallId(e.target.value)}
-                      className="w-full rounded-md border border-gray-300 px-2 py-1 text-xs"
-                      placeholder="Enter call ID"
-                      disabled={autoDiscoveryEnabled && activeCalls.length > 0}
-                    />
-                  </div>
-                  <div>
-                    <label htmlFor="tenantId" className="block text-xs font-medium text-gray-700 mb-1">
-                      Tenant ID
-                    </label>
-                    <input
-                      id="tenantId"
-                      type="text"
-                      value={tenantId}
-                      onChange={(e) => setTenantId(e.target.value)}
-                      className="w-full rounded-md border border-gray-300 px-2 py-1 text-xs"
-                      placeholder="Enter tenant ID"
-                    />
-                  </div>
-                </div>
+              )}
+              
+              <div className="flex items-center gap-2 ml-auto">
+                <label className="text-sm font-medium text-gray-700">Call ID:</label>
+                <input
+                  id="callId"
+                  type="text"
+                  value={callId}
+                  onChange={(e) => setCallId(e.target.value)}
+                  className="rounded-md border border-gray-300 px-2 py-1 text-sm w-40"
+                  placeholder="Enter call ID"
+                  disabled={autoDiscoveryEnabled && activeCalls.length > 0}
+                />
+                <label className="text-sm font-medium text-gray-700">Tenant ID:</label>
+                <input
+                  id="tenantId"
+                  type="text"
+                  value={tenantId}
+                  onChange={(e) => setTenantId(e.target.value)}
+                  className="rounded-md border border-gray-300 px-2 py-1 text-sm w-32"
+                  placeholder="Enter tenant ID"
+                />
               </div>
             </div>
-          )}
-
-          {/* Show button to expand if collapsed */}
-          {!showDispositionTesting && (
-            <div className="bg-white border-b border-gray-200 p-2">
-              <button
-                onClick={() => setShowDispositionTesting(true)}
-                className="text-sm text-blue-600 hover:text-blue-800 flex items-center gap-2"
-              >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                </svg>
-                Show Disposition Testing
-              </button>
-            </div>
-          )}
+          </div>
 
           {/* Center Column: Unified Call View */}
           <div className="flex-1 overflow-y-auto p-6">
