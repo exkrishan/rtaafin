@@ -49,6 +49,10 @@ export interface AgentAssistPanelV2Props {
   emitTelemetry?: (eventName: string, payload: Record<string, any>) => void;
   onOpenCRM?: () => void;
   onOpenCaseHistory?: () => void;
+  onConnectionStateChange?: (connected: boolean, readyState?: number) => void;
+  useSse?: boolean; // If false, skip SSE connection (for demo mode)
+  directTranscripts?: TranscriptUtterance[]; // Direct transcript updates (for demo mode)
+  onKbArticlesUpdate?: (articles: KBArticle[], intent?: string, confidence?: number) => void; // Callback for KB articles from API
 }
 
 export default function AgentAssistPanelV2({
@@ -64,6 +68,10 @@ export default function AgentAssistPanelV2({
   emitTelemetry,
   onOpenCRM,
   onOpenCaseHistory,
+  onConnectionStateChange,
+  useSse = true,
+  directTranscripts,
+  onKbArticlesUpdate,
 }: AgentAssistPanelV2Props) {
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [kbSuggestionsOpen, setKbSuggestionsOpen] = useState(true);
@@ -77,6 +85,10 @@ export default function AgentAssistPanelV2({
   const [dispositionNotes, setDispositionNotes] = useState('');
   const [selectedDisposition, setSelectedDisposition] = useState<string>('');
   const [selectedSubDispositions, setSelectedSubDispositions] = useState<string[]>([]);
+  const [allDispositions, setAllDispositions] = useState<Array<{ id: number | string; code: string; title: string; label?: string }>>([]);
+  const [allSubDispositions, setAllSubDispositions] = useState<Array<{ id: number | string; code: string; title: string; label?: string }>>([]);
+  const [isLoadingSubDispositions, setIsLoadingSubDispositions] = useState(false);
+  const lastFetchedDispositionIdRef = useRef<string | null>(null);
   const [healthStatus, setHealthStatus] = useState<'healthy' | 'slow' | 'error'>('healthy');
   const [healthLatency, setHealthLatency] = useState<number>(0);
   const [wsConnected, setWsConnected] = useState(true);
@@ -112,28 +124,136 @@ export default function AgentAssistPanelV2({
     }
   }, [isCallActive, isCollapsed, tenantId, agentId, interactionId, emitTelemetry]);
 
+  // Update utterances from direct transcripts (demo mode)
+  useEffect(() => {
+    if (directTranscripts && directTranscripts.length > 0) {
+      console.log('[AgentAssistPanel] 📥 Updating from direct transcripts', {
+        count: directTranscripts.length,
+        interactionId,
+      });
+      setUtterances(directTranscripts);
+      // Mark as connected for demo mode
+      setWsConnected(true);
+      setHealthStatus('healthy');
+      onConnectionStateChange?.(true, 1); // Simulate OPEN state
+    }
+  }, [directTranscripts, interactionId, onConnectionStateChange]);
+
+  // Handle KB articles updates from API (demo mode, when SSE is disabled)
+  useEffect(() => {
+    if (onKbArticlesUpdate) {
+      // Store the callback so it can be called from outside
+      (window as any).__updateKbArticles = (articles: KBArticle[], intent?: string, confidence?: number) => {
+        console.log('[AgentAssistPanel] 📚 Updating KB articles from API', {
+          articlesCount: articles.length,
+          intent,
+          confidence,
+        });
+        
+        // Attach intent information to articles
+        const articlesWithIntent = articles.map((article: KBArticle) => ({
+          ...article,
+          intent: intent || article.intent,
+          intentConfidence: confidence || article.intentConfidence,
+          timestamp: Date.now(),
+        }));
+        
+        setKbArticles(prev => {
+          const existingIds = new Set(prev.map(a => a.id));
+          const newArticles = articlesWithIntent
+            .filter((a: KBArticle) => !existingIds.has(a.id))
+            .map((a: KBArticle) => ({
+              ...a,
+              timestamp: Date.now(),
+            }));
+          // Sort by timestamp (newest first), then merge with existing
+          const allArticles = [...newArticles, ...prev];
+          return allArticles.sort((a, b) => {
+            const aTime = (a as any).timestamp || 0;
+            const bTime = (b as any).timestamp || 0;
+            return bTime - aTime; // Newest first
+          });
+        });
+        
+        onKbArticlesUpdate(articles, intent, confidence);
+      };
+    }
+    
+    return () => {
+      delete (window as any).__updateKbArticles;
+    };
+  }, [onKbArticlesUpdate]);
+
   // Listen to SSE for transcript and KB updates
   // Always listen when interactionId is available, even if collapsed (so data is ready when expanded)
+  // Skip SSE if useSse is false (demo mode)
   useEffect(() => {
+    if (!useSse) {
+      console.log('[AgentAssistPanel] SSE disabled (demo mode)');
+      return;
+    }
+    
     if (!interactionId) {
       console.log('[AgentAssistPanel] SSE not starting - no interactionId');
       return;
     }
 
-    console.log('[AgentAssistPanel] Starting SSE connection', { interactionId, isCollapsed });
+    console.log('[AgentAssistPanel] Starting SSE connection', { 
+      interactionId, 
+      isCollapsed,
+      timestamp: new Date().toISOString()
+    });
     const url = `/api/events/stream?callId=${encodeURIComponent(interactionId)}`;
     const eventSource = new EventSource(url);
 
     eventSource.onopen = () => {
-      console.log('[AgentAssistPanel] SSE connection opened');
+      console.log('[AgentAssistPanel] ✅ SSE connection opened', {
+        interactionId,
+        readyState: eventSource.readyState, // Should be 1 (OPEN)
+        timestamp: new Date().toISOString()
+      });
       setWsConnected(true);
       setHealthStatus('healthy');
+      onConnectionStateChange?.(true, eventSource.readyState);
     };
 
     eventSource.onerror = (err) => {
-      console.error('[AgentAssistPanel] SSE connection error', err);
-      setWsConnected(false);
-      setHealthStatus('error');
+      const readyState = eventSource.readyState;
+      // EventSource readyState: 0=CONNECTING, 1=OPEN, 2=CLOSED
+      console.log('[AgentAssistPanel] SSE connection error event', {
+        interactionId,
+        readyState,
+        readyStateName: readyState === 0 ? 'CONNECTING' : readyState === 1 ? 'OPEN' : 'CLOSED',
+        error: err,
+        timestamp: new Date().toISOString()
+      });
+
+      // Only show disconnected if connection is actually closed
+      if (readyState === EventSource.CLOSED) {
+        console.error('[AgentAssistPanel] ❌ SSE connection closed', {
+          interactionId,
+          readyState,
+          timestamp: new Date().toISOString()
+        });
+        setWsConnected(false);
+        setHealthStatus('error');
+        onConnectionStateChange?.(false, readyState);
+      } else {
+        // Still connecting (0) or open (1) - EventSource will auto-retry
+        // Don't show error yet, just log for debugging
+        console.warn('[AgentAssistPanel] ⚠️ SSE connection issue (auto-retrying)', {
+          interactionId,
+          readyState,
+          readyStateName: readyState === 0 ? 'CONNECTING' : 'OPEN',
+          note: 'EventSource will automatically retry connection'
+        });
+        // Keep wsConnected as true if it was already open, or don't change it if connecting
+        if (readyState === EventSource.OPEN) {
+          // Connection is actually open, keep connected
+          setWsConnected(true);
+          setHealthStatus('healthy');
+        }
+      }
     };
 
     eventSource.addEventListener('transcript_line', (event) => {
@@ -141,13 +261,14 @@ export default function AgentAssistPanelV2({
         const data = JSON.parse(event.data);
         const eventCallId = data.callId || data.interaction_id || data.interactionId;
         
-        console.log('[AgentAssistPanel] Received transcript_line event', {
+        console.log('[AgentAssistPanel] 📥 Received transcript_line event', {
           eventCallId,
           expectedCallId: interactionId,
           matches: eventCallId === interactionId || !eventCallId,
           hasText: !!data.text,
           text: data.text?.substring(0, 50),
           seq: data.seq,
+          timestamp: new Date().toISOString(),
         });
         
         // Skip system messages
@@ -192,10 +313,12 @@ export default function AgentAssistPanelV2({
             isPartial: false,
           };
           
-          console.log('[AgentAssistPanel] Adding utterance', {
+          console.log('[AgentAssistPanel] ✅ Adding utterance', {
             utterance_id: utterance.utterance_id,
             speaker: utterance.speaker,
             textLength: utterance.text.length,
+            textPreview: utterance.text.substring(0, 50),
+            timestamp: new Date().toISOString(),
           });
           
           setUtterances(prev => {
@@ -205,10 +328,17 @@ export default function AgentAssistPanelV2({
               (data.seq && u.utterance_id === data.seq.toString())
             );
             if (exists) {
-              console.log('[AgentAssistPanel] Skipping duplicate utterance', utterance.utterance_id);
+              console.log('[AgentAssistPanel] ⏭️ Skipping duplicate utterance', {
+                utterance_id: utterance.utterance_id,
+                seq: data.seq
+              });
               return prev;
             }
-            console.log('[AgentAssistPanel] Adding new utterance, total count:', prev.length + 1);
+            console.log('[AgentAssistPanel] ✅ Adding new utterance', {
+              utterance_id: utterance.utterance_id,
+              totalCount: prev.length + 1,
+              speaker: utterance.speaker
+            });
             return [...prev, utterance];
           });
           onTranscriptEvent?.(utterance);
@@ -279,10 +409,16 @@ export default function AgentAssistPanelV2({
     });
 
     return () => {
-      console.log('[AgentAssistPanel] Closing SSE connection', { interactionId });
+      console.log('[AgentAssistPanel] Closing SSE connection', { 
+        interactionId,
+        readyState: eventSource.readyState,
+        timestamp: new Date().toISOString()
+      });
       eventSource.close();
+      setWsConnected(false);
+      onConnectionStateChange?.(false, EventSource.CLOSED);
     };
-  }, [interactionId, onTranscriptEvent, emitTelemetry, tenantId, agentId]);
+  }, [interactionId, onTranscriptEvent, emitTelemetry, tenantId, agentId, onConnectionStateChange, useSse]);
 
   // Auto-scroll transcript
   useEffect(() => {
@@ -406,11 +542,39 @@ export default function AgentAssistPanelV2({
       setIsLoadingDisposition(true);
       const startTime = Date.now();
       
+      console.log('[AgentAssistPanel] 📝 Fetching disposition summary', {
+        interactionId,
+        utterancesCount: utterances.length,
+        timestamp: new Date().toISOString(),
+      });
+      
       fetchDispositionSummary(interactionId)
         .then(data => {
           const latency = Date.now() - startTime;
+          
+          // Log the received data, especially notes
+          console.log('[AgentAssistPanel] ✅ Received disposition data', {
+            interactionId,
+            dispositionId: data.dispositionId,
+            dispositionTitle: data.dispositionTitle,
+            confidence: data.confidence,
+            hasAutoNotes: !!data.autoNotes,
+            autoNotesLength: data.autoNotes?.length || 0,
+            autoNotesPreview: data.autoNotes?.substring(0, 100) || 'N/A',
+            latency_ms: latency,
+            timestamp: new Date().toISOString(),
+          });
+          
+          // Ensure notes are set, with fallback for empty/undefined
+          const notes = data.autoNotes || '';
+          console.log('[AgentAssistPanel] 📝 Setting disposition notes', {
+            notesLength: notes.length,
+            notesPreview: notes.substring(0, 100),
+            isEmpty: !notes || notes.trim().length === 0,
+          });
+          
           setDispositionData(data);
-          setDispositionNotes(data.autoNotes);
+          setDispositionNotes(notes);
           setSelectedDisposition(data.dispositionId);
           setHealthLatency(latency);
           setHealthStatus(latency > 2500 ? 'slow' : 'healthy');
@@ -423,7 +587,12 @@ export default function AgentAssistPanelV2({
           });
         })
         .catch(err => {
-          console.error('[AgentAssistPanel] Failed to fetch disposition', err);
+          console.error('[AgentAssistPanel] ❌ Failed to fetch disposition', {
+            interactionId,
+            error: err,
+            message: err?.message || String(err),
+            timestamp: new Date().toISOString(),
+          });
           setHealthStatus('error');
         })
         .finally(() => {
@@ -431,6 +600,150 @@ export default function AgentAssistPanelV2({
         });
     }
   }, [isCallActive, utterances, dispositionData, fetchDispositionSummary, interactionId, emitTelemetry]);
+
+  // Function to fetch sub-dispositions for a given disposition
+  const fetchSubDispositions = useCallback(async (dispositionId: string) => {
+    if (!dispositionId) {
+      setAllSubDispositions([]);
+      lastFetchedDispositionIdRef.current = null;
+      return;
+    }
+    
+    // Avoid fetching if we already have data for this disposition
+    if (lastFetchedDispositionIdRef.current === dispositionId) {
+      console.log('[AgentAssistPanel] ⏭️ Skipping fetch - already fetched sub-dispositions for', { dispositionId });
+      return;
+    }
+    
+    setIsLoadingSubDispositions(true);
+    lastFetchedDispositionIdRef.current = dispositionId;
+    
+    try {
+      console.log('[AgentAssistPanel] 📋 Fetching sub-dispositions for disposition', { dispositionId });
+      
+      // Try to get the disposition code from allDispositions
+      const disposition = allDispositions.find(d => d.id.toString() === dispositionId);
+      const dispositionCode = disposition?.code;
+      
+      let url = `/api/sub-dispositions?dispositionId=${dispositionId}`;
+      if (dispositionCode) {
+        url += `&dispositionCode=${encodeURIComponent(dispositionCode)}`;
+      }
+      
+      const response = await fetch(url);
+      const payload = await response.json();
+      
+      if (payload.ok && Array.isArray(payload.subDispositions)) {
+        const subDispositions = payload.subDispositions.map((sd: any) => ({
+          id: sd.id || sd.code,
+          code: sd.code || '',
+          title: sd.title || sd.label || '',
+          label: sd.label || sd.title || '',
+        }));
+        console.log('[AgentAssistPanel] ✅ Loaded sub-dispositions', { 
+          count: subDispositions.length,
+          dispositionId 
+        });
+        // Always set the new sub-dispositions (don't preserve old ones to avoid flickering)
+        setAllSubDispositions(subDispositions);
+      } else {
+        console.warn('[AgentAssistPanel] Failed to fetch sub-dispositions', payload);
+        setAllSubDispositions([]);
+      }
+    } catch (err) {
+      console.error('[AgentAssistPanel] Error fetching sub-dispositions', err);
+      setAllSubDispositions([]);
+    } finally {
+      setIsLoadingSubDispositions(false);
+    }
+  }, [allDispositions]);
+
+  // Fetch all dispositions when dispositionData is available
+  useEffect(() => {
+    if (dispositionData && allDispositions.length === 0) {
+      const fetchAllDispositions = async () => {
+        try {
+          console.log('[AgentAssistPanel] 📋 Fetching all dispositions from API');
+          const response = await fetch(`/api/dispositions?tenantId=${tenantId}`);
+          const payload = await response.json();
+          
+          if (payload.ok && Array.isArray(payload.dispositions)) {
+            const dispositions = payload.dispositions.map((d: any) => ({
+              id: d.id || d.code,
+              code: d.code || '',
+              title: d.title || d.label || '',
+              label: d.label || d.title || '',
+            }));
+            console.log('[AgentAssistPanel] ✅ Loaded all dispositions', { count: dispositions.length });
+            setAllDispositions(dispositions);
+            
+            // Fetch sub-dispositions for the recommended disposition
+            if (dispositionData.dispositionId) {
+              // Reset the ref to allow fetching
+              lastFetchedDispositionIdRef.current = null;
+              await fetchSubDispositions(dispositionData.dispositionId);
+            }
+          } else {
+            console.warn('[AgentAssistPanel] Failed to fetch all dispositions', payload);
+          }
+        } catch (err) {
+          console.error('[AgentAssistPanel] Error fetching all dispositions', err);
+        }
+      };
+      
+      fetchAllDispositions();
+    } else if (dispositionData && allDispositions.length > 0 && dispositionData.dispositionId) {
+      // If we already have dispositions but haven't fetched sub-dispositions for this disposition yet
+      if (lastFetchedDispositionIdRef.current !== dispositionData.dispositionId) {
+        lastFetchedDispositionIdRef.current = null;
+        fetchSubDispositions(dispositionData.dispositionId);
+      }
+    }
+  }, [dispositionData?.dispositionId, tenantId, allDispositions.length, fetchSubDispositions]);
+
+  // Pre-select recommended sub-disposition when it becomes available (only once)
+  useEffect(() => {
+    if (dispositionData?.subDispositions && 
+        dispositionData.subDispositions.length > 0 && 
+        allSubDispositions.length > 0 &&
+        selectedSubDispositions.length === 0) {
+      const recommendedSubId = dispositionData.subDispositions[0].id;
+      const subExists = allSubDispositions.some(sd => sd.id.toString() === recommendedSubId);
+      
+      if (subExists) {
+        console.log('[AgentAssistPanel] ✅ Pre-selecting recommended sub-disposition', { recommendedSubId });
+        setSelectedSubDispositions([recommendedSubId]);
+      }
+    }
+  }, [dispositionData?.subDispositions, allSubDispositions.length, selectedSubDispositions.length]);
+
+  // Sync notes with dispositionData when it changes
+  useEffect(() => {
+    if (dispositionData && dispositionData.autoNotes) {
+      // Only update if notes are different to avoid unnecessary re-renders
+      if (dispositionNotes !== dispositionData.autoNotes) {
+        console.log('[AgentAssistPanel] 🔄 Syncing notes from dispositionData', {
+          currentNotesLength: dispositionNotes.length,
+          newNotesLength: dispositionData.autoNotes.length,
+          newNotesPreview: dispositionData.autoNotes.substring(0, 100),
+        });
+        setDispositionNotes(dispositionData.autoNotes);
+      }
+    }
+  }, [dispositionData, dispositionNotes]);
+
+  // Log when dispositionNotes state changes
+  useEffect(() => {
+    if (dispositionData) {
+      console.log('[AgentAssistPanel] 📋 Disposition notes state updated', {
+        notesLength: dispositionNotes.length,
+        notesPreview: dispositionNotes.substring(0, 100),
+        isEmpty: !dispositionNotes || dispositionNotes.trim().length === 0,
+        hasDispositionData: !!dispositionData,
+        dispositionDataHasNotes: !!dispositionData.autoNotes,
+      });
+    }
+  }, [dispositionNotes, dispositionData]);
 
   // Handle feedback
   const handleFeedback = useCallback((articleId: string, liked: boolean) => {
@@ -484,7 +797,7 @@ export default function AgentAssistPanelV2({
             });
           }}
           className="p-2 hover:bg-gray-100 rounded transition-colors"
-          aria-label="Expand Agent Assist panel"
+          aria-label="Expand Agent Copilot panel"
         >
           <svg className="w-6 h-6 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
@@ -511,7 +824,10 @@ export default function AgentAssistPanelV2({
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 bg-gray-50">
         <div className="flex items-center gap-2">
-          <h2 className="text-sm font-semibold text-gray-900">Agent Assist</h2>
+          <svg className="w-5 h-5 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" />
+          </svg>
+          <h2 className="text-sm font-semibold text-gray-900">Agent Copilot</h2>
           <div className="relative group">
             <div className={`w-2 h-2 rounded-full ${
               healthStatus === 'healthy' ? 'bg-green-500' :
@@ -535,7 +851,7 @@ export default function AgentAssistPanelV2({
             });
           }}
           className="p-1 hover:bg-gray-200 rounded transition-colors"
-          aria-label="Collapse Agent Assist panel"
+          aria-label="Collapse Agent Copilot panel"
         >
           <svg className="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
@@ -587,53 +903,89 @@ export default function AgentAssistPanelV2({
                   </label>
                   <select
                     value={selectedDisposition}
-                    onChange={(e) => setSelectedDisposition(e.target.value)}
-                    className="w-full px-3 py-2 border border-gray-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    onChange={(e) => {
+                      const newDispositionId = e.target.value;
+                      setSelectedDisposition(newDispositionId);
+                      // Clear current sub-disposition selection when disposition changes
+                      setSelectedSubDispositions([]);
+                      // Fetch sub-dispositions for the selected disposition
+                      fetchSubDispositions(newDispositionId);
+                    }}
+                    className="w-full px-3 py-2 border border-gray-300 rounded text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
                   >
-                    <option value={dispositionData.dispositionId}>
-                      {dispositionData.dispositionTitle} ({formatConfidence(dispositionData.confidence)})
-                    </option>
+                    {allDispositions.length > 0 ? (
+                      allDispositions.map((disp) => (
+                        <option key={disp.id} value={disp.id.toString()}>
+                          {disp.title || disp.label} {disp.id.toString() === dispositionData.dispositionId ? `(${formatConfidence(dispositionData.confidence)})` : ''}
+                        </option>
+                      ))
+                    ) : (
+                      <option value={dispositionData.dispositionId}>
+                        {dispositionData.dispositionTitle} ({formatConfidence(dispositionData.confidence)})
+                      </option>
+                    )}
                   </select>
                 </div>
 
-                {dispositionData.subDispositions && dispositionData.subDispositions.length > 0 && (
-                  <div>
-                    <label className="block text-xs font-medium text-gray-700 mb-2">
-                      Sub-Dispositions
-                    </label>
-                    <div className="space-y-2">
-                      {dispositionData.subDispositions.map(sub => (
-                        <label key={sub.id} className="flex items-center gap-2">
-                          <input
-                            type="checkbox"
-                            checked={selectedSubDispositions.includes(sub.id)}
-                            onChange={(e) => {
-                              if (e.target.checked) {
-                                setSelectedSubDispositions([...selectedSubDispositions, sub.id]);
-                              } else {
-                                setSelectedSubDispositions(selectedSubDispositions.filter(id => id !== sub.id));
-                              }
-                            }}
-                            className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                          />
-                          <span className="text-sm text-gray-900">{sub.title}</span>
-                        </label>
-                      ))}
-                    </div>
-                  </div>
-                )}
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-2">
+                    Sub-Disposition
+                  </label>
+                  <select
+                    value={selectedSubDispositions[0] || ''}
+                    onChange={(e) => {
+                      const newSubDispositionId = e.target.value;
+                      if (newSubDispositionId) {
+                        setSelectedSubDispositions([newSubDispositionId]);
+                      } else {
+                        setSelectedSubDispositions([]);
+                      }
+                    }}
+                    disabled={isLoadingSubDispositions || !selectedDisposition}
+                    className="w-full px-3 py-2 border border-gray-300 rounded text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100 disabled:cursor-not-allowed"
+                  >
+                    <option value="">
+                      {isLoadingSubDispositions 
+                        ? 'Loading sub-dispositions...' 
+                        : allSubDispositions.length === 0 
+                        ? 'No sub-dispositions available' 
+                        : 'Select a sub-disposition'}
+                    </option>
+                    {allSubDispositions.map((sub) => {
+                      const isRecommended = dispositionData.subDispositions?.some(
+                        rec => rec.id === sub.id.toString()
+                      );
+                      return (
+                        <option key={sub.id} value={sub.id.toString()}>
+                          {sub.title || sub.label} {isRecommended ? '(Recommended)' : ''}
+                        </option>
+                      );
+                    })}
+                  </select>
+                </div>
 
                 <div>
                   <label className="block text-xs font-medium text-gray-700 mb-2">
                     Notes <span className="text-gray-500 text-xs">(AI-generated, editable)</span>
                   </label>
                   <textarea
-                    value={dispositionNotes}
-                    onChange={(e) => setDispositionNotes(e.target.value)}
+                    value={dispositionNotes || ''}
+                    onChange={(e) => {
+                      console.log('[AgentAssistPanel] 📝 Notes changed by user', {
+                        newLength: e.target.value.length,
+                        preview: e.target.value.substring(0, 50),
+                      });
+                      setDispositionNotes(e.target.value);
+                    }}
                     rows={6}
-                    className="w-full px-3 py-2 border border-gray-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    placeholder="Auto-generated notes..."
+                    className="w-full px-3 py-2 border border-gray-300 rounded text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    placeholder={dispositionNotes ? "Edit notes..." : "Auto-generated notes will appear here..."}
                   />
+                  {!dispositionNotes || dispositionNotes.trim().length === 0 ? (
+                    <p className="mt-1 text-xs text-gray-500 italic">
+                      Notes are being generated. If they don't appear, try clicking Retry.
+                    </p>
+                  ) : null}
                 </div>
 
                 <div className="flex gap-2">
