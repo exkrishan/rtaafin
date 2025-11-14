@@ -33,6 +33,7 @@ const mockCustomer: Customer = {
 export default function LivePage() {
   const [callId, setCallId] = useState<string>('');
   const [tenantId] = useState('default');
+  const [viewMode, setViewMode] = useState<'agent-assist' | 'disposition'>('agent-assist');
   const [dispositionOpen, setDispositionOpen] = useState(false);
   const [transcriptUtterances, setTranscriptUtterances] = useState<Array<{
     utterance_id: string;
@@ -201,6 +202,7 @@ export default function LivePage() {
       };
 
       setDispositionData(dispositionData);
+      setViewMode('disposition');
       setDispositionOpen(true);
     } catch (err: any) {
       console.error('[Live] Failed to generate summary', err);
@@ -301,7 +303,7 @@ export default function LivePage() {
         </div>
 
         {/* Right Column: Agent Assist Panel V2 - Right-docked */}
-        {callId && (
+        {callId && viewMode === 'agent-assist' && (
           <AgentAssistPanelV2
             agentId="agent-live-123"
             tenantId={tenantId}
@@ -383,7 +385,14 @@ export default function LivePage() {
       {dispositionData && (
         <AutoDispositionModal
           open={dispositionOpen}
-          onClose={() => setDispositionOpen(false)}
+          onClose={() => {
+            setDispositionOpen(false);
+            setViewMode('agent-assist');
+          }}
+          onBack={() => {
+            setViewMode('agent-assist');
+            // Keep modal open but hidden, so state is preserved
+          }}
           callId={callId}
           tenantId={tenantId}
           suggested={dispositionData.suggested}

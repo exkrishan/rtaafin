@@ -41,10 +41,11 @@ function generateClientId(): string {
 export function registerSseClient(req: any, res: any, callId: string | null = null): void {
   const clientId = generateClientId();
 
-  console.info('[realtime] New SSE client connected', {
+  console.info('[realtime] ✅ New SSE client connected', {
     clientId,
     callId: callId || 'global',
     totalClients: clients.size + 1,
+    timestamp: new Date().toISOString(),
   });
 
   // Set SSE headers
@@ -86,10 +87,11 @@ export function registerSseClient(req: any, res: any, callId: string | null = nu
     const client = clients.get(clientId);
     const durationMs = client?.createdAt ? Date.now() - client.createdAt.getTime() : 0;
 
-    console.info('[realtime] SSE client disconnected', {
+    console.info('[realtime] ❌ SSE client disconnected', {
       clientId,
       callId: callId || 'global',
       duration: `${durationMs}ms`,
+      timestamp: new Date().toISOString(),
     });
     clients.delete(clientId);
 
@@ -123,11 +125,24 @@ function sendEvent(res: any, event: RealtimeEvent): void {
       if (typeof res.flush === 'function') {
         res.flush();
       }
+      
+      // Log successful send for transcript_line events (for debugging)
+      if (event.type === 'transcript_line') {
+        console.log('[realtime] 📤 Sent transcript_line event to client', {
+          callId: event.callId,
+          seq: event.seq,
+          textLength: event.text?.length || 0,
+        });
+      }
     } else {
-      console.error('[realtime] res.write is not a function', typeof res);
+      console.error('[realtime] ❌ res.write is not a function', typeof res);
     }
   } catch (err: any) {
-    console.error('[realtime] Failed to send event', err?.message || err);
+    console.error('[realtime] ❌ Failed to send event', {
+      error: err?.message || err,
+      eventType: event.type,
+      callId: event.callId,
+    });
     // Don't throw - just log the error
   }
 }
@@ -155,12 +170,17 @@ export function broadcastEvent(event: RealtimeEvent): void {
     }
   }
 
-  console.info('[realtime] Broadcast event', {
+  console.info('[realtime] 📡 Broadcast event', {
     type: event.type,
     callId: targetCallId,
     seq: event.seq,
     recipients: sentCount,
     totalClients: clients.size,
+    timestamp: new Date().toISOString(),
+    clientDetails: sentCount > 0 ? Array.from(clients.entries())
+      .filter(([_, client]) => client.callId === null || client.callId === targetCallId)
+      .map(([id, client]) => ({ id, callId: client.callId }))
+      : []
   });
 }
 

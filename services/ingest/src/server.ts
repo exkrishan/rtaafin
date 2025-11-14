@@ -463,17 +463,26 @@ class IngestionServer {
             exotelState.streamSid = json.stream_sid || json.start.stream_sid || exotelState.streamSid;
             exotelState.callSid = json.start.call_sid || exotelState.callSid;
             exotelState.accountSid = json.start.account_sid || exotelState.accountSid;
-            // CRITICAL FIX: Exotel telephony should always be 8000 Hz
-            // If Exotel sends incorrect sample rate (e.g., 1800), force it to 8000
+            // Exotel can send 8kHz, 16kHz, or 24kHz - accept valid rates, prefer 16kHz for transcription
             let parsedSampleRate = parseInt(json.start.media_format?.sample_rate || '8000', 10);
-            if (parsedSampleRate !== 8000) {
-              console.warn(`[exotel] ⚠️ Invalid sample rate ${parsedSampleRate} from Exotel, forcing to 8000 Hz for telephony`, {
+            const ALLOWED_EXOTEL_RATES = [8000, 16000, 24000];
+            
+            if (!ALLOWED_EXOTEL_RATES.includes(parsedSampleRate)) {
+              // Invalid sample rate - default to 8000
+              console.warn(`[exotel] ⚠️ Invalid sample rate ${parsedSampleRate} from Exotel, defaulting to 8000 Hz`, {
                 stream_sid: exotelState.streamSid,
                 call_sid: exotelState.callSid,
                 received_sample_rate: json.start.media_format?.sample_rate,
                 corrected_sample_rate: 8000,
               });
               parsedSampleRate = 8000;
+            } else if (parsedSampleRate === 24000) {
+              // Convert 24kHz to 16kHz (ElevenLabs max)
+              parsedSampleRate = 16000;
+              console.info(`[exotel] ℹ️ Converting 24kHz to 16kHz for ElevenLabs`, {
+                stream_sid: exotelState.streamSid,
+                call_sid: exotelState.callSid,
+              });
             }
             exotelState.sampleRate = parsedSampleRate;
             exotelState.encoding = json.start.media_format?.encoding || 'pcm16';

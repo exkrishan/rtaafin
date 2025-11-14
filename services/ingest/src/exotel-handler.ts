@@ -113,17 +113,49 @@ export class ExotelHandler {
     event: ExotelStartEvent
   ): void {
     const { stream_sid, start } = event;
-    // CRITICAL FIX: Exotel telephony should always be 8000 Hz
-    // If Exotel sends incorrect sample rate (e.g., 1800), force it to 8000
+    // Exotel can send 8kHz, 16kHz, or 24kHz (per Exotel docs)
+    // ElevenLabs supports 8kHz and 16kHz - accept both, prefer 16kHz for better transcription
+    // Only force correction if sample rate is invalid (not 8000, 16000, or 24000)
     let sampleRate = parseInt(start.media_format.sample_rate, 10) || 8000;
-    if (sampleRate !== 8000) {
-      console.warn(`[exotel] ⚠️ Invalid sample rate ${sampleRate} from Exotel, forcing to 8000 Hz for telephony`, {
+    const ALLOWED_EXOTEL_RATES = [8000, 16000, 24000];
+    const ELEVENLABS_SUPPORTED_RATES = [8000, 16000];
+    
+    if (!ALLOWED_EXOTEL_RATES.includes(sampleRate)) {
+      // Invalid sample rate from Exotel - default to 8000 for telephony compatibility
+      console.warn(`[exotel] ⚠️ Invalid sample rate ${sampleRate} from Exotel, defaulting to 8000 Hz`, {
         stream_sid,
         call_sid: start.call_sid,
         received_sample_rate: start.media_format.sample_rate,
         corrected_sample_rate: 8000,
+        note: 'Exotel should send 8kHz, 16kHz, or 24kHz. Defaulting to 8kHz for telephony compatibility.',
       });
       sampleRate = 8000;
+    } else if (sampleRate === 24000) {
+      // Exotel sent 24kHz, but ElevenLabs only supports up to 16kHz - convert to 16kHz
+      console.info(`[exotel] ℹ️ Exotel sent 24kHz audio, converting to 16kHz for ElevenLabs (optimal for transcription)`, {
+        stream_sid,
+        call_sid: start.call_sid,
+        received_sample_rate: 24000,
+        converted_sample_rate: 16000,
+        note: 'ElevenLabs supports up to 16kHz. 16kHz provides better transcription quality than 8kHz.',
+      });
+      sampleRate = 16000;
+    } else if (sampleRate === 16000) {
+      // Exotel sent 16kHz - optimal for transcription
+      console.info(`[exotel] ✅ Exotel sent 16kHz audio (optimal for transcription quality)`, {
+        stream_sid,
+        call_sid: start.call_sid,
+        sample_rate: 16000,
+        note: '16kHz provides better transcription quality than 8kHz telephony audio.',
+      });
+    } else {
+      // Exotel sent 8kHz - standard telephony, acceptable but not optimal
+      console.debug(`[exotel] ℹ️ Exotel sent 8kHz audio (telephony standard)`, {
+        stream_sid,
+        call_sid: start.call_sid,
+        sample_rate: 8000,
+        note: '8kHz is standard for telephony. For better transcription quality, configure Exotel to send 16kHz.',
+      });
     }
 
     const state: ExotelConnectionState = {

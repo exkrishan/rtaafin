@@ -297,3 +297,5 @@ The SDK source code confirms our recommendations:
 
 **Key Takeaway:** The SDK is designed to be used through its public API methods, not by accessing internal WebSocket directly. Our complex socket access code is unnecessary and may be causing issues.
 
+
+

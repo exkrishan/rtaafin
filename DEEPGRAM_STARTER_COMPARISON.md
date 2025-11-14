@@ -383,3 +383,5 @@ The Deepgram starter uses a **much simpler approach** that trusts the SDK more. 
 
 **Key Takeaway:** Trust the SDK. Use `getReadyState()` and `keepAlive()` methods instead of manual socket manipulation.
 
+
+

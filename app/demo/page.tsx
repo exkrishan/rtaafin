@@ -47,6 +47,7 @@ export default function DemoPage() {
   const [isCallActive, setIsCallActive] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [callEnded, setCallEnded] = useState(false);
+  const [viewMode, setViewMode] = useState<'agent-assist' | 'disposition'>('agent-assist');
   const [dispositionOpen, setDispositionOpen] = useState(false);
   const [transcriptUtterances, setTranscriptUtterances] = useState<Array<{
     utterance_id: string;
@@ -59,9 +60,20 @@ export default function DemoPage() {
     suggested: Suggestion[];
     autoNotes: string;
   } | null>(null);
+  const [dispositionState, setDispositionState] = useState<{
+    selectedDisposition?: string;
+    selectedSubDisposition?: string;
+    notes?: string;
+  } | null>(null);
   const [demoTranscript, setDemoTranscript] = useState<DemoTranscriptLine[]>([]);
-  const [progress, setProgress] = useState(0);
   const [demoResult, setDemoResult] = useState<DemoResult | null>(null);
+  const [directTranscripts, setDirectTranscripts] = useState<Array<{
+    utterance_id: string;
+    speaker: 'agent' | 'customer';
+    text: string;
+    confidence: number;
+    timestamp: string;
+  }>>([]);
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
   const transcriptIndexRef = useRef(0);
   const callStartTimeRef = useRef<Date | null>(null);
@@ -90,6 +102,7 @@ export default function DemoPage() {
   }, []);
 
   const sendTranscriptLineRef = useRef<((index: number) => Promise<void>) | null>(null);
+  const onKbArticlesUpdateRef = useRef<((articles: any[], intent?: string, confidence?: number) => void) | null>(null);
 
   const startCall = async () => {
     if (isCallActive || demoTranscript.length === 0) {
@@ -97,11 +110,15 @@ export default function DemoPage() {
       return;
     }
     
-    console.log('[Demo] Starting call:', { callId, transcriptLines: demoTranscript.length });
+    console.log('[Demo] 🎬 Starting call:', { 
+      callId, 
+      transcriptLines: demoTranscript.length,
+      timestamp: new Date().toISOString()
+    });
     setIsCallActive(true);
     setIsPaused(false);
     setCallEnded(false);
-    setProgress(0);
+    setDirectTranscripts([]); // Reset transcripts
     transcriptIndexRef.current = 0;
     callStartTimeRef.current = new Date();
 
@@ -110,7 +127,6 @@ export default function DemoPage() {
         console.log('[Demo] All transcript lines sent');
         setIsCallActive(false);
         setCallEnded(true);
-        setProgress(100);
         // Auto-open disposition modal
         setTimeout(() => {
           disposeCall();
@@ -125,19 +141,41 @@ export default function DemoPage() {
 
       const line = demoTranscript[index];
       const text = `${line.speaker}: ${line.text}`;
-      const progressPercent = ((index + 1) / demoTranscript.length) * 100;
-      setProgress(progressPercent);
       transcriptIndexRef.current = index;
 
+      // Determine speaker
+      const speaker: 'agent' | 'customer' = line.speaker.toLowerCase().includes('agent') ? 'agent' : 'customer';
+      const cleanText = line.text.trim();
+
+      // Add directly to transcript state (bypass SSE for demo)
+      const utterance = {
+        utterance_id: `demo-${line.seq}-${Date.now()}`,
+        speaker,
+        text: cleanText,
+        confidence: 0.95,
+        timestamp: line.ts || new Date().toISOString(),
+      };
+
+      setDirectTranscripts(prev => {
+        // Check for duplicates
+        const exists = prev.some(u => u.utterance_id === utterance.utterance_id);
+        if (exists) return prev;
+        return [...prev, utterance];
+      });
+
+      // Transcripts are added to directTranscripts state which is passed to AgentAssistPanelV2
+
       try {
-        console.log('[Demo] 📤 Sending transcript line:', { 
+        console.log('[Demo] 📤 Sending transcript line (direct mode):', { 
           seq: line.seq, 
           index, 
           callId,
-          text: text.substring(0, 50),
-          textLength: text.length
+          speaker,
+          text: cleanText.substring(0, 50),
+          textLength: cleanText.length,
         });
         
+        // Send to API for KB/intent detection and wait for response
         const response = await fetch('/api/calls/ingest-transcript', {
           method: 'POST',
           headers: { 
@@ -154,32 +192,40 @@ export default function DemoPage() {
 
         if (response.ok) {
           const result = await response.json();
-          console.log('[Demo] ✅ Transcript line sent successfully:', { 
-            seq: line.seq, 
+          console.log('[Demo] ✅ Received KB/intent response:', {
+            seq: line.seq,
             intent: result.intent,
-            articlesCount: result.articles?.length || 0
+            confidence: result.confidence,
+            articlesCount: result.articles?.length || 0,
           });
-        } else {
-          const errorText = await response.text();
-          let errorData;
-          try {
-            errorData = JSON.parse(errorText);
-          } catch {
-            errorData = { message: errorText };
+
+          // Update KB articles if we have them
+          if (result.articles && Array.isArray(result.articles) && result.articles.length > 0) {
+            // Use window callback to update KB articles in AgentAssistPanelV2
+            if ((window as any).__updateKbArticles) {
+              (window as any).__updateKbArticles(result.articles, result.intent, result.confidence);
+            }
           }
-          console.error('[Demo] ❌ Failed to send transcript line:', { 
-            status: response.status, 
-            statusText: response.statusText,
-            error: errorData
-          });
+        } else {
+          console.warn('[Demo] API call returned error:', response.status, response.statusText);
         }
       } catch (err: any) {
         console.error('[Demo] ❌ Error sending transcript line:', {
           error: err.message || String(err),
           stack: err.stack,
           callId,
-          seq: line.seq
+          seq: line.seq,
+          index,
+          text: text.substring(0, 100)
         });
+        // Retry logic: retry once after 1 second
+        if (index < demoTranscript.length - 1) {
+          console.log('[Demo] ⏳ Retrying transcript line after error in 1 second...', { seq: line.seq, index });
+          setTimeout(() => {
+            sendTranscriptLine(index);
+          }, 1000);
+          return;
+        }
       }
 
       if (index < demoTranscript.length - 1) {
@@ -190,12 +236,18 @@ export default function DemoPage() {
     };
 
     sendTranscriptLineRef.current = sendTranscriptLine;
-    // Wait longer for SSE connection to establish, then start sending
-    // This ensures the AgentAssistPanel has time to connect to the SSE stream
+    
+    // Start sending transcripts immediately (no SSE wait for demo)
+    console.log('[Demo] 🎬 Starting transcript playback (direct mode)', {
+      callId,
+      transcriptLines: demoTranscript.length,
+      timestamp: new Date().toISOString()
+    });
+    
+    // Small delay to ensure UI is ready, then start
     setTimeout(() => {
-      console.log('[Demo] Starting transcript playback after SSE connection delay');
       sendTranscriptLine(0);
-    }, 1500); // Increased delay to ensure SSE connection is ready
+    }, 500);
   };
 
   const pauseCall = () => {
@@ -221,7 +273,7 @@ export default function DemoPage() {
     setIsCallActive(false);
     setIsPaused(false);
     setCallEnded(false);
-    setProgress(0);
+    setDirectTranscripts([]);
     transcriptIndexRef.current = 0;
     callStartTimeRef.current = null;
     setDispositionData(null);
@@ -279,6 +331,7 @@ export default function DemoPage() {
       };
 
       setDispositionData(dispositionData);
+      setViewMode('disposition');
       setDispositionOpen(true);
 
       // Save demo result
@@ -331,24 +384,8 @@ export default function DemoPage() {
 
   return (
     <div className="min-h-screen bg-surface">
-      {/* Progress Bar */}
-      {isCallActive && (
-        <div className="fixed top-0 left-0 right-0 z-50 bg-gray-800 text-white px-4 py-2">
-          <div className="flex items-center gap-4">
-            <span className="text-xs font-medium">Demo Playback</span>
-            <div className="flex-1 bg-gray-700 rounded-full h-2">
-              <div 
-                className="bg-blue-500 h-2 rounded-full transition-all duration-300"
-                style={{ width: `${progress}%` }}
-              />
-            </div>
-            <span className="text-xs font-medium">{Math.round(progress)}%</span>
-          </div>
-        </div>
-      )}
-
       {/* Main Layout */}
-      <div className={`flex h-screen ${isCallActive ? 'pt-12' : ''}`}>
+      <div className="flex h-screen">
         {/* Left Sidebar */}
         <LeftSidebar 
           isCallActive={isCallActive}
@@ -396,6 +433,7 @@ export default function DemoPage() {
         </div>
 
         {/* Right Column: Agent Assist Panel V2 - Right-docked */}
+        {viewMode === 'agent-assist' && (
         <AgentAssistPanelV2
           agentId="agent-demo-123"
           tenantId={tenantId}
@@ -403,6 +441,12 @@ export default function DemoPage() {
           customer={mockCustomer}
           callDuration={isCallActive ? '00:00' : '00:00'}
           isCallActive={isCallActive}
+          useSse={false}
+          directTranscripts={directTranscripts}
+          onKbArticlesUpdate={(articles, intent, confidence) => {
+            console.log('[Demo] KB articles update callback:', { articlesCount: articles.length, intent, confidence });
+            // This will be handled by the component's internal state
+          }}
           onTranscriptEvent={(event) => {
             console.log('[Demo] Transcript event:', event);
             setTranscriptUtterances(prev => {
@@ -461,17 +505,60 @@ export default function DemoPage() {
           }}
           fetchDispositionSummary={async (interactionId) => {
             console.log('[Demo] Fetching disposition for:', interactionId);
-            // Return mock disposition data
-            return {
-              dispositionId: 'disposition-1',
-              dispositionTitle: 'Card Replacement',
-              confidence: 0.92,
-              subDispositions: [
-                { id: 'sub-1', title: 'Fraud Related' },
-                { id: 'sub-2', title: 'Lost/Stolen' },
-              ],
-              autoNotes: 'Customer reported fraud and requested card replacement. Verified identity and initiated replacement process.',
-            };
+            
+            try {
+              // Call actual API for disposition summary
+              const response = await fetch('/api/calls/summary', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ callId: interactionId, tenantId }),
+              });
+
+              const payload = await response.json();
+
+              if (!response.ok || !payload.ok) {
+                throw new Error(payload?.error || 'Failed to generate summary');
+              }
+
+              // Map API response to DispositionData format
+              const suggested = (payload.dispositions || []).map((item: any) => ({
+                code: item.mappedCode || item.code || 'GENERAL_INQUIRY',
+                title: item.mappedTitle || item.title || 'General Inquiry',
+                score: typeof item.score === 'number' ? item.score : 0.5,
+                id: typeof item.mappedId === 'number' ? item.mappedId : undefined,
+                subDisposition: item.subDisposition || item.sub_disposition || undefined,
+                subDispositionId: typeof item.subDispositionId === 'number' ? item.subDispositionId : undefined,
+              }));
+
+              const summary = payload.summary || {};
+              const autoNotes = [
+                summary.issue,
+                summary.resolution,
+                summary.next_steps,
+              ]
+                .filter((section: string | undefined) => section && section.trim().length > 0)
+                .join('\n\n');
+
+              return {
+                dispositionId: suggested[0]?.id?.toString() || 'disposition-1',
+                dispositionTitle: suggested[0]?.title || 'General Inquiry',
+                confidence: suggested[0]?.score || 0.5,
+                subDispositions: suggested[0]?.subDisposition ? [
+                  { id: suggested[0].subDispositionId?.toString() || 'sub-1', title: suggested[0].subDisposition }
+                ] : [],
+                autoNotes: autoNotes || 'No notes generated.',
+              };
+            } catch (err: any) {
+              console.error('[Demo] Failed to fetch disposition summary:', err);
+              // Return fallback data
+              return {
+                dispositionId: 'disposition-1',
+                dispositionTitle: 'General Inquiry',
+                confidence: 0.5,
+                subDispositions: [],
+                autoNotes: 'Failed to generate notes. Please try again.',
+              };
+            }
           }}
           emitTelemetry={(eventName, payload) => {
             console.log('[Demo] Telemetry:', eventName, payload);
@@ -485,13 +572,21 @@ export default function DemoPage() {
             window.open('https://crm.example.com/cases/cust-789', '_blank');
           }}
         />
+        )}
       </div>
 
       {/* Disposition Modal */}
       {dispositionData && (
         <AutoDispositionModal
           open={dispositionOpen}
-          onClose={() => setDispositionOpen(false)}
+          onClose={() => {
+            setDispositionOpen(false);
+            setViewMode('agent-assist');
+          }}
+          onBack={() => {
+            setViewMode('agent-assist');
+            // Keep modal open but hidden, so state is preserved
+          }}
           callId={callId}
           tenantId={tenantId}
           suggested={dispositionData.suggested}

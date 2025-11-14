@@ -789,12 +789,14 @@ export class ElevenLabsProvider implements AsrProvider {
     // 5. Check for silence (common cause of empty transcripts)
     // CRITICAL FIX: Telephony-specific thresholds - 8kHz audio has much lower energy
     // Lower thresholds to prevent false silence detection for telephony audio
-    const SILENCE_THRESHOLD_8KHZ = 25;   // Much lower for 8kHz telephony (was 50)
+    // FIXED: Lowered thresholds further (10/10) to allow low-energy telephony audio to pass through
+    const SILENCE_THRESHOLD_8KHZ = 10;   // Very low for 8kHz telephony (was 25, original was 50)
     const SILENCE_THRESHOLD_16KHZ = 100; // Standard threshold for 16kHz audio
     const SILENCE_THRESHOLD = sampleRate === 8000 ? SILENCE_THRESHOLD_8KHZ : SILENCE_THRESHOLD_16KHZ;
     
     // For 8kHz telephony, use much lower amplitude thresholds
-    const MIN_AMPLITUDE_8KHZ = 50;   // Much lower for 8kHz telephony (was 500)
+    // FIXED: Lowered to 10 to allow low-amplitude telephony audio (16-32 range) to pass through
+    const MIN_AMPLITUDE_8KHZ = 10;   // Very low for 8kHz telephony (was 50, original was 500)
     const MIN_AMPLITUDE_16KHZ = 1000; // Standard threshold for 16kHz
     const MIN_AMPLITUDE = sampleRate === 8000 ? MIN_AMPLITUDE_8KHZ : MIN_AMPLITUDE_16KHZ;
     

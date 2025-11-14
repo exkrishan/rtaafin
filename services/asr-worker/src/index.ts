@@ -715,12 +715,14 @@ class AsrWorker {
         
         // CRITICAL FIX: Use sample-rate-specific silence thresholds
         // 8kHz telephony audio has much lower energy than 16kHz audio
-        const SILENCE_THRESHOLD_8KHZ = 25;   // Lower threshold for 8kHz telephony
+        // FIXED: Lowered thresholds further (10/10) to allow low-energy telephony audio to pass through
+        const SILENCE_THRESHOLD_8KHZ = 10;   // Very low threshold for 8kHz telephony (was 25)
         const SILENCE_THRESHOLD_16KHZ = 100; // Standard threshold for 16kHz
         const SILENCE_THRESHOLD = sample_rate === 8000 ? SILENCE_THRESHOLD_8KHZ : SILENCE_THRESHOLD_16KHZ;
         
         // Amplitude thresholds also need to be lower for telephony
-        const MIN_AMPLITUDE_8KHZ = 50;   // Lower for 8kHz telephony
+        // FIXED: Lowered to 10 to allow low-amplitude telephony audio (16-32 range) to pass through
+        const MIN_AMPLITUDE_8KHZ = 10;   // Very low for 8kHz telephony (was 50)
         const MIN_AMPLITUDE_16KHZ = 150; // Standard for 16kHz
         const MIN_AMPLITUDE = sample_rate === 8000 ? MIN_AMPLITUDE_8KHZ : MIN_AMPLITUDE_16KHZ;
         

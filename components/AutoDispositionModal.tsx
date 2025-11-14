@@ -282,7 +282,7 @@ export default function AutoDispositionModal({
     } finally {
       setLoading(null);
     }
-  }, [selectedDispositionObj, notes, callId, tenantId, averageScore, onClose]);
+  }, [selectedDispositionObj, notes, callId, tenantId, averageScore, onClose, selectedDispositionId, selectedSubDisposition, selectedSubDispositionId]);
 
   // Handle Retry
   const handleRetry = useCallback(async () => {
@@ -402,28 +402,30 @@ export default function AutoDispositionModal({
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
           <div className="flex items-center gap-3">
-            <button
-              type="button"
-              onClick={onBack || onClose}
-              disabled={isLoading}
-              className="text-gray-600 hover:text-gray-900 transition-colors disabled:opacity-50"
-              aria-label="Go back"
-              role="button"
-            >
-              <svg
-                className="w-5 h-5"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
+            {onBack && (
+              <button
+                type="button"
+                onClick={onBack}
+                disabled={isLoading}
+                className="text-gray-600 hover:text-gray-900 transition-colors disabled:opacity-50"
+                aria-label="Go back to agent assist"
+                role="button"
               >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M15 19l-7-7 7-7"
-                />
-              </svg>
-            </button>
+                <svg
+                  className="w-5 h-5"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M15 19l-7-7 7-7"
+                  />
+                </svg>
+              </button>
+            )}
             <h2 id="modal-title" className="text-lg font-semibold text-gray-900">
               Agent Assist
             </h2>
@@ -536,9 +538,20 @@ export default function AutoDispositionModal({
 
           {/* Notes Textarea */}
           <div>
-            <label htmlFor="notes-textarea" className="block text-sm font-semibold text-gray-900 mb-2">
-              Notes (AI-generated, editable)
-            </label>
+            <div className="flex items-center gap-2 mb-2">
+              <label htmlFor="notes-textarea" className="block text-sm font-semibold text-gray-900">
+                Notes (AI-generated, editable)
+              </label>
+              {averageScore > 0 && (
+                <span className={`px-2 py-0.5 rounded text-xs font-medium ${
+                  averageScore >= 0.8 ? 'bg-green-100 text-green-700' :
+                  averageScore >= 0.6 ? 'bg-yellow-100 text-yellow-700' :
+                  'bg-red-100 text-red-700'
+                }`}>
+                  Confidence: {Math.round(averageScore * 100)}%
+                </span>
+              )}
+            </div>
             <div className="relative">
               <textarea
                 id="notes-textarea"

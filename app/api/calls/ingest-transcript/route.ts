@@ -177,20 +177,28 @@ export async function POST(req: Request) {
 
     // Phase 3: Broadcast transcript line to real-time listeners
     try {
-      broadcastEvent({
-        type: 'transcript_line',
+      const broadcastPayload = {
+        type: 'transcript_line' as const,
         callId: body.callId,
         seq: body.seq,
         ts: body.ts,
         text: body.text,
-      });
-      console.info('[realtime] Broadcast transcript_line', {
+      };
+      broadcastEvent(broadcastPayload);
+      console.info('[realtime] ✅ Broadcast transcript_line', {
         callId: body.callId,
         seq: body.seq,
         textLength: body.text.length,
+        textPreview: body.text.substring(0, 50),
+        timestamp: new Date().toISOString(),
       });
     } catch (broadcastErr) {
-      console.error('[realtime] Failed to broadcast transcript_line:', broadcastErr);
+      console.error('[realtime] ❌ Failed to broadcast transcript_line:', {
+        error: broadcastErr,
+        callId: body.callId,
+        seq: body.seq,
+        timestamp: new Date().toISOString(),
+      });
       // Don't fail the request
     }
 
