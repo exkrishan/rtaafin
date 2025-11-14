@@ -76,6 +76,9 @@ This service provides a WebSocket endpoint (`wss://<host>:<PORT>/v1/ingest`) tha
 | `EXO_BRIDGE_ENABLED` | Enable Exotel→Deepgram bridge feature | `false` |
 | `EXO_MAX_BUFFER_MS` | Max buffer duration for fallback (100-10000ms) | `500` |
 | `EXO_IDLE_CLOSE_S` | Idle timeout before closing connection (1-300s) | `10` |
+| `AUDIO_DUMP_ENABLED` | Enable audio chunk dumping to files | `false` |
+| `AUDIO_DUMP_DIR` | Directory to save audio files | `./audio-dumps` |
+| `AUDIO_DUMP_FORMAT` | Format to save: `wav` or `raw` | `wav` |
 
 ## API
 
@@ -255,6 +258,29 @@ npm start
 - [ ] Add circuit breaker for Redis
 - [ ] Implement graceful degradation
 
+## Audio Dumping
+
+The service can dump audio chunks received from Exotel to files for debugging and analysis. This is useful for:
+- Debugging audio quality issues
+- Analyzing transcription accuracy
+- Testing audio processing pipelines
+
+### Quick Setup
+
+```bash
+# Enable audio dumping
+export AUDIO_DUMP_ENABLED=true
+export AUDIO_DUMP_DIR=./audio-dumps
+export AUDIO_DUMP_FORMAT=wav
+
+# Start service
+npm run dev
+```
+
+Audio files will be saved to `{AUDIO_DUMP_DIR}/{interaction_id}/chunk-{seq}.wav` (default: `./audio-dumps/`). Each chunk is saved as a separate file for easy inspection.
+
+**See [AUDIO_DUMP_SETUP.md](./AUDIO_DUMP_SETUP.md) for complete documentation.**
+
 ## Troubleshooting
 
 ### Connection Refused
@@ -273,6 +299,13 @@ npm start
 - Check `ACK_INTERVAL` setting (default: 10)
 - Verify frames are being sent as binary
 - Check WebSocket connection is still open
+
+### Audio Dump Not Working
+
+- Verify `AUDIO_DUMP_ENABLED=true` is set
+- Check directory permissions for `AUDIO_DUMP_DIR`
+- Check logs for `[audio-dumper]` messages
+- See [AUDIO_DUMP_SETUP.md](./AUDIO_DUMP_SETUP.md) for detailed troubleshooting
 
 ## License
 

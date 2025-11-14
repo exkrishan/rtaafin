@@ -8,6 +8,7 @@ import { ExotelMessage, ExotelStartEvent, ExotelMediaEvent, ExotelStopEvent } fr
 import { AudioFrame } from './types';
 import { PubSubAdapter } from './types';
 import { callEndTopic } from '@rtaa/pubsub/topics';
+import { dumpAudioChunk } from './audio-dumper';
 
 export interface ExotelConnectionState {
   streamSid: string;
@@ -401,6 +402,18 @@ export class ExotelHandler {
         encoding: 'pcm16' as const,
         audio: audioBuffer,
       };
+
+      // Dump audio chunk to file if enabled
+      dumpAudioChunk(
+        frame.interaction_id,
+        frame.seq,
+        audioBuffer,
+        state.sampleRate,
+        'pcm16'
+      ).catch((err) => {
+        // Non-critical - don't block processing
+        console.debug('[exotel] Audio dump failed (non-critical)', { error: err.message });
+      });
 
       // Publish to pub/sub with bounded buffer fallback
       this.pubsub.publish(frame).then(() => {

@@ -18,6 +18,7 @@ import {
 } from './types';
 import { ExotelHandler } from './exotel-handler';
 import { validateConfig, printValidationResults } from './config-validator';
+import { dumpAudioChunk } from './audio-dumper';
 
 // Load environment variables from project root .env.local
 // This is safe - dotenv handles missing files gracefully
@@ -257,6 +258,12 @@ class IngestionServer {
         }
         
         res.end(JSON.stringify(healthResponse));
+        return;
+      }
+
+      // Audio dump endpoints
+      if (req.url?.startsWith('/audio-dumps')) {
+        this.handleAudioDumpRequest(req, res);
         return;
       }
       
@@ -578,6 +585,18 @@ class IngestionServer {
             encoding: 'pcm16' as const,
             audio: data,
           };
+
+          // Dump audio chunk to file if enabled
+          dumpAudioChunk(
+            frame.interaction_id,
+            frame.seq,
+            data,
+            exotelState.sampleRate,
+            'pcm16'
+          ).catch((err) => {
+            // Non-critical - don't block processing
+            console.debug('[exotel] Audio dump failed (non-critical)', { error: err.message });
+          });
           
           // Publish to pub/sub
           this.pubsub.publish(frame).then(() => {
