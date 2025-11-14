@@ -65,7 +65,8 @@ Click **"Environment"** tab and add these variables:
 | `BUFFER_WINDOW_MS` | `300` | 300 |
 | `REDIS_CONSUMER_GROUP` | `asr-worker` | asr-worker |
 | `REDIS_CONSUMER_NAME` | `asr-worker-1` | asr-worker-1 |
-| `EXO_BRIDGE_ENABLED` | `true` | false |
+| `ELEVENLABS_PREFERRED_SAMPLE_RATE` | `16000` | 16000 (optimal) |
+| `EXO_BRIDGE_ENABLED` | (Not required for ElevenLabs) | Only needed for Deepgram |
 
 ---
 
