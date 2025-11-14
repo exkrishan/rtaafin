@@ -24,6 +24,10 @@ interface GoogleDriveConfig {
 let config: GoogleDriveConfig | null = null;
 let driveClient: any = null;
 let rootFolderId: string | null = null;
+// Cache for call folder IDs (interaction_id -> folder_id)
+const callFolderCache = new Map<string, string>();
+// Mutex to prevent concurrent folder creation for the same folder
+const folderCreationLocks = new Map<string, Promise<string>>();
 
 /**
  * Initialize Google Drive configuration
@@ -134,7 +138,7 @@ async function initializeDriveClient(): Promise<void> {
 }
 
 /**
- * Get or create root folder in Google Drive
+ * Get or create root folder in Google Drive (with mutex to prevent concurrent creation)
  */
 async function getOrCreateRootFolder(): Promise<string> {
   if (rootFolderId) return rootFolderId;
@@ -151,135 +155,177 @@ async function getOrCreateRootFolder(): Promise<string> {
     return rootFolderId;
   }
 
-  // Otherwise, find or create the folder with retry logic
-  const maxRetries = 3;
-  let lastError: any = null;
+  // Use mutex to prevent concurrent folder creation
+  const lockKey = 'root_folder';
+  if (folderCreationLocks.has(lockKey)) {
+    return await folderCreationLocks.get(lockKey)!;
+  }
 
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      // Search for existing folder
-      const response = await driveClient.files.list({
-        q: `name='${cfg.parentFolderName}' and mimeType='application/vnd.google-apps.folder' and trashed=false`,
-        fields: 'files(id, name)',
-        spaces: 'drive',
-        timeout: 10000, // 10 second timeout
-      });
+  const creationPromise = (async (): Promise<string> => {
+    const maxRetries = 3;
+    let lastError: any = null;
 
-      if (response.data.files && response.data.files.length > 0) {
-        rootFolderId = response.data.files[0].id!;
-        console.info('[google-drive] ✅ Found existing folder', {
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        // Search for existing folder
+        const response = await driveClient.files.list({
+          q: `name='${cfg.parentFolderName}' and mimeType='application/vnd.google-apps.folder' and trashed=false`,
+          fields: 'files(id, name)',
+          spaces: 'drive',
+          timeout: 10000, // 10 second timeout
+        });
+
+        if (response.data.files && response.data.files.length > 0) {
+          rootFolderId = response.data.files[0].id!;
+          console.info('[google-drive] ✅ Found existing folder', {
+            folder_id: rootFolderId,
+            folder_name: cfg.parentFolderName,
+          });
+          return rootFolderId;
+        }
+
+        // Create new folder
+        const folderResponse = await driveClient.files.create({
+          requestBody: {
+            name: cfg.parentFolderName,
+            mimeType: 'application/vnd.google-apps.folder',
+          },
+          fields: 'id, name',
+          timeout: 10000, // 10 second timeout
+        });
+
+        rootFolderId = folderResponse.data.id!;
+        console.info('[google-drive] ✅ Created folder', {
           folder_id: rootFolderId,
           folder_name: cfg.parentFolderName,
         });
+
         return rootFolderId;
-      }
-
-      // Create new folder
-      const folderResponse = await driveClient.files.create({
-        requestBody: {
-          name: cfg.parentFolderName,
-          mimeType: 'application/vnd.google-apps.folder',
-        },
-        fields: 'id, name',
-        timeout: 10000, // 10 second timeout
-      });
-
-      rootFolderId = folderResponse.data.id!;
-      console.info('[google-drive] ✅ Created folder', {
-        folder_id: rootFolderId,
-        folder_name: cfg.parentFolderName,
-      });
-
-      return rootFolderId;
-    } catch (error: any) {
-      lastError = error;
-      const isNetworkError = error.message?.includes('socket') || 
-                            error.message?.includes('TLS') ||
-                            error.message?.includes('ECONNRESET') ||
-                            error.message?.includes('ETIMEDOUT') ||
-                            error.message?.includes('hang up');
-      
-      if (isNetworkError && attempt < maxRetries) {
-        const delay = Math.min(1000 * Math.pow(2, attempt - 1), 5000); // Exponential backoff
-        console.warn(`[google-drive] ⚠️ Network error getting/creating root folder (attempt ${attempt}/${maxRetries}), retrying...`, {
-          error: error.message,
-        });
-        await new Promise(resolve => setTimeout(resolve, delay));
-        continue;
-      }
-      
-      // If not a network error or last attempt, throw
-      console.error('[google-drive] ❌ Failed to get/create root folder:', error.message);
-      if (attempt === maxRetries) {
-        throw error;
+      } catch (error: any) {
+        lastError = error;
+        const isNetworkError = error.message?.includes('socket') || 
+                              error.message?.includes('TLS') ||
+                              error.message?.includes('ECONNRESET') ||
+                              error.message?.includes('ETIMEDOUT') ||
+                              error.message?.includes('hang up') ||
+                              error.message?.includes('timeout');
+        
+        if (isNetworkError && attempt < maxRetries) {
+          const delay = Math.min(1000 * Math.pow(2, attempt - 1), 5000); // Exponential backoff
+          console.warn(`[google-drive] ⚠️ Network error getting/creating root folder (attempt ${attempt}/${maxRetries}), retrying...`, {
+            error: error.message,
+          });
+          await new Promise(resolve => setTimeout(resolve, delay));
+          continue;
+        }
+        
+        // If not a network error or last attempt, throw
+        console.error('[google-drive] ❌ Failed to get/create root folder:', error.message);
+        if (attempt === maxRetries) {
+          throw error;
+        }
       }
     }
+    
+    throw lastError || new Error('Failed to get/create root folder after retries');
+  })();
+
+  folderCreationLocks.set(lockKey, creationPromise);
+  try {
+    const result = await creationPromise;
+    return result;
+  } finally {
+    folderCreationLocks.delete(lockKey);
   }
-  
-  throw lastError || new Error('Failed to get/create root folder after retries');
 }
 
 /**
- * Get or create folder for a specific call/interaction with retry logic
+ * Get or create folder for a specific call/interaction with retry logic and caching
  */
 async function getOrCreateCallFolder(interactionId: string, parentFolderId: string): Promise<string> {
-  const sanitizedId = interactionId.replace(/[^a-zA-Z0-9_-]/g, '_');
-  const folderName = `Call ${sanitizedId}`;
-
-  const maxRetries = 3;
-  let lastError: any = null;
-
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      // Search for existing folder
-      const response = await driveClient.files.list({
-        q: `name='${folderName}' and mimeType='application/vnd.google-apps.folder' and '${parentFolderId}' in parents and trashed=false`,
-        fields: 'files(id, name)',
-        spaces: 'drive',
-        timeout: 10000, // 10 second timeout
-      });
-
-      if (response.data.files && response.data.files.length > 0) {
-        return response.data.files[0].id!;
-      }
-
-      // Create new folder
-      const folderResponse = await driveClient.files.create({
-        requestBody: {
-          name: folderName,
-          mimeType: 'application/vnd.google-apps.folder',
-          parents: [parentFolderId],
-        },
-        fields: 'id, name',
-        timeout: 10000, // 10 second timeout
-      });
-
-      return folderResponse.data.id!;
-    } catch (error: any) {
-      lastError = error;
-      const isNetworkError = error.message?.includes('socket') || 
-                            error.message?.includes('TLS') ||
-                            error.message?.includes('ECONNRESET') ||
-                            error.message?.includes('ETIMEDOUT') ||
-                            error.message?.includes('hang up');
-      
-      if (isNetworkError && attempt < maxRetries) {
-        const delay = Math.min(1000 * Math.pow(2, attempt - 1), 5000); // Exponential backoff
-        console.warn(`[google-drive] ⚠️ Network error getting/creating call folder (attempt ${attempt}/${maxRetries}), retrying...`, {
-          interaction_id: interactionId,
-          error: error.message,
-        });
-        await new Promise(resolve => setTimeout(resolve, delay));
-        continue;
-      }
-      
-      // If not a network error or last attempt, throw
-      console.error('[google-drive] ❌ Failed to get/create call folder:', error.message);
-      throw error;
-    }
+  // Check cache first
+  if (callFolderCache.has(interactionId)) {
+    return callFolderCache.get(interactionId)!;
   }
-  
-  throw lastError || new Error('Failed to get/create call folder after retries');
+
+  // Use mutex to prevent concurrent folder creation for the same interaction
+  const lockKey = `call_folder_${interactionId}`;
+  if (folderCreationLocks.has(lockKey)) {
+    return await folderCreationLocks.get(lockKey)!;
+  }
+
+  const creationPromise = (async (): Promise<string> => {
+    const sanitizedId = interactionId.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const folderName = `Call ${sanitizedId}`;
+
+    const maxRetries = 3;
+    let lastError: any = null;
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        // Search for existing folder
+        const response = await driveClient.files.list({
+          q: `name='${folderName}' and mimeType='application/vnd.google-apps.folder' and '${parentFolderId}' in parents and trashed=false`,
+          fields: 'files(id, name)',
+          spaces: 'drive',
+          timeout: 10000, // 10 second timeout
+        });
+
+        if (response.data.files && response.data.files.length > 0) {
+          const folderId = response.data.files[0].id!;
+          callFolderCache.set(interactionId, folderId);
+          return folderId;
+        }
+
+        // Create new folder
+        const folderResponse = await driveClient.files.create({
+          requestBody: {
+            name: folderName,
+            mimeType: 'application/vnd.google-apps.folder',
+            parents: [parentFolderId],
+          },
+          fields: 'id, name',
+          timeout: 10000, // 10 second timeout
+        });
+
+        const folderId = folderResponse.data.id!;
+        callFolderCache.set(interactionId, folderId);
+        return folderId;
+      } catch (error: any) {
+        lastError = error;
+        const isNetworkError = error.message?.includes('socket') || 
+                              error.message?.includes('TLS') ||
+                              error.message?.includes('ECONNRESET') ||
+                              error.message?.includes('ETIMEDOUT') ||
+                              error.message?.includes('hang up') ||
+                              error.message?.includes('timeout');
+        
+        if (isNetworkError && attempt < maxRetries) {
+          const delay = Math.min(1000 * Math.pow(2, attempt - 1), 5000); // Exponential backoff
+          console.warn(`[google-drive] ⚠️ Network error getting/creating call folder (attempt ${attempt}/${maxRetries}), retrying...`, {
+            interaction_id: interactionId,
+            error: error.message,
+          });
+          await new Promise(resolve => setTimeout(resolve, delay));
+          continue;
+        }
+        
+        // If not a network error or last attempt, throw
+        console.error('[google-drive] ❌ Failed to get/create call folder:', error.message);
+        throw error;
+      }
+    }
+    
+    throw lastError || new Error('Failed to get/create call folder after retries');
+  })();
+
+  folderCreationLocks.set(lockKey, creationPromise);
+  try {
+    const result = await creationPromise;
+    return result;
+  } finally {
+    folderCreationLocks.delete(lockKey);
+  }
 }
 
 /**
