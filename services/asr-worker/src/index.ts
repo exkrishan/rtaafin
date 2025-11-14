@@ -42,6 +42,10 @@ const BUFFER_WINDOW_MS = parseInt(process.env.BUFFER_WINDOW_MS || '1000', 10);
 // This prevents processing old audio after a call has ended
 const STALE_BUFFER_TIMEOUT_MS = parseInt(process.env.STALE_BUFFER_TIMEOUT_MS || '5000', 10); // 5 seconds
 const ASR_PROVIDER = (process.env.ASR_PROVIDER || 'mock') as 'mock' | 'deepgram' | 'whisper' | 'google' | 'elevenlabs';
+// CRITICAL: PCM16 audio format constant - used for duration calculations
+// Formula: durationMs = (bytes / BYTES_PER_SAMPLE / sampleRate) * 1000
+// Example: 640 bytes at 16kHz = (640 / 2 / 16000) * 1000 = 20ms
+const BYTES_PER_SAMPLE = 2; // 16-bit PCM = 2 bytes per sample
 
 interface AudioBuffer {
   interactionId: string;
@@ -742,7 +746,7 @@ class AsrWorker {
             minAmplitude,
             allZeros,
             silenceThreshold: SILENCE_THRESHOLD,
-            minAmplitude: MIN_AMPLITUDE,
+            minAmplitudeThreshold: MIN_AMPLITUDE,
             note: sample_rate === 8000
               ? '8kHz telephony audio detected as silence. Lower thresholds applied. This audio will be skipped to prevent empty transcripts.'
               : 'Audio detected as silence. This may cause empty transcripts from ASR provider.',
@@ -794,7 +798,10 @@ class AsrWorker {
       buffer.lastChunkReceived = Date.now(); // Update last chunk received time
       
       // Update buffer stats in BufferManager
-      const totalSamples = buffer.chunks.reduce((sum, chunk) => sum + chunk.length, 0) / 2;
+      // CRITICAL: Correct calculation for PCM16 audio
+      // Formula: durationMs = (totalBytes / bytesPerSample / sampleRate) * 1000
+      const totalBytes = buffer.chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+      const totalSamples = totalBytes / BYTES_PER_SAMPLE;
       const totalAudioDurationMs = (totalSamples / buffer.sampleRate) * 1000;
       this.bufferManager.updateBufferStats(interaction_id, {
         chunksCount: buffer.chunks.length,
@@ -816,14 +823,29 @@ class AsrWorker {
       this.startBufferProcessingTimer(interaction_id);
 
       // Reuse totalAudioDurationMs already calculated above for logging
+      // Calculate chunk duration correctly for 16kHz audio
+      // CRITICAL: Correct calculation for PCM16 audio
+      // Formula: durationMs = (bytes / bytesPerSample / sampleRate) * 1000
+      // For 16-bit PCM: bytesPerSample = 2
+      // Example: 640 bytes at 16kHz = (640 / 2 / 16000) * 1000 = 20ms
+      const chunkDurationMs = ((audioBuffer.length / BYTES_PER_SAMPLE) / sample_rate) * 1000;
+      
       // Log new chunk arrival to verify new audio is coming in
       console.info(`[ASRWorker] 📥 Received audio chunk:`, {
         interaction_id,
         seq,
         audioSize: audioBuffer.length,
-        chunkDurationMs: ((audioBuffer.length / 2) / sample_rate) * 1000,
+        sampleRate: sample_rate,
+        chunkDurationMs: chunkDurationMs.toFixed(2), // Show 2 decimal places for accuracy
+        calculation: {
+          bytes: audioBuffer.length,
+          bytesPerSample: 2, // BYTES_PER_SAMPLE constant
+          samples: (audioBuffer.length / BYTES_PER_SAMPLE).toFixed(0),
+          sampleRate: sample_rate,
+          durationMs: chunkDurationMs.toFixed(2),
+        },
         totalChunksInBuffer: buffer.chunks.length,
-        totalAudioDurationMs: totalAudioDurationMs.toFixed(0),
+        totalAudioDurationMs: totalAudioDurationMs.toFixed(2),
         bufferAge: Date.now() - buffer.lastProcessed,
         meetsMinimum: totalAudioDurationMs >= CONTINUOUS_CHUNK_DURATION_MS, // Use CONTINUOUS_CHUNK_DURATION_MS (100ms) instead of MIN_AUDIO_DURATION_MS (200ms)
         minRequiredForSend: CONTINUOUS_CHUNK_DURATION_MS,
@@ -932,7 +954,10 @@ class AsrWorker {
       const buffer = this.buffers.get(interactionId);
       if (buffer) {
         // Update buffer stats in BufferManager before cleanup
-        const totalSamples = buffer.chunks.reduce((sum, chunk) => sum + chunk.length, 0) / 2;
+        // CRITICAL: Correct calculation for PCM16 audio
+        // Formula: durationMs = (totalBytes / bytesPerSample / sampleRate) * 1000
+        const totalBytes = buffer.chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+        const totalSamples = totalBytes / BYTES_PER_SAMPLE;
         const totalAudioMs = (totalSamples / buffer.sampleRate) * 1000;
         this.bufferManager.updateBufferStats(interactionId, {
           chunksCount: buffer.chunks.length,
@@ -1088,7 +1113,10 @@ class AsrWorker {
       });
 
       // Calculate current audio duration
-      const totalSamples = buffer.chunks.reduce((sum, chunk) => sum + chunk.length, 0) / 2;
+      // CRITICAL: Correct calculation for PCM16 audio
+      // Formula: durationMs = (totalBytes / bytesPerSample / sampleRate) * 1000
+      const totalBytes = buffer.chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+      const totalSamples = totalBytes / BYTES_PER_SAMPLE;
       const currentAudioDurationMs = (totalSamples / buffer.sampleRate) * 1000;
 
       // Initialize lastContinuousSendTime if needed
@@ -1234,8 +1262,10 @@ class AsrWorker {
       const INITIAL_BURST_MS = isElevenLabs ? 100 : 250; // ElevenLabs: 100ms, Deepgram: 250ms
       
       // Calculate total audio in buffer
+      // CRITICAL: Correct calculation for PCM16 audio
+      // Formula: durationMs = (totalBytes / bytesPerSample / sampleRate) * 1000
       const totalBytes = buffer.chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-      const totalSamples = totalBytes / 2;
+      const totalSamples = totalBytes / BYTES_PER_SAMPLE;
       const totalAudioDurationMs = (totalSamples / buffer.sampleRate) * 1000;
       
       // Calculate time since last send
@@ -1334,18 +1364,31 @@ class AsrWorker {
       
       // Combine chunks to send
       const audioToSend = Buffer.concat(chunksToSend);
-      const audioDurationToSend = (audioToSend.length / 2 / buffer.sampleRate) * 1000;
+      
+      // CRITICAL: Correct duration calculation for PCM16 audio
+      // Formula: durationMs = (bytes / bytesPerSample / sampleRate) * 1000
+      // For 16-bit PCM: bytesPerSample = 2
+      // Example: 640 bytes at 16kHz = (640 / 2 / 16000) * 1000 = 20ms
+      const audioDurationToSend = (audioToSend.length / BYTES_PER_SAMPLE / buffer.sampleRate) * 1000;
+      
       // CRITICAL FIX: Use the maximum sequence number from the chunks being sent
       // This preserves the actual sequence number from incoming audio frames
       const seq = Math.max(...sequencesToSend);
       
-      // Log audio details before sending
+      // Log audio details before sending with correct duration calculation
       console.info(`[ASRWorker] Processing audio buffer:`, {
         interaction_id: buffer.interactionId,
         seq,
         sampleRate: buffer.sampleRate,
         audioSize: audioToSend.length,
-        audioDurationMs: audioDurationToSend.toFixed(0),
+        audioDurationMs: audioDurationToSend.toFixed(2), // Show 2 decimal places for accuracy
+        durationCalculation: {
+          bytes: audioToSend.length,
+          bytesPerSample: 2, // BYTES_PER_SAMPLE constant
+          samples: (audioToSend.length / BYTES_PER_SAMPLE).toFixed(0),
+          sampleRate: buffer.sampleRate,
+          durationMs: audioDurationToSend.toFixed(2),
+        },
         chunksToSend: chunksToSend.length,
         chunksRemaining: buffer.chunks.length - chunksToSend.length,
         totalChunksInBuffer: buffer.chunks.length,

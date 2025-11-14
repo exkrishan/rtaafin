@@ -231,9 +231,9 @@ export class ElevenLabsProvider implements AsrProvider {
             audioFormat: audioFormat,
             sampleRate: sampleRate,
             commitStrategy: CommitStrategy.VAD,
-            vadSilenceThresholdSecs: parseFloat(process.env.ELEVENLABS_VAD_SILENCE_THRESHOLD || '1.5'),
+            vadSilenceThresholdSecs: parseFloat(process.env.ELEVENLABS_VAD_SILENCE_THRESHOLD || '1.0'), // Tuned for telephony
             vadThreshold: parseFloat(process.env.ELEVENLABS_VAD_THRESHOLD || '0.4'),
-            minSpeechDurationMs: parseInt(process.env.ELEVENLABS_MIN_SPEECH_DURATION_MS || '100', 10),
+            minSpeechDurationMs: parseInt(process.env.ELEVENLABS_MIN_SPEECH_DURATION_MS || '100', 10), // Ensure enough audio
             minSilenceDurationMs: parseInt(process.env.ELEVENLABS_MIN_SILENCE_DURATION_MS || '100', 10),
           });
           console.info(`[ElevenLabsProvider] ✅ Scribe.connect() succeeded for ${interactionId}`);
@@ -682,9 +682,27 @@ export class ElevenLabsProvider implements AsrProvider {
     }
 
     // Calculate audio duration
-    const bytesPerSample = 2; // 16-bit = 2 bytes
-    const samples = audio.length / bytesPerSample;
+    // CRITICAL: Correct calculation for PCM16 audio
+    // Formula: durationMs = (bytes / bytesPerSample / sampleRate) * 1000
+    // For 16-bit PCM: bytesPerSample = 2
+    // Example: 640 bytes at 16kHz = (640 / 2 / 16000) * 1000 = 20ms
+    const BYTES_PER_SAMPLE = 2; // 16-bit PCM = 2 bytes per sample
+    const samples = audio.length / BYTES_PER_SAMPLE;
     const durationMs = (samples / sampleRate) * 1000;
+    
+    // Log duration calculation for debugging
+    if (seq <= 5) {
+      console.info(`[ElevenLabsProvider] ⏱️ Audio duration calculation:`, {
+        interactionId,
+        seq,
+        bufferSize: audio.length,
+        sampleRate,
+        samples: samples.toFixed(0),
+        durationMs: durationMs.toFixed(2),
+        expectedFor16kHz: sampleRate === 16000 ? `${(audio.length / 2 / 16000 * 1000).toFixed(2)}ms` : 'N/A',
+        expectedFor8kHz: sampleRate === 8000 ? `${(audio.length / 2 / 8000 * 1000).toFixed(2)}ms` : 'N/A',
+      });
+    }
 
     // CRITICAL FIX: Amplify low-energy telephony audio before validation
     // This improves transcription quality for 8kHz telephony audio
