@@ -207,6 +207,12 @@ export default function AgentAssistPanelV2({
     const eventSource = new EventSource(url);
 
     eventSource.onopen = () => {
+      // Clear any pending error timeout since connection is now open
+      if ((eventSource as any)._errorTimeout) {
+        clearTimeout((eventSource as any)._errorTimeout);
+        delete (eventSource as any)._errorTimeout;
+      }
+      
       console.log('[AgentAssistPanel] ✅ SSE connection opened', {
         interactionId,
         readyState: eventSource.readyState, // Should be 1 (OPEN)
