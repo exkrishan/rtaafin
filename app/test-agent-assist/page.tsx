@@ -338,32 +338,72 @@ export default function TestAgentAssistPage() {
               </div>
               
               {/* Test Inputs */}
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label htmlFor="callId" className="block text-xs font-medium text-gray-700 mb-1">
-                    Call ID
-                  </label>
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
                   <input
-                    id="callId"
-                    type="text"
-                    value={callId}
-                    onChange={(e) => setCallId(e.target.value)}
-                    className="w-full rounded-md border border-gray-300 px-2 py-1 text-xs"
-                    placeholder="Enter call ID"
+                    type="checkbox"
+                    id="autoDiscovery"
+                    checked={autoDiscoveryEnabled}
+                    onChange={(e) => setAutoDiscoveryEnabled(e.target.checked)}
+                    className="rounded"
                   />
+                  <label htmlFor="autoDiscovery" className="text-xs font-medium text-gray-700">
+                    Auto-discover active calls (polls every 5s)
+                  </label>
                 </div>
-                <div>
-                  <label htmlFor="tenantId" className="block text-xs font-medium text-gray-700 mb-1">
-                    Tenant ID
-                  </label>
-                  <input
-                    id="tenantId"
-                    type="text"
-                    value={tenantId}
-                    onChange={(e) => setTenantId(e.target.value)}
-                    className="w-full rounded-md border border-gray-300 px-2 py-1 text-xs"
-                    placeholder="Enter tenant ID"
-                  />
+                
+                {autoDiscoveryEnabled && activeCalls.length > 0 && (
+                  <div>
+                    <label className="block text-xs font-medium text-gray-700 mb-1">
+                      Active Calls ({activeCalls.length})
+                    </label>
+                    <select
+                      value={callId}
+                      onChange={(e) => setCallId(e.target.value)}
+                      className="w-full rounded-md border border-gray-300 px-2 py-1 text-xs"
+                    >
+                      {activeCalls.map((call) => (
+                        <option key={call.interactionId} value={call.interactionId}>
+                          {call.interactionId} {call.lastActivity ? `(Active)` : ''}
+                        </option>
+                      ))}
+                    </select>
+                    {lastDiscoveredCallId && lastDiscoveredCallId === callId && (
+                      <p className="text-xs text-green-600 mt-1">
+                        ✓ Auto-selected latest call
+                      </p>
+                    )}
+                  </div>
+                )}
+                
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label htmlFor="callId" className="block text-xs font-medium text-gray-700 mb-1">
+                      Call ID {!autoDiscoveryEnabled && '(Manual)'}
+                    </label>
+                    <input
+                      id="callId"
+                      type="text"
+                      value={callId}
+                      onChange={(e) => setCallId(e.target.value)}
+                      className="w-full rounded-md border border-gray-300 px-2 py-1 text-xs"
+                      placeholder="Enter call ID"
+                      disabled={autoDiscoveryEnabled && activeCalls.length > 0}
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="tenantId" className="block text-xs font-medium text-gray-700 mb-1">
+                      Tenant ID
+                    </label>
+                    <input
+                      id="tenantId"
+                      type="text"
+                      value={tenantId}
+                      onChange={(e) => setTenantId(e.target.value)}
+                      className="w-full rounded-md border border-gray-300 px-2 py-1 text-xs"
+                      placeholder="Enter tenant ID"
+                    />
+                  </div>
                 </div>
               </div>
             </div>
