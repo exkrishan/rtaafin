@@ -55,29 +55,47 @@ export async function GET(req: Request) {
           if (match && match[1]) {
             const interactionId = match[1];
             
-            // Get last message timestamp from stream
+            // Get last message timestamp from stream and check for non-empty transcripts
             try {
               const streamInfo = await redis.xinfo('STREAM', streamKey);
               const length = streamInfo[1] || 0; // Stream length
               
               if (length > 0) {
-                // Get last message ID to determine recency
-                const lastMessages = await redis.xrevrange(streamKey, '+', '-', 'COUNT', 1);
+                // Get last few messages to check for non-empty transcripts
+                const lastMessages = await redis.xrevrange(streamKey, '+', '-', 'COUNT', 10);
                 if (lastMessages && lastMessages.length > 0) {
-                  const lastMessageId = lastMessages[0][0];
-                  // Message ID format: timestamp-sequence
-                  const timestamp = lastMessageId.split('-')[0];
-                  activeCalls.push({
-                    interactionId,
-                    lastActivity: timestamp,
-                  });
-                } else {
-                  activeCalls.push({ interactionId });
+                  // Check if any of the recent messages have non-empty text
+                  let hasNonEmptyTranscript = false;
+                  let lastNonEmptyTimestamp: string | undefined;
+                  
+                  for (const [messageId, fields] of lastMessages) {
+                    // Find text field in the message
+                    const textIndex = fields.findIndex((f: any) => f === 'text' || (Array.isArray(f) && f[0] === 'text'));
+                    if (textIndex >= 0 && textIndex < fields.length - 1) {
+                      const textValue = fields[textIndex + 1];
+                      if (textValue && typeof textValue === 'string' && textValue.trim().length > 0) {
+                        hasNonEmptyTranscript = true;
+                        if (!lastNonEmptyTimestamp) {
+                          // Message ID format: timestamp-sequence
+                          lastNonEmptyTimestamp = messageId.split('-')[0];
+                        }
+                        break; // Found non-empty transcript, no need to check more
+                      }
+                    }
+                  }
+                  
+                  // Only include calls that have non-empty transcripts
+                  if (hasNonEmptyTranscript && lastNonEmptyTimestamp) {
+                    activeCalls.push({
+                      interactionId,
+                      lastActivity: lastNonEmptyTimestamp,
+                    });
+                  }
                 }
               }
             } catch (err) {
-              // Stream might not exist or be empty, just add the ID
-              activeCalls.push({ interactionId });
+              // Stream might not exist or be empty, skip it
+              console.debug('[api/calls/active] Skipping stream (error or empty)', { streamKey, error: err });
             }
           }
         }

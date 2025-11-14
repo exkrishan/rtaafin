@@ -198,13 +198,16 @@ export default function AgentAssistPanelV2({
       return;
     }
 
+    // Store eventSource in a ref to prevent recreation on every render
+    let eventSource: EventSource | null = null;
+
     console.log('[AgentAssistPanel] Starting SSE connection', { 
       interactionId, 
       isCollapsed,
       timestamp: new Date().toISOString()
     });
     const url = `/api/events/stream?callId=${encodeURIComponent(interactionId)}`;
-    const eventSource = new EventSource(url);
+    eventSource = new EventSource(url);
 
     eventSource.onopen = () => {
       // Clear any pending error timeout since connection is now open
