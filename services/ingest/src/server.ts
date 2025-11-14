@@ -19,6 +19,7 @@ import {
 import { ExotelHandler } from './exotel-handler';
 import { validateConfig, printValidationResults } from './config-validator';
 import { dumpAudioChunk } from './audio-dumper';
+import { uploadToGoogleDrive } from './google-drive-uploader';
 
 // Load environment variables from project root .env.local
 // This is safe - dotenv handles missing files gracefully
@@ -147,6 +148,10 @@ class IngestionServer {
 
     this.exotelHandler = new ExotelHandler(this.pubsub);
     this.supportExotel = config.supportExotel;
+
+    // Log audio dump and Google Drive status on startup
+    this.logAudioDumpStatus();
+    this.logGoogleDriveStatus();
 
     // Create HTTP/HTTPS server
     if (SSL_KEY_PATH && SSL_CERT_PATH) {
@@ -795,6 +800,53 @@ class IngestionServer {
         state.frameBuffer = state.frameBuffer.slice(-framesToKeep);
       }
       state.bufferStartTime = timestampMs - BUFFER_DURATION_MS;
+    }
+  }
+
+  private logAudioDumpStatus(): void {
+    const enabled = process.env.AUDIO_DUMP_ENABLED === 'true';
+    const dumpDir = process.env.AUDIO_DUMP_DIR || './audio-dumps';
+    const format = process.env.AUDIO_DUMP_FORMAT || 'wav';
+    
+    if (enabled) {
+      console.info('[audio-dumper] Audio dumping enabled', {
+        dump_dir: dumpDir,
+        format,
+      });
+    } else {
+      console.debug('[audio-dumper] Audio dumping disabled (set AUDIO_DUMP_ENABLED=true to enable)');
+    }
+  }
+
+  private logGoogleDriveStatus(): void {
+    const enabled = process.env.GOOGLE_DRIVE_ENABLED === 'true';
+    const hasCredentials = !!(process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON || process.env.GOOGLE_APPLICATION_CREDENTIALS);
+    const parentFolder = process.env.GOOGLE_DRIVE_PARENT_FOLDER_NAME || 'Audio Dumps';
+    
+    if (enabled) {
+      if (hasCredentials) {
+        console.info('[google-drive] Google Drive uploads enabled', {
+          parent_folder: parentFolder,
+          auth_method: process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON ? 'JSON string' : 'file path',
+        });
+        
+        // Try to initialize (will log success/error)
+        try {
+          // Trigger initialization by calling getConfig (lazy init)
+          // We'll just log that it's enabled, actual init happens on first upload
+          console.info('[google-drive] Google Drive client will initialize on first upload');
+        } catch (error: any) {
+          console.warn('[google-drive] Google Drive initialization will be attempted on first upload', {
+            error: error.message,
+          });
+        }
+      } else {
+        console.warn('[google-drive] Google Drive uploads enabled but credentials not found', {
+          note: 'Set GOOGLE_APPLICATION_CREDENTIALS_JSON or GOOGLE_APPLICATION_CREDENTIALS',
+        });
+      }
+    } else {
+      console.debug('[google-drive] Google Drive uploads disabled (set GOOGLE_DRIVE_ENABLED=true to enable)');
     }
   }
 
