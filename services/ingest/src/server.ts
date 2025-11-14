@@ -261,11 +261,8 @@ class IngestionServer {
         return;
       }
 
-      // Audio dump endpoints
-      if (req.url?.startsWith('/audio-dumps')) {
-        this.handleAudioDumpRequest(req, res);
-        return;
-      }
+      // Audio dump endpoints (removed - not needed for now)
+      // Files are uploaded to Google Drive instead
       
       // Only send 404 if it's not a WebSocket upgrade
       if (req.headers.upgrade !== 'websocket') {

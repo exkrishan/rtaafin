@@ -91,8 +91,8 @@ async function initializeDriveClient(): Promise<void> {
       scopes: ['https://www.googleapis.com/auth/drive.file'],
     });
 
-    const authClient = await auth.getClient();
-    driveClient = google.drive({ version: 'v3', auth: authClient });
+    const authClient: any = await auth.getClient();
+    driveClient = google.drive({ version: 'v3', auth: authClient as any });
 
     console.info('[google-drive] ✅ Google Drive client initialized');
   } catch (error: any) {
