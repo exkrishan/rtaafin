@@ -234,17 +234,33 @@ export default function AgentAssistPanelV2({
         timestamp: new Date().toISOString()
       });
 
-      // Only show disconnected if connection is actually closed
+      // Only show disconnected if connection is actually closed AND it's been closed for a while
+      // EventSource fires onerror during initial connection attempts, which is normal
       if (readyState === EventSource.CLOSED) {
-        console.error('[AgentAssistPanel] ❌ SSE connection closed', {
-          interactionId,
-          readyState,
-          timestamp: new Date().toISOString()
-        });
-        setWsConnected(false);
-        setHealthStatus('error');
-        onConnectionStateChange?.(false, readyState);
+        // Don't immediately show error - EventSource might be retrying
+        // Only show error if it stays closed for more than 3 seconds
+        const errorTimeout = setTimeout(() => {
+          // Double-check it's still closed after delay
+          if (eventSource.readyState === EventSource.CLOSED) {
+            console.error('[AgentAssistPanel] ❌ SSE connection closed (persistent)', {
+              interactionId,
+              readyState,
+              timestamp: new Date().toISOString()
+            });
+            setWsConnected(false);
+            setHealthStatus('error');
+            onConnectionStateChange?.(false, readyState);
+          }
+        }, 3000); // Wait 3 seconds before showing error
+        
+        // Store timeout to clear if connection recovers
+        (eventSource as any)._errorTimeout = errorTimeout;
       } else {
+        // Clear any pending error timeout
+        if ((eventSource as any)._errorTimeout) {
+          clearTimeout((eventSource as any)._errorTimeout);
+          delete (eventSource as any)._errorTimeout;
+        }
         // Still connecting (0) or open (1) - EventSource will auto-retry
         // Don't show error yet, just log for debugging
         console.warn('[AgentAssistPanel] ⚠️ SSE connection issue (auto-retrying)', {
