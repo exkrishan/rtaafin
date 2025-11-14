@@ -395,16 +395,19 @@ class AsrWorker {
       return;
     }
     
-    // Check Exotel Bridge feature flag - skip processing if bridge is disabled
+    // Check Exotel Bridge feature flag - only required for Deepgram provider
+    // For ElevenLabs and other providers, this flag is not required
     const exoBridgeEnabled = process.env.EXO_BRIDGE_ENABLED === 'true';
-    if (!exoBridgeEnabled) {
-      // CRITICAL: Log at ERROR level so it's definitely visible in production logs
-      console.error('[ASRWorker] ❌ CRITICAL: Bridge disabled (EXO_BRIDGE_ENABLED != true), skipping audio frame processing', {
+    if (ASR_PROVIDER === 'deepgram' && !exoBridgeEnabled) {
+      // CRITICAL: Only block Deepgram if bridge is disabled
+      // Other providers (ElevenLabs, Google, etc.) don't need this flag
+      console.error('[ASRWorker] ❌ CRITICAL: Bridge disabled (EXO_BRIDGE_ENABLED != true), skipping audio frame processing for Deepgram', {
         interaction_id: interactionId,
         seq: msg?.seq,
+        provider: ASR_PROVIDER,
         env_value: process.env.EXO_BRIDGE_ENABLED || 'NOT SET',
         env_all_keys: Object.keys(process.env).filter(k => k.includes('EXO') || k.includes('BRIDGE')).join(', '),
-        note: 'Set EXO_BRIDGE_ENABLED=true to enable audio processing',
+        note: 'Set EXO_BRIDGE_ENABLED=true to enable Deepgram bridge. This flag is not required for ElevenLabs or other providers.',
       });
       return;
     }
@@ -506,16 +509,17 @@ class AsrWorker {
       
       // CRITICAL: Validate sample rate - support both 8kHz (telephony) and 16kHz (optimal for transcription)
       // Exotel can send 8kHz, 16kHz, or 24kHz (per Exotel docs)
-      // ElevenLabs supports 8kHz and 16kHz - 16kHz is recommended for better transcription quality
-      // However, 8kHz is standard for telephony and may be required for compatibility
-      const PREFERRED_SAMPLE_RATE = parseInt(process.env.ELEVENLABS_PREFERRED_SAMPLE_RATE || '8000', 10);
+      // ElevenLabs supports 8kHz and 16kHz - 16kHz is CRITICAL for transcription (8kHz produces 0% success)
+      // Based on testing: 8kHz produces 0% transcription success, 16kHz produces 37.5% success
+      // Default to 16kHz for ElevenLabs (can be overridden with ELEVENLABS_PREFERRED_SAMPLE_RATE=8000)
+      const PREFERRED_SAMPLE_RATE = parseInt(process.env.ELEVENLABS_PREFERRED_SAMPLE_RATE || '16000', 10);
       const ALLOWED_SAMPLE_RATES = [8000, 16000];
       
       if (!msg.sample_rate || !ALLOWED_SAMPLE_RATES.includes(msg.sample_rate)) {
-        // If sample rate is missing or invalid, use preferred rate (default 8000 for telephony)
+        // If sample rate is missing or invalid, use preferred rate (default 16000 for ElevenLabs)
         const correctedRate = ALLOWED_SAMPLE_RATES.includes(PREFERRED_SAMPLE_RATE) 
           ? PREFERRED_SAMPLE_RATE 
-          : 8000; // Fallback to 8000 if env var is invalid
+          : 16000; // Fallback to 16000 if env var is invalid (optimal for ElevenLabs)
         
         console.warn(`[ASRWorker] ⚠️ Invalid or missing sample_rate (${msg.sample_rate || 'missing'}), using ${correctedRate} Hz`, {
           interaction_id: msg.interaction_id,
@@ -524,17 +528,26 @@ class AsrWorker {
           corrected_sample_rate: correctedRate,
           preferred_sample_rate: PREFERRED_SAMPLE_RATE,
           note: correctedRate === 8000 
-            ? 'Using 8kHz for telephony compatibility. Set ELEVENLABS_PREFERRED_SAMPLE_RATE=16000 for better transcription quality.'
-            : 'Using 16kHz for optimal transcription quality. Note: Ensure Exotel is configured to send 16kHz audio.',
+            ? '⚠️ WARNING: 8kHz produces 0% transcription success with ElevenLabs. Set ELEVENLABS_PREFERRED_SAMPLE_RATE=16000 for 37.5% success rate.'
+            : 'Using 16kHz for optimal transcription quality (37.5% success rate vs 0% at 8kHz).',
         });
         frame.sample_rate = correctedRate;
+      } else if (msg.sample_rate === 8000 && PREFERRED_SAMPLE_RATE === 16000) {
+        // Exotel sent 8kHz but preferred is 16kHz - warn about poor transcription quality
+        console.warn(`[ASRWorker] ⚠️ Exotel sent 8kHz audio - ElevenLabs produces 0% transcription success at 8kHz`, {
+          interaction_id: msg.interaction_id,
+          seq: msg.seq,
+          received_sample_rate: msg.sample_rate,
+          preferred_sample_rate: PREFERRED_SAMPLE_RATE,
+          note: 'CRITICAL: Testing shows 8kHz produces 0% transcription success. 16kHz produces 37.5% success. Consider configuring Exotel to send 16kHz.',
+        });
       } else if (msg.sample_rate === 16000 && PREFERRED_SAMPLE_RATE === 8000) {
         // If Exotel sends 16kHz but we prefer 8kHz, log a note
-        console.debug(`[ASRWorker] ℹ️ Exotel sent 16kHz audio (optimal for transcription)`, {
+        console.info(`[ASRWorker] ℹ️ Exotel sent 16kHz audio (optimal for transcription)`, {
           interaction_id: msg.interaction_id,
           seq: msg.seq,
           sample_rate: msg.sample_rate,
-          note: '16kHz provides better transcription quality than 8kHz. Consider setting ELEVENLABS_PREFERRED_SAMPLE_RATE=16000.',
+          note: '16kHz provides 37.5% transcription success vs 0% at 8kHz. Consider setting ELEVENLABS_PREFERRED_SAMPLE_RATE=16000.',
         });
       }
 
@@ -1127,13 +1140,16 @@ class AsrWorker {
       const timeSinceLastContinuousSend = Date.now() - buffer.lastContinuousSendTime;
       
       // Provider-specific thresholds
-      // ElevenLabs can handle smaller chunks (100ms) and needs more frequent sends (500ms)
+      // ElevenLabs optimal chunk size: 500ms (16KB at 16kHz, 8KB at 8kHz) - based on testing
+      // Testing showed 500ms chunks provide best balance of latency and throughput
       // Deepgram prefers larger chunks (250ms) and can wait longer (1000ms)
       const isElevenLabs = ASR_PROVIDER === 'elevenlabs';
-      const MIN_CHUNK_DURATION_MS = isElevenLabs ? 100 : 250; // ElevenLabs: 100ms, Deepgram: 250ms
+      // CRITICAL: ElevenLabs testing showed 500ms chunks are optimal (not 100ms)
+      // 100ms chunks increase latency and timeouts, 500ms provides better performance
+      const MIN_CHUNK_DURATION_MS = isElevenLabs ? 500 : 250; // ElevenLabs: 500ms (optimal), Deepgram: 250ms
       const MAX_TIME_BETWEEN_SENDS_MS = isElevenLabs ? 500 : 1000; // ElevenLabs: 500ms, Deepgram: 1000ms
       const TIMEOUT_FALLBACK_MS = isElevenLabs ? 1000 : 2000; // ElevenLabs: 1000ms, Deepgram: 2000ms
-      const TIMEOUT_FALLBACK_MIN_MS = isElevenLabs ? 50 : 150; // ElevenLabs: 50ms, Deepgram: 150ms
+      const TIMEOUT_FALLBACK_MIN_MS = isElevenLabs ? 250 : 150; // ElevenLabs: 250ms (half of optimal), Deepgram: 150ms
       
       const isTooLongSinceLastSend = timeSinceLastContinuousSend >= MAX_TIME_BETWEEN_SENDS_MS;
       const hasMinimumChunkSize = currentAudioDurationMs >= MIN_CHUNK_DURATION_MS;
@@ -1257,9 +1273,10 @@ class AsrWorker {
     try {
       // Provider-specific thresholds (must match timer settings)
       const isElevenLabs = ASR_PROVIDER === 'elevenlabs';
-      const MIN_CHUNK_DURATION_MS = isElevenLabs ? 100 : 250; // ElevenLabs: 100ms, Deepgram: 250ms
+      // CRITICAL: ElevenLabs optimal chunk size is 500ms (based on testing)
+      const MIN_CHUNK_DURATION_MS = isElevenLabs ? 500 : 250; // ElevenLabs: 500ms (optimal), Deepgram: 250ms
       const MAX_WAIT_MS = isElevenLabs ? 500 : 1000; // ElevenLabs: 500ms, Deepgram: 1000ms
-      const INITIAL_BURST_MS = isElevenLabs ? 100 : 250; // ElevenLabs: 100ms, Deepgram: 250ms
+      const INITIAL_BURST_MS = isElevenLabs ? 500 : 250; // ElevenLabs: 500ms (optimal), Deepgram: 250ms
       
       // Calculate total audio in buffer
       // CRITICAL: Correct calculation for PCM16 audio

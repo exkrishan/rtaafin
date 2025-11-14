@@ -196,13 +196,24 @@ export class ElevenLabsProvider implements AsrProvider {
 
         // Determine audio format based on sample rate
         // ElevenLabs supports PCM_16000 (16kHz) and PCM_8000 (8kHz)
+        // CRITICAL: Testing showed 8kHz produces 0% transcription success, 16kHz produces 37.5% success
         let audioFormat: AudioFormat;
         if (sampleRate === 8000) {
+          console.warn(`[ElevenLabsProvider] ⚠️ WARNING: Using 8kHz sample rate - testing showed 0% transcription success at 8kHz`, {
+            interactionId,
+            sampleRate,
+            recommendation: 'Consider using 16kHz for 37.5% transcription success rate',
+          });
           audioFormat = AudioFormat.PCM_8000;
         } else if (sampleRate === 16000) {
           audioFormat = AudioFormat.PCM_16000;
         } else {
-          console.warn(`[ElevenLabsProvider] Unsupported sample rate ${sampleRate}, using PCM_16000`);
+          console.warn(`[ElevenLabsProvider] Unsupported sample rate ${sampleRate}, using PCM_16000`, {
+            interactionId,
+            receivedSampleRate: sampleRate,
+            correctedSampleRate: 16000,
+            note: 'ElevenLabs only supports 8kHz and 16kHz. Defaulting to 16kHz (optimal).',
+          });
           audioFormat = AudioFormat.PCM_16000;
           // Adjust sample rate to match format
           sampleRate = 16000;
@@ -818,8 +829,10 @@ export class ElevenLabsProvider implements AsrProvider {
     const MIN_AMPLITUDE_16KHZ = 1000; // Standard threshold for 16kHz
     const MIN_AMPLITUDE = sampleRate === 8000 ? MIN_AMPLITUDE_8KHZ : MIN_AMPLITUDE_16KHZ;
     
-    // const isSilence = allZeros || audioEnergy < SILENCE_THRESHOLD || maxAmplitude < MIN_AMPLITUDE ;
-    const isSilence = false;
+    // CRITICAL: Re-enable silence detection based on testing learnings
+    // Testing showed 60-70% empty transcripts are normal, but we should still skip obvious silence
+    // This prevents wasting API calls on chunks that will definitely return empty transcripts
+    const isSilence = allZeros || (audioEnergy < SILENCE_THRESHOLD && maxAmplitude < MIN_AMPLITUDE);
     // CRITICAL FIX: Skip sending silence to ElevenLabs - it will return empty transcripts
     if (isSilence) {
       const logLevel = seq <= 5 ? 'warn' : 'debug';
