@@ -144,7 +144,18 @@ export async function dumpAudioChunk(
       cfg.format === 'wav' ? 'audio/wav' : 'application/octet-stream'
     ).catch((err) => {
       // Non-critical - don't block processing
-      console.debug('[audio-dumper] Google Drive upload failed (non-critical)', { error: err.message });
+      // Log errors for first few chunks to help debug
+      if (seq <= 3) {
+        console.error('[audio-dumper] Google Drive upload failed (non-critical)', {
+          interaction_id: interactionId,
+          seq,
+          file_name: basename(filePath),
+          error: err.message,
+          error_stack: err.stack?.substring(0, 200),
+        });
+      } else {
+        console.debug('[audio-dumper] Google Drive upload failed (non-critical)', { error: err.message });
+      }
     });
 
     // Log first few chunks and every 100th chunk

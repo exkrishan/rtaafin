@@ -342,28 +342,60 @@ export async function uploadToGoogleDrive(
     return null;
   }
 
+  const seq = parseInt(fileName.match(/chunk-(\d+)/)?.[1] || '0', 10);
+  
   try {
     // Initialize client if needed
     if (!driveClient) {
+      if (seq <= 3) {
+        console.info('[google-drive] Initializing Google Drive client...', { file_name: fileName });
+      }
       await initializeDriveClient();
-      if (!driveClient) return null;
+      if (!driveClient) {
+        if (seq <= 3) {
+          console.error('[google-drive] ❌ Failed to initialize client', { file_name: fileName });
+        }
+        return null;
+      }
     }
 
     // Get root folder
+    if (seq <= 3) {
+      console.debug('[google-drive] Getting root folder...', { file_name: fileName });
+    }
     const rootFolder = await getOrCreateRootFolder();
 
     // Get or create call folder
+    if (seq <= 3) {
+      console.debug('[google-drive] Getting call folder...', { interaction_id: interactionId, file_name: fileName });
+    }
     const callFolderId = await getOrCreateCallFolder(interactionId, rootFolder);
 
     // Read file
+    if (seq <= 3) {
+      console.debug('[google-drive] Reading file for upload...', { file_name: fileName, file_path: filePath });
+    }
     const fileContent = await readFile(filePath);
 
     // Upload file with retry logic
     const maxRetries = 3;
     let lastError: any = null;
 
+    if (seq <= 3) {
+      console.info('[google-drive] Starting upload...', {
+        interaction_id: interactionId,
+        file_name: fileName,
+        file_size: fileContent.length,
+        call_folder_id: callFolderId,
+      });
+    }
+
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
+        if (seq <= 3 && attempt > 1) {
+          console.info(`[google-drive] Retry attempt ${attempt}/${maxRetries}...`, { file_name: fileName });
+        }
+        
         const response = await driveClient.files.create({
           requestBody: {
             name: fileName,
@@ -381,13 +413,13 @@ export async function uploadToGoogleDrive(
         const webLink = response.data.webViewLink;
 
         // Log first few uploads and every 100th upload
-        const seq = parseInt(fileName.match(/chunk-(\d+)/)?.[1] || '0', 10);
         if (seq <= 3 || seq % 100 === 0) {
           console.info('[google-drive] ✅ Uploaded to Google Drive', {
             interaction_id: interactionId,
             file_name: fileName,
             file_id: fileId,
             web_link: webLink,
+            file_size: fileContent.length,
           });
         }
 
@@ -437,12 +469,13 @@ export async function uploadToGoogleDrive(
     return null;
   } catch (error: any) {
     // Don't throw - Google Drive upload is non-critical
-    const seq = parseInt(fileName.match(/chunk-(\d+)/)?.[1] || '0', 10);
+    // Always log errors for first few chunks to help debug
     if (seq <= 3) {
-      console.error('[google-drive] ❌ Failed to upload to Google Drive', {
+      console.error('[google-drive] ❌ Failed to upload to Google Drive (outer catch)', {
         interaction_id: interactionId,
         file_name: fileName,
         error: error.message,
+        error_stack: error.stack?.substring(0, 200),
       });
     }
     return null;
