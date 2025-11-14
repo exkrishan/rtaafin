@@ -818,8 +818,8 @@ export class ElevenLabsProvider implements AsrProvider {
     const MIN_AMPLITUDE_16KHZ = 1000; // Standard threshold for 16kHz
     const MIN_AMPLITUDE = sampleRate === 8000 ? MIN_AMPLITUDE_8KHZ : MIN_AMPLITUDE_16KHZ;
     
-    const isSilence = allZeros || audioEnergy < SILENCE_THRESHOLD || maxAmplitude < MIN_AMPLITUDE;
-    
+    // const isSilence = allZeros || audioEnergy < SILENCE_THRESHOLD || maxAmplitude < MIN_AMPLITUDE ;
+    const isSilence = false;
     // CRITICAL FIX: Skip sending silence to ElevenLabs - it will return empty transcripts
     if (isSilence) {
       const logLevel = seq <= 5 ? 'warn' : 'debug';
