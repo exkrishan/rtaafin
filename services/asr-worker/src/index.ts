@@ -14,6 +14,7 @@ import { MetricsCollector } from './metrics';
 import { BufferManager } from './buffer-manager';
 import { ConnectionHealthMonitor } from './connection-health-monitor';
 import { ElevenLabsCircuitBreaker } from './circuit-breaker';
+import { dumpBufferedAudioChunk } from './audio-dumper';
 
 // Load environment variables from project root .env.local
 require('dotenv').config({ path: require('path').join(__dirname, '../../../.env.local') });
@@ -1391,6 +1392,20 @@ class AsrWorker {
       // CRITICAL FIX: Use the maximum sequence number from the chunks being sent
       // This preserves the actual sequence number from incoming audio frames
       const seq = Math.max(...sequencesToSend);
+      
+      // Dump buffered audio chunk before sending to ASR provider
+      // This shows the actual audio that gets transcribed (buffered, not raw)
+      dumpBufferedAudioChunk(
+        buffer.interactionId,
+        seq,
+        audioToSend,
+        buffer.sampleRate,
+        audioDurationToSend,
+        'pcm16'
+      ).catch((err) => {
+        // Non-critical - don't block ASR processing
+        console.debug('[ASRWorker] Audio dump failed (non-critical)', { error: err.message });
+      });
       
       // Log audio details before sending with correct duration calculation
       console.info(`[ASRWorker] Processing audio buffer:`, {
