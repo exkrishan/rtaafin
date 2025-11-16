@@ -1166,11 +1166,19 @@ class AsrWorker {
       // 2. Buffer exceeds max chunk size - SEND (split)
       // 3. Timeout risk: waited too long AND have minimum audio - SEND (prevent timeout)
       // 4. Timeout: waited >= MAX_TIME_BETWEEN_SENDS_MS - SEND (force send to prevent timeout)
+      // 5. Very long timeout: waited >10 seconds - SEND even with less audio to prevent complete stall
       const hasTimedOut = timeSinceLastContinuousSend >= MAX_TIME_BETWEEN_SENDS_MS;
-      const shouldProcess = hasMinimumChunkSize || exceedsMaxChunkSize || isTimeoutRisk || hasTimedOut;
+      const VERY_LONG_TIMEOUT_MS = 10000; // 10 seconds - allow sending with less audio after this
+      const isVeryLongTimeout = timeSinceLastContinuousSend >= VERY_LONG_TIMEOUT_MS;
+      const shouldProcess = hasMinimumChunkSize || exceedsMaxChunkSize || isTimeoutRisk || hasTimedOut || isVeryLongTimeout;
 
       // Minimum chunk for send: provider-specific minimum normally, timeout fallback minimum if timeout risk
-      const minChunkForSend = isTimeoutRisk ? TIMEOUT_FALLBACK_MIN_MS : MIN_CHUNK_DURATION_MS;
+      // BUT: If we've waited a VERY long time (>10 seconds), allow sending with less audio (200ms) to prevent complete stall
+      const minChunkForSend = isTimeoutRisk 
+        ? TIMEOUT_FALLBACK_MIN_MS 
+        : (isVeryLongTimeout && currentAudioDurationMs >= 200) // Allow 200ms minimum for very long timeouts
+          ? 200
+          : MIN_CHUNK_DURATION_MS;
       
       // CRITICAL FIX: Log why we're processing or not processing
       if (shouldProcess) {
@@ -1182,10 +1190,11 @@ class AsrWorker {
           exceedsMaxChunkSize,
           isTimeoutRisk,
           hasTimedOut,
+          isVeryLongTimeout,
           chunksCount: buffer.chunks.length,
           minRequired: minChunkForSend,
           provider: ASR_PROVIDER,
-          reason: hasTimedOut ? 'timeout' : (isTimeoutRisk ? 'timeout-risk' : (exceedsMaxChunkSize ? 'max-size' : 'optimal-chunk')),
+          reason: isVeryLongTimeout ? 'very-long-timeout' : (hasTimedOut ? 'timeout' : (isTimeoutRisk ? 'timeout-risk' : (exceedsMaxChunkSize ? 'max-size' : 'optimal-chunk'))),
         });
       } else {
         // Log why we're NOT processing (for debugging)
