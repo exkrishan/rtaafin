@@ -1153,9 +1153,12 @@ class AsrWorker {
       const TIMEOUT_FALLBACK_MS = isElevenLabs ? 3000 : 2000; // ElevenLabs: 3000ms (allow accumulation), Deepgram: 2000ms
       const TIMEOUT_FALLBACK_MIN_MS = isElevenLabs ? 250 : 150; // ElevenLabs: 250ms (half of optimal), Deepgram: 150ms
       
+      // Provider-specific max chunk size: Allow larger chunks for ElevenLabs to enable accumulation
+      const MAX_CHUNK_DURATION_MS_PROVIDER = isElevenLabs ? 5000 : MAX_CHUNK_DURATION_MS; // ElevenLabs: 5000ms (allow accumulation), Deepgram: 250ms
+      
       const isTooLongSinceLastSend = timeSinceLastContinuousSend >= MAX_TIME_BETWEEN_SENDS_MS;
       const hasMinimumChunkSize = currentAudioDurationMs >= MIN_CHUNK_DURATION_MS;
-      const exceedsMaxChunkSize = currentAudioDurationMs >= MAX_CHUNK_DURATION_MS;
+      const exceedsMaxChunkSize = currentAudioDurationMs >= MAX_CHUNK_DURATION_MS_PROVIDER;
       const isTimeoutRisk = timeSinceLastContinuousSend >= TIMEOUT_FALLBACK_MS && currentAudioDurationMs >= TIMEOUT_FALLBACK_MIN_MS;
 
       // Process if:
