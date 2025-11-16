@@ -1325,7 +1325,20 @@ class AsrWorker {
         }
       } else {
         // Continuous mode: Provider-specific minimum, with timeout fallback
-        if (timeSinceLastSend >= TIMEOUT_FALLBACK_MS && totalAudioDurationMs >= TIMEOUT_FALLBACK_MIN_MS) {
+        // CRITICAL: Check for very long timeout first (>10 seconds) - allow 200ms minimum to prevent complete stall
+        const VERY_LONG_TIMEOUT_MS = 10000; // 10 seconds - matches timer logic
+        if (timeSinceLastSend >= VERY_LONG_TIMEOUT_MS && totalAudioDurationMs >= 200) {
+          // Very long timeout: allow sending with just 200ms to prevent complete stall and restore real-time transcription
+          requiredDuration = 200;
+          console.warn(`[ASRWorker] ⚠️ Very long timeout: sending ${totalAudioDurationMs.toFixed(0)}ms chunk (minimum: 200ms) to prevent complete stall and restore real-time transcription after ${timeSinceLastSend}ms wait`, {
+            interaction_id: buffer.interactionId,
+            provider: ASR_PROVIDER,
+            timeSinceLastSend,
+            totalAudioDurationMs: totalAudioDurationMs.toFixed(0),
+            chunksInBuffer: buffer.chunks.length,
+            note: 'Allowing smaller chunk to restore real-time transcription flow',
+          });
+        } else if (timeSinceLastSend >= TIMEOUT_FALLBACK_MS && totalAudioDurationMs >= TIMEOUT_FALLBACK_MIN_MS) {
           // Timeout risk: send what we have (even if < minimum) to prevent timeout
           requiredDuration = TIMEOUT_FALLBACK_MIN_MS;
           console.warn(`[ASRWorker] ⚠️ Timeout risk: sending ${totalAudioDurationMs.toFixed(0)}ms chunk (minimum: ${TIMEOUT_FALLBACK_MIN_MS}ms) to prevent ${ASR_PROVIDER} timeout after ${timeSinceLastSend}ms wait`, {
