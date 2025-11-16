@@ -1147,9 +1147,10 @@ class AsrWorker {
       const isElevenLabs = ASR_PROVIDER === 'elevenlabs';
       // CRITICAL: ElevenLabs testing showed 500ms chunks are optimal (not 100ms)
       // 100ms chunks increase latency and timeouts, 500ms provides better performance
+      // Updated: Allow chunks to accumulate longer (2-3 seconds) for better debugging
       const MIN_CHUNK_DURATION_MS = isElevenLabs ? 500 : 250; // ElevenLabs: 500ms (optimal), Deepgram: 250ms
-      const MAX_TIME_BETWEEN_SENDS_MS = isElevenLabs ? 500 : 1000; // ElevenLabs: 500ms, Deepgram: 1000ms
-      const TIMEOUT_FALLBACK_MS = isElevenLabs ? 1000 : 2000; // ElevenLabs: 1000ms, Deepgram: 2000ms
+      const MAX_TIME_BETWEEN_SENDS_MS = isElevenLabs ? 2000 : 1000; // ElevenLabs: 2000ms (allow accumulation), Deepgram: 1000ms
+      const TIMEOUT_FALLBACK_MS = isElevenLabs ? 3000 : 2000; // ElevenLabs: 3000ms (allow accumulation), Deepgram: 2000ms
       const TIMEOUT_FALLBACK_MIN_MS = isElevenLabs ? 250 : 150; // ElevenLabs: 250ms (half of optimal), Deepgram: 150ms
       
       const isTooLongSinceLastSend = timeSinceLastContinuousSend >= MAX_TIME_BETWEEN_SENDS_MS;
@@ -1275,8 +1276,9 @@ class AsrWorker {
       // Provider-specific thresholds (must match timer settings)
       const isElevenLabs = ASR_PROVIDER === 'elevenlabs';
       // CRITICAL: ElevenLabs optimal chunk size is 500ms (based on testing)
+      // Updated: Allow chunks to accumulate longer (2-3 seconds) for better debugging
       const MIN_CHUNK_DURATION_MS = isElevenLabs ? 500 : 250; // ElevenLabs: 500ms (optimal), Deepgram: 250ms
-      const MAX_WAIT_MS = isElevenLabs ? 500 : 1000; // ElevenLabs: 500ms, Deepgram: 1000ms
+      const MAX_WAIT_MS = isElevenLabs ? 2000 : 1000; // ElevenLabs: 2000ms (allow accumulation), Deepgram: 1000ms
       const INITIAL_BURST_MS = isElevenLabs ? 500 : 250; // ElevenLabs: 500ms (optimal), Deepgram: 250ms
       
       // Calculate total audio in buffer
