@@ -19,7 +19,7 @@ import {
 import { ExotelHandler } from './exotel-handler';
 import { validateConfig, printValidationResults } from './config-validator';
 import { dumpAudioChunk } from './audio-dumper';
-import { uploadToGoogleDrive } from './google-drive-uploader';
+import { uploadToGoogleDrive, listDriveFolders, listCallFolderFiles, listDriveFiles } from './google-drive-uploader';
 
 // Load environment variables from project root .env.local
 // This is safe - dotenv handles missing files gracefully
@@ -221,7 +221,7 @@ class IngestionServer {
     });
     
     // Health check endpoint (required for cloud deployment)
-    this.server.on('request', (req: any, res: any) => {
+    this.server.on('request', async (req: any, res: any) => {
       // Don't handle WebSocket upgrade requests - let WebSocket server handle them
       if (req.url === '/v1/ingest' && 
           (req.headers.upgrade === 'websocket' || 
@@ -266,8 +266,44 @@ class IngestionServer {
         return;
       }
 
-      // Audio dump endpoints (removed - not needed for now)
-      // Files are uploaded to Google Drive instead
+      // Google Drive API endpoints
+      if (req.url?.startsWith('/api/drive/')) {
+        try {
+          if (req.url === '/api/drive/folders') {
+            // List all call folders
+            const folders = await listDriveFolders(100);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ folders, count: folders.length }, null, 2));
+            return;
+          } else if (req.url.startsWith('/api/drive/call/')) {
+            // List files in a specific call folder
+            // URL format: /api/drive/call/{interaction_id}
+            const match = req.url.match(/\/api\/drive\/call\/([^\/]+)/);
+            if (match && match[1]) {
+              const interactionId = match[1];
+              const files = await listCallFolderFiles(interactionId, 500);
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ 
+                interaction_id: interactionId,
+                files, 
+                count: files.length 
+              }, null, 2));
+              return;
+            }
+          } else if (req.url === '/api/drive/files') {
+            // List all files in root folder
+            const files = await listDriveFiles(undefined, 100);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ files, count: files.length }, null, 2));
+            return;
+          }
+        } catch (error: any) {
+          console.error('[server] Google Drive API error:', error.message);
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: error.message }, null, 2));
+          return;
+        }
+      }
       
       // Only send 404 if it's not a WebSocket upgrade
       if (req.headers.upgrade !== 'websocket') {

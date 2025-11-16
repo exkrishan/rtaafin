@@ -386,6 +386,120 @@ async function shareFolderWithEmail(folderId: string, email: string): Promise<vo
 }
 
 /**
+ * List files from Google Drive
+ */
+export async function listDriveFiles(folderName?: string, limit: number = 50): Promise<any[]> {
+  const cfg = getConfig();
+  if (!cfg.enabled) {
+    throw new Error('Google Drive is not enabled');
+  }
+
+  try {
+    // Initialize client if needed
+    if (!driveClient) {
+      await initializeDriveClient();
+      if (!driveClient) {
+        throw new Error('Failed to initialize Google Drive client');
+      }
+    }
+
+    // Get root folder
+    const rootFolder = await getOrCreateRootFolder();
+
+    // Build query
+    let query = `'${rootFolder}' in parents and trashed=false`;
+    if (folderName) {
+      query += ` and name='${folderName}'`;
+    }
+
+    const response = await driveClient.files.list({
+      q: query,
+      fields: 'files(id, name, mimeType, size, createdTime, webViewLink)',
+      pageSize: limit,
+      orderBy: 'createdTime desc',
+    });
+
+    return response.data.files || [];
+  } catch (error: any) {
+    console.error('[google-drive] ❌ Failed to list files:', error.message);
+    throw error;
+  }
+}
+
+/**
+ * List folders (call folders) from Google Drive
+ */
+export async function listDriveFolders(limit: number = 50): Promise<any[]> {
+  const cfg = getConfig();
+  if (!cfg.enabled) {
+    throw new Error('Google Drive is not enabled');
+  }
+
+  try {
+    // Initialize client if needed
+    if (!driveClient) {
+      await initializeDriveClient();
+      if (!driveClient) {
+        throw new Error('Failed to initialize Google Drive client');
+      }
+    }
+
+    // Get root folder
+    const rootFolder = await getOrCreateRootFolder();
+
+    const response = await driveClient.files.list({
+      q: `'${rootFolder}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`,
+      fields: 'files(id, name, createdTime, webViewLink)',
+      pageSize: limit,
+      orderBy: 'createdTime desc',
+    });
+
+    return response.data.files || [];
+  } catch (error: any) {
+    console.error('[google-drive] ❌ Failed to list folders:', error.message);
+    throw error;
+  }
+}
+
+/**
+ * List files in a specific call folder
+ */
+export async function listCallFolderFiles(interactionId: string, limit: number = 100): Promise<any[]> {
+  const cfg = getConfig();
+  if (!cfg.enabled) {
+    throw new Error('Google Drive is not enabled');
+  }
+
+  try {
+    // Initialize client if needed
+    if (!driveClient) {
+      await initializeDriveClient();
+      if (!driveClient) {
+        throw new Error('Failed to initialize Google Drive client');
+      }
+    }
+
+    // Get root folder
+    const rootFolder = await getOrCreateRootFolder();
+
+    // Get call folder
+    const callFolderId = await getOrCreateCallFolder(interactionId, rootFolder);
+
+    const response = await driveClient.files.list({
+      q: `'${callFolderId}' in parents and trashed=false`,
+      fields: 'files(id, name, mimeType, size, createdTime, webViewLink)',
+      pageSize: limit,
+      orderBy: 'name asc',
+    });
+
+    return response.data.files || [];
+  } catch (error: any) {
+    console.error('[google-drive] ❌ Failed to list call folder files:', error.message);
+    throw error;
+  }
+}
+
+/**
  * Upload file to Google Drive
  */
 export async function uploadToGoogleDrive(
