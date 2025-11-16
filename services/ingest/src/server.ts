@@ -483,6 +483,39 @@ class IngestionServer {
   private handleExotelConnection(ws: Connection, req: any): void {
     console.info('[exotel] New Exotel WebSocket connection');
     
+    // Extract sample-rate from query parameter (e.g., ?sample-rate=16000)
+    // This ensures binary frames use correct sample rate even if they arrive before start event
+    let initialSampleRate = 8000; // Default
+    try {
+      if (req.url) {
+        const url = new URL(req.url, 'http://localhost');
+        const sampleRateParam = url.searchParams.get('sample-rate');
+        if (sampleRateParam) {
+          const parsed = parseInt(sampleRateParam, 10);
+          const ALLOWED_RATES = [8000, 16000, 24000];
+          if (ALLOWED_RATES.includes(parsed)) {
+            initialSampleRate = parsed;
+            if (parsed === 16000) {
+              console.info('[exotel] ✅ Sample rate 16kHz detected from URL query parameter', {
+                sample_rate: 16000,
+                note: 'Binary frames will use 16kHz even if they arrive before start event',
+              });
+            }
+          } else {
+            console.warn('[exotel] ⚠️ Invalid sample-rate in URL, using default 8000', {
+              received: sampleRateParam,
+              default: 8000,
+            });
+          }
+        }
+      }
+    } catch (error: any) {
+      // URL parsing failed, use default
+      console.debug('[exotel] Could not parse URL for sample-rate, using default 8000', {
+        error: error.message,
+      });
+    }
+    
     // Exotel doesn't require JWT, uses IP whitelisting or Basic Auth
     // We'll accept the connection and handle messages
     
@@ -491,7 +524,7 @@ class IngestionServer {
       streamSid: `exotel-${Date.now()}`,
       callSid: `call-${Date.now()}`,
       accountSid: 'exotel',
-      sampleRate: 8000, // Default, will be updated from start event if received
+      sampleRate: initialSampleRate, // Use from URL query parameter, not hardcoded 8000
       encoding: 'pcm16',
       seq: 0,
       started: false,
