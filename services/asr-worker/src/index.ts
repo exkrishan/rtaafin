@@ -1300,9 +1300,10 @@ class AsrWorker {
       const timeSinceBufferCreation = Date.now() - buffer.lastProcessed;
       
       // Determine required duration based on mode and provider
+      // CRITICAL: These must match the timer settings above
       let requiredDuration: number;
-      const TIMEOUT_FALLBACK_MS = isElevenLabs ? 1000 : 2000; // ElevenLabs: 1000ms, Deepgram: 2000ms
-      const TIMEOUT_FALLBACK_MIN_MS = isElevenLabs ? 50 : 150; // ElevenLabs: 50ms, Deepgram: 150ms
+      const TIMEOUT_FALLBACK_MS = isElevenLabs ? 3000 : 2000; // ElevenLabs: 3000ms (allow accumulation), Deepgram: 2000ms
+      const TIMEOUT_FALLBACK_MIN_MS = isElevenLabs ? 250 : 150; // ElevenLabs: 250ms (half of optimal), Deepgram: 150ms
       
       if (!buffer.hasSentInitialChunk) {
         // Initial chunk: Require provider-specific burst OR send after timeout
