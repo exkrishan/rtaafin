@@ -19,6 +19,7 @@ interface GoogleDriveConfig {
   parentFolderName: string;
   credentialsPath?: string;
   credentialsJson?: string; // For Render - JSON content as string
+  shareWithEmail?: string; // Email to share folder with (optional)
 }
 
 let config: GoogleDriveConfig | null = null;
@@ -40,6 +41,7 @@ function getConfig(): GoogleDriveConfig {
   const parentFolderName = process.env.GOOGLE_DRIVE_PARENT_FOLDER_NAME || 'Audio Dumps';
   const credentialsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
   const credentialsJson = process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON; // For Render
+  const shareWithEmail = process.env.GOOGLE_DRIVE_SHARE_WITH_EMAIL; // Email to share folder with
 
   config = {
     enabled,
@@ -47,6 +49,7 @@ function getConfig(): GoogleDriveConfig {
     parentFolderName,
     credentialsPath,
     credentialsJson,
+    shareWithEmail,
   };
 
   if (enabled) {
@@ -181,6 +184,18 @@ async function getOrCreateRootFolder(): Promise<string> {
             folder_id: rootFolderId,
             folder_name: cfg.parentFolderName,
           });
+          
+          // Share folder with user's email if configured (only once)
+          if (cfg.shareWithEmail && rootFolderId) {
+            await shareFolderWithEmail(rootFolderId, cfg.shareWithEmail).catch((err) => {
+              console.warn('[google-drive] ⚠️ Failed to share folder (non-critical)', {
+                folder_id: rootFolderId,
+                email: cfg.shareWithEmail,
+                error: err.message,
+              });
+            });
+          }
+          
           return rootFolderId;
         }
 
@@ -199,6 +214,17 @@ async function getOrCreateRootFolder(): Promise<string> {
           folder_id: rootFolderId,
           folder_name: cfg.parentFolderName,
         });
+
+        // Share folder with user's email if configured
+        if (cfg.shareWithEmail && rootFolderId) {
+          await shareFolderWithEmail(rootFolderId, cfg.shareWithEmail).catch((err) => {
+            console.warn('[google-drive] ⚠️ Failed to share folder (non-critical)', {
+              folder_id: rootFolderId,
+              email: cfg.shareWithEmail,
+              error: err.message,
+            });
+          });
+        }
 
         return rootFolderId;
       } catch (error: any) {
@@ -325,6 +351,37 @@ async function getOrCreateCallFolder(interactionId: string, parentFolderId: stri
     return result;
   } finally {
     folderCreationLocks.delete(lockKey);
+  }
+}
+
+/**
+ * Share folder with an email address
+ */
+async function shareFolderWithEmail(folderId: string, email: string): Promise<void> {
+  if (!driveClient) {
+    throw new Error('Google Drive client not initialized');
+  }
+
+  try {
+    await driveClient.permissions.create({
+      fileId: folderId,
+      requestBody: {
+        role: 'reader', // 'reader' = can view, 'writer' = can edit
+        type: 'user',
+        emailAddress: email,
+      },
+    });
+    console.info('[google-drive] ✅ Shared folder with email', {
+      folder_id: folderId,
+      email,
+    });
+  } catch (error: any) {
+    console.error('[google-drive] ❌ Failed to share folder', {
+      folder_id: folderId,
+      email,
+      error: error.message,
+    });
+    throw error;
   }
 }
 
