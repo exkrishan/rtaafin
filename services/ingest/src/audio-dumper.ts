@@ -14,6 +14,7 @@ import { writeFile, mkdir } from 'fs/promises';
 import { join, basename } from 'path';
 import { existsSync } from 'fs';
 import { uploadToGoogleDrive } from './google-drive-uploader';
+import { uploadToGCS } from './gcs-uploader';
 
 interface AudioDumpConfig {
   enabled: boolean;
@@ -136,7 +137,25 @@ export async function dumpAudioChunk(
     // Write file
     await writeFile(filePath, fileData);
 
-    // Upload to Google Drive if enabled
+    // Upload to Google Cloud Storage if enabled (preferred - simpler)
+    uploadToGCS(
+      interactionId,
+      basename(filePath),
+      filePath,
+      cfg.format === 'wav' ? 'audio/wav' : 'application/octet-stream'
+    ).catch((err) => {
+      // Non-critical - don't block processing
+      if (seq <= 3) {
+        console.error('[audio-dumper] GCS upload failed (non-critical)', {
+          interaction_id: interactionId,
+          seq,
+          file_name: basename(filePath),
+          error: err.message,
+        });
+      }
+    });
+
+    // Upload to Google Drive if enabled (fallback/alternative)
     uploadToGoogleDrive(
       interactionId,
       basename(filePath),
@@ -144,17 +163,13 @@ export async function dumpAudioChunk(
       cfg.format === 'wav' ? 'audio/wav' : 'application/octet-stream'
     ).catch((err) => {
       // Non-critical - don't block processing
-      // Log errors for first few chunks to help debug
       if (seq <= 3) {
         console.error('[audio-dumper] Google Drive upload failed (non-critical)', {
           interaction_id: interactionId,
           seq,
           file_name: basename(filePath),
           error: err.message,
-          error_stack: err.stack?.substring(0, 200),
         });
-      } else {
-        console.debug('[audio-dumper] Google Drive upload failed (non-critical)', { error: err.message });
       }
     });
 
