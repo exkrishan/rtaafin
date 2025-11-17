@@ -26,8 +26,12 @@ export async function detectIntent(
   text: string,
   context?: string[]
 ): Promise<IntentResult> {
-  const apiKey = process.env.LLM_API_KEY;
+  // Support both LLM_API_KEY and GEMINI_API_KEY (for backward compatibility)
+  // When provider is gemini, prefer GEMINI_API_KEY over LLM_API_KEY
   const provider = process.env.LLM_PROVIDER || 'openai';
+  const apiKey = (provider === 'gemini' || provider === 'google')
+    ? (process.env.GEMINI_API_KEY || process.env.LLM_API_KEY)
+    : (process.env.LLM_API_KEY || process.env.GEMINI_API_KEY);
 
   if (!apiKey) {
     console.warn('[intent] LLM_API_KEY not configured, returning unknown intent');
@@ -273,7 +277,29 @@ Use specific intents: credit_card_block, credit_card_fraud, credit_card_replacem
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error('[intent] OpenAI API error:', response.status, errorText);
+      let errorData;
+      try {
+        errorData = JSON.parse(errorText);
+      } catch {
+        errorData = { message: errorText };
+      }
+      
+      // Check for rate limit errors
+      if (response.status === 429 || errorData.code === 'rate_limit_exceeded') {
+        console.error('[intent] ❌ OpenAI API Rate Limit Exceeded:', {
+          status: response.status,
+          error: errorData.message || errorText,
+          code: errorData.code,
+          type: errorData.type,
+          suggestion: 'Wait for rate limit to reset, use a different API key, or switch to Gemini',
+        });
+      } else {
+        console.error('[intent] OpenAI API error:', {
+          status: response.status,
+          error: errorData.message || errorText,
+          code: errorData.code,
+        });
+      }
       return { intent: 'unknown', confidence: 0 };
     }
 

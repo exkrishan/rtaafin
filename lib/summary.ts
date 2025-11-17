@@ -233,9 +233,13 @@ function parseRateLimitError(errorText: string): { retryAfterSeconds: number | n
 }
 
 async function callLLM(prompt: string, timeoutMs: number, retryOnRateLimit = true): Promise<string> {
-  const apiKey = process.env.LLM_API_KEY;
-  const llmUrl = process.env.LLM_API_URL;
+  // Support both LLM_API_KEY and GEMINI_API_KEY (for backward compatibility)
+  // When provider is gemini, prefer GEMINI_API_KEY over LLM_API_KEY
   const provider = process.env.LLM_PROVIDER || 'openai'; // Default to OpenAI for backward compatibility
+  const apiKey = (provider === 'gemini' || provider === 'google')
+    ? (process.env.GEMINI_API_KEY || process.env.LLM_API_KEY)
+    : (process.env.LLM_API_KEY || process.env.GEMINI_API_KEY);
+  const llmUrl = process.env.LLM_API_URL;
 
   // Use LLM API if API key is provided
   if (apiKey) {
