@@ -202,10 +202,14 @@ export default function TestAgentAssistPage() {
               
               {autoDiscoveryEnabled && activeCalls.length > 0 && (
                 <div className="flex items-center gap-2">
-                  <label className="text-sm font-medium text-gray-700">Active Call:</label>
+                  <label className="text-sm font-medium text-gray-700">Active Interaction:</label>
                   <select
                     value={callId}
-                    onChange={(e) => setCallId(e.target.value)}
+                    onChange={(e) => {
+                      const newInteractionId = e.target.value;
+                      setCallId(newInteractionId);
+                      console.log('[Test] Interaction ID selected from dropdown:', newInteractionId);
+                    }}
                     className="rounded-md border border-gray-300 px-2 py-1 text-sm"
                   >
                     {activeCalls.map((call) => (
@@ -221,14 +225,20 @@ export default function TestAgentAssistPage() {
               )}
               
               <div className="flex items-center gap-2 ml-auto">
-                <label className="text-sm font-medium text-gray-700">Call ID:</label>
+                <label className="text-sm font-medium text-gray-700">Interaction ID:</label>
                 <input
-                  id="callId"
+                  id="interactionId"
                   type="text"
                   value={callId}
-                  onChange={(e) => setCallId(e.target.value)}
-                  className="rounded-md border border-gray-300 px-2 py-1 text-sm w-64"
-                  placeholder="Enter call ID (e.g. ab7cbdeac69d2a44ef890ecf164e19bh)"
+                  onChange={(e) => {
+                    const newInteractionId = e.target.value.trim();
+                    setCallId(newInteractionId);
+                    if (newInteractionId) {
+                      console.log('[Test] Interaction ID updated:', newInteractionId);
+                    }
+                  }}
+                  className="rounded-md border border-gray-300 px-2 py-1 text-sm w-80"
+                  placeholder="Enter interaction ID (e.g. ab7cbdeac69d2a44ef890ecf164e19bh)"
                 />
                 <label className="text-sm font-medium text-gray-700">Tenant ID:</label>
                 <input
