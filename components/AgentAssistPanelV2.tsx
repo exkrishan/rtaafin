@@ -177,10 +177,18 @@ export default function AgentAssistPanelV2({
         
         onKbArticlesUpdate(articles, intent, confidence);
       };
+      
+      // Store callback to clear KB articles and utterances (for restart functionality)
+      (window as any).__clearKbArticles = () => {
+        console.log('[AgentAssistPanel] 🗑️ Clearing KB articles and utterances');
+        setKbArticles([]);
+        setUtterances([]);
+      };
     }
     
     return () => {
       delete (window as any).__updateKbArticles;
+      delete (window as any).__clearKbArticles;
     };
   }, [onKbArticlesUpdate]);
 

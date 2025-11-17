@@ -274,10 +274,27 @@ export default function DemoPage() {
     setIsPaused(false);
     setCallEnded(false);
     setDirectTranscripts([]);
+    setTranscriptUtterances([]);
     transcriptIndexRef.current = 0;
     callStartTimeRef.current = null;
     setDispositionData(null);
     setDispositionOpen(false);
+    
+    // Clear KB articles in AgentAssistPanelV2 via window callback
+    if ((window as any).__clearKbArticles) {
+      (window as any).__clearKbArticles();
+    }
+    
+    console.log('[Demo] 🔄 Call reset - ready to start again');
+  };
+
+  const restartCall = () => {
+    console.log('[Demo] 🔄 Restarting call...');
+    resetCall();
+    // Small delay to ensure state is reset, then start again
+    setTimeout(() => {
+      startCall();
+    }, 100);
   };
 
   const disposeCall = async () => {
@@ -396,6 +413,7 @@ export default function DemoPage() {
           onResumeCall={resumeCall}
           onStopCall={stopCall}
           onResetCall={resetCall}
+          onRestartCall={restartCall}
         />
 
         {/* Main Content Area */}
