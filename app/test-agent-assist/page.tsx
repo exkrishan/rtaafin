@@ -227,9 +227,8 @@ export default function TestAgentAssistPage() {
                   type="text"
                   value={callId}
                   onChange={(e) => setCallId(e.target.value)}
-                  className="rounded-md border border-gray-300 px-2 py-1 text-sm w-40"
-                  placeholder="Enter call ID"
-                  disabled={autoDiscoveryEnabled && activeCalls.length > 0}
+                  className="rounded-md border border-gray-300 px-2 py-1 text-sm w-64"
+                  placeholder="Enter call ID (e.g. ab7cbdeac69d2a44ef890ecf164e19bh)"
                 />
                 <label className="text-sm font-medium text-gray-700">Tenant ID:</label>
                 <input
