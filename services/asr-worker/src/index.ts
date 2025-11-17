@@ -809,7 +809,11 @@ class AsrWorker {
       buffer.chunks.push(audioBuffer);
       buffer.timestamps.push(frame.timestamp_ms);
       buffer.sequences.push(seq); // Track sequence number from incoming frame
-      buffer.lastChunkReceived = Date.now(); // Update last chunk received time
+      
+      // DIAGNOSTIC: Track audio arrival rate to detect slow arrival
+      const now = Date.now();
+      const timeSinceLastChunk = buffer.lastChunkReceived > 0 ? now - buffer.lastChunkReceived : 0;
+      buffer.lastChunkReceived = now; // Update last chunk received time
       
       // Update buffer stats in BufferManager
       // CRITICAL: Correct calculation for PCM16 audio
@@ -821,6 +825,20 @@ class AsrWorker {
         chunksCount: buffer.chunks.length,
         totalAudioMs: totalAudioDurationMs,
       });
+      
+      // DIAGNOSTIC: Warn if audio is arriving slowly (may cause timeout issues)
+      const SLOW_ARRIVAL_THRESHOLD_MS = 1000; // Warn if >1s between chunks
+      if (timeSinceLastChunk > SLOW_ARRIVAL_THRESHOLD_MS && buffer.chunks.length > 1) {
+        console.warn(`[ASRWorker] ⚠️ Slow audio arrival detected for ${interaction_id}`, {
+          interaction_id,
+          seq,
+          timeSinceLastChunk: `${timeSinceLastChunk}ms`,
+          chunksCount: buffer.chunks.length,
+          totalAudioDurationMs: totalAudioDurationMs.toFixed(0),
+          timeSinceLastSend: buffer.lastContinuousSendTime > 0 ? Date.now() - buffer.lastContinuousSendTime : 0,
+          note: 'Slow audio arrival may cause timeout issues. Check ingest service and network latency.',
+        });
+      }
 
       // Log chunk added to buffer
       console.info(`[ASRWorker] 📥 Added chunk to buffer for ${interaction_id}`, {
@@ -1173,12 +1191,21 @@ class AsrWorker {
       const shouldProcess = hasMinimumChunkSize || exceedsMaxChunkSize || isTimeoutRisk || hasTimedOut || isVeryLongTimeout;
 
       // Minimum chunk for send: provider-specific minimum normally, timeout fallback minimum if timeout risk
-      // BUT: If we've waited a VERY long time (>10 seconds), allow sending with less audio (200ms) to prevent complete stall
+      // CRITICAL FIX: Allow 200ms on normal timeout (3s) to prevent deadlock when audio arrives slowly
+      // This prevents the infinite loop where timer triggers but buffer rejects due to size mismatch
       const minChunkForSend = isTimeoutRisk 
         ? TIMEOUT_FALLBACK_MIN_MS 
-        : (isVeryLongTimeout && currentAudioDurationMs >= 200) // Allow 200ms minimum for very long timeouts
+        : (hasTimedOut && currentAudioDurationMs >= 200) // Allow 200ms on normal timeout (3s) to prevent deadlock
           ? 200
-          : MIN_CHUNK_DURATION_MS;
+          : (isVeryLongTimeout && currentAudioDurationMs >= 200) // Allow 200ms minimum for very long timeouts (>10s)
+            ? 200
+            : MIN_CHUNK_DURATION_MS;
+      
+      // DIAGNOSTIC: Calculate accumulation rate to detect slow audio arrival
+      const timeSinceLastChunk = buffer.lastChunkReceived > 0 ? Date.now() - buffer.lastChunkReceived : 0;
+      const accumulationRateMsPerSecond = timeSinceLastChunk > 0 && currentAudioDurationMs > 0 
+        ? (currentAudioDurationMs / (timeSinceLastChunk / 1000)).toFixed(2)
+        : 'unknown';
       
       // CRITICAL FIX: Log why we're processing or not processing
       if (shouldProcess) {
@@ -1186,6 +1213,8 @@ class AsrWorker {
           interactionId,
           currentAudioDurationMs: currentAudioDurationMs.toFixed(0),
           timeSinceLastSend: timeSinceLastContinuousSend,
+          timeSinceLastChunk: timeSinceLastChunk > 0 ? `${timeSinceLastChunk}ms` : 'unknown',
+          accumulationRate: `${accumulationRateMsPerSecond}ms/s`,
           hasMinimumChunkSize,
           exceedsMaxChunkSize,
           isTimeoutRisk,
@@ -1325,9 +1354,23 @@ class AsrWorker {
         }
       } else {
         // Continuous mode: Provider-specific minimum, with timeout fallback
-        // CRITICAL: Check for very long timeout first (>10 seconds) - allow 200ms minimum to prevent complete stall
+        // CRITICAL FIX: Check for normal timeout (3s) first - allow 200ms to prevent deadlock
+        // This prevents the infinite loop where timer triggers but buffer rejects due to size mismatch
+        const NORMAL_TIMEOUT_MS = MAX_WAIT_MS; // 3s for ElevenLabs, 1s for Deepgram (same as MAX_TIME_BETWEEN_SENDS_MS in timer)
         const VERY_LONG_TIMEOUT_MS = 10000; // 10 seconds - matches timer logic
-        if (timeSinceLastSend >= VERY_LONG_TIMEOUT_MS && totalAudioDurationMs >= 200) {
+        
+        if (timeSinceLastSend >= NORMAL_TIMEOUT_MS && totalAudioDurationMs >= 200) {
+          // Normal timeout: allow 200ms to prevent deadlock when audio arrives slowly
+          requiredDuration = 200;
+          console.warn(`[ASRWorker] ⚠️ Normal timeout: sending ${totalAudioDurationMs.toFixed(0)}ms chunk (minimum: 200ms) to prevent deadlock and restore transcription after ${timeSinceLastSend}ms wait`, {
+            interaction_id: buffer.interactionId,
+            provider: ASR_PROVIDER,
+            timeSinceLastSend,
+            totalAudioDurationMs: totalAudioDurationMs.toFixed(0),
+            chunksInBuffer: buffer.chunks.length,
+            note: 'Allowing smaller chunk to prevent timer/buffer deadlock and restore transcription flow',
+          });
+        } else if (timeSinceLastSend >= VERY_LONG_TIMEOUT_MS && totalAudioDurationMs >= 200) {
           // Very long timeout: allow sending with just 200ms to prevent complete stall and restore real-time transcription
           requiredDuration = 200;
           console.warn(`[ASRWorker] ⚠️ Very long timeout: sending ${totalAudioDurationMs.toFixed(0)}ms chunk (minimum: 200ms) to prevent complete stall and restore real-time transcription after ${timeSinceLastSend}ms wait`, {

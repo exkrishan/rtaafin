@@ -1001,7 +1001,14 @@ export class ElevenLabsProvider implements AsrProvider {
       throw error;
     }
 
-    // Wait for transcript with timeout
+    // Wait for transcript with dynamic timeout based on chunk size
+    // CRITICAL FIX: Small chunks (< 200ms) need longer timeout as they may take longer to process
+    // This prevents premature timeouts for small chunks that are still being processed
+    const SMALL_CHUNK_THRESHOLD_MS = 200;
+    const NORMAL_TIMEOUT_MS = 5000; // 5 seconds for normal chunks
+    const SMALL_CHUNK_TIMEOUT_MS = 10000; // 10 seconds for small chunks
+    const timeoutMs = durationMs < SMALL_CHUNK_THRESHOLD_MS ? SMALL_CHUNK_TIMEOUT_MS : NORMAL_TIMEOUT_MS;
+    
     return new Promise<Transcript>((resolve, reject) => {
       const timeout = setTimeout(() => {
         const currentState = this.connections.get(interactionId);
@@ -1014,7 +1021,12 @@ export class ElevenLabsProvider implements AsrProvider {
         this.metrics.transcriptTimeoutCount++;
         console.warn(`[ElevenLabsProvider] ⚠️ Transcript timeout for ${interactionId}`, {
           seq,
-          timeout: '5s',
+          chunkDurationMs: durationMs.toFixed(2),
+          timeoutMs,
+          timeoutReason: durationMs < SMALL_CHUNK_THRESHOLD_MS ? 'small-chunk-extended' : 'normal',
+          note: durationMs < SMALL_CHUNK_THRESHOLD_MS 
+            ? 'Small chunk timeout - ElevenLabs may need more time to process small audio chunks'
+            : 'Normal timeout - ElevenLabs did not respond within expected time',
         });
 
         // Return empty transcript on timeout
@@ -1024,7 +1036,7 @@ export class ElevenLabsProvider implements AsrProvider {
           isFinal: false,
         };
         resolve(emptyTranscript);
-      }, 5000); // 5 second timeout
+      }, timeoutMs);
 
       // Check if there's already a queued transcript
       if (stateToUse.transcriptQueue.length > 0) {
