@@ -473,22 +473,42 @@ export class ElevenLabsProvider implements AsrProvider {
 
     try {
       // Extract transcript text and metadata from ElevenLabs response
-      // ElevenLabs SDK returns: { transcript: string, ... } for partial/committed transcripts
-      // According to SDK docs: data.transcript (not data.text)
-      const transcriptText = data.transcript || data.text || '';
+      // CRITICAL FIX: ElevenLabs WebSocket sends { text: string } in the raw message
+      // But the SDK event handler may transform it - check both data.text and data.transcript
+      // Also check if data is wrapped in another object (some SDK versions do this)
+      let transcriptText = '';
+      
+      // Try multiple extraction strategies
+      if (data.transcript && typeof data.transcript === 'string') {
+        transcriptText = data.transcript;
+      } else if (data.text && typeof data.text === 'string') {
+        transcriptText = data.text;
+      } else if (data.message && data.message.text) {
+        // Some SDK versions wrap in message object
+        transcriptText = data.message.text;
+      } else if (typeof data === 'string') {
+        // Data might be the text directly
+        transcriptText = data;
+      }
+      
       const isFinal = data.isFinal !== undefined ? data.isFinal : false;
       const confidence = data.confidence || 0.9;
       
-      // Debug: Log the actual data structure to verify
-      console.debug(`[ElevenLabsProvider] 📋 Transcript event data structure:`, {
+      // Enhanced logging to debug data structure issues
+      console.info(`[ElevenLabsProvider] 📋 Transcript event data structure:`, {
         interactionId,
         hasTranscript: !!data.transcript,
         hasText: !!data.text,
+        hasMessage: !!data.message,
         transcriptLength: data.transcript?.length || 0,
         textLength: data.text?.length || 0,
+        messageTextLength: data.message?.text?.length || 0,
         allKeys: Object.keys(data),
+        dataType: typeof data,
         transcriptPreview: data.transcript ? data.transcript.substring(0, 50) : '(none)',
         textPreview: data.text ? data.text.substring(0, 50) : '(none)',
+        extractedText: transcriptText ? transcriptText.substring(0, 50) : '(EMPTY - EXTRACTION FAILED)',
+        rawDataPreview: JSON.stringify(data).substring(0, 200),
       });
 
       // Track pending sends for latency calculation
