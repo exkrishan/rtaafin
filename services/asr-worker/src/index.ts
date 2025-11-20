@@ -1194,7 +1194,7 @@ class AsrWorker {
       // CRITICAL: For ElevenLabs, NEVER allow chunks smaller than 2000ms (2 seconds) per official documentation
       // For Deepgram, can allow smaller chunks on timeout to prevent deadlock
       const minChunkForSend = isElevenLabs
-        ? MIN_CHUNK_DURATION_MS // Always require 2000ms for ElevenLabs - NEVER send less
+        ? MIN_CHUNK_DURATION_MS // Always require 2000ms for ElevenLabs - NEVER send less, even on timeout
         : (isTimeoutRisk 
             ? TIMEOUT_FALLBACK_MIN_MS 
             : (hasTimedOut && currentAudioDurationMs >= 200) // Allow 200ms on normal timeout (3s) to prevent deadlock
@@ -1203,6 +1203,13 @@ class AsrWorker {
                 ? 200
                 : MIN_CHUNK_DURATION_MS);
       
+      // CRITICAL FIX: For ElevenLabs, override shouldProcess to FALSE if we don't have minimum chunk size
+      // This prevents sending chunks < 2000ms even in timeout scenarios
+      // Better to wait longer than send suboptimal chunks that won't transcribe properly
+      const finalShouldProcess = isElevenLabs
+        ? (shouldProcess && currentAudioDurationMs >= MIN_CHUNK_DURATION_MS) // For ElevenLabs, MUST have 2000ms minimum
+        : shouldProcess; // For Deepgram, use original logic
+      
       // DIAGNOSTIC: Calculate accumulation rate to detect slow audio arrival
       const timeSinceLastChunk = buffer.lastChunkReceived > 0 ? Date.now() - buffer.lastChunkReceived : 0;
       const accumulationRateMsPerSecond = timeSinceLastChunk > 0 && currentAudioDurationMs > 0 
@@ -1210,7 +1217,7 @@ class AsrWorker {
         : 'unknown';
       
       // CRITICAL FIX: Log why we're processing or not processing
-      if (shouldProcess) {
+      if (finalShouldProcess) {
         console.info(`[ASRWorker] 📤 Timer: Triggering send for ${interactionId}`, {
           interactionId,
           currentAudioDurationMs: currentAudioDurationMs.toFixed(0),
@@ -1229,7 +1236,11 @@ class AsrWorker {
         });
       } else {
         // Log why we're NOT processing (for debugging)
-        console.debug(`[ASRWorker] ⏸️ Timer: Not sending for ${interactionId}`, {
+        const reason = isElevenLabs && currentAudioDurationMs < MIN_CHUNK_DURATION_MS
+          ? `ElevenLabs requires ${MIN_CHUNK_DURATION_MS}ms minimum, have ${currentAudioDurationMs.toFixed(0)}ms - waiting for more audio`
+          : (!hasMinimumChunkSize ? `need ${MIN_CHUNK_DURATION_MS}ms, have ${currentAudioDurationMs.toFixed(0)}ms` : 
+              (timeSinceLastContinuousSend < MAX_TIME_BETWEEN_SENDS_MS ? `waiting for timeout (${MAX_TIME_BETWEEN_SENDS_MS}ms)` : 'unknown'));
+        console.info(`[ASRWorker] ⏸️ Timer: Not sending for ${interactionId}`, {
           interactionId,
           currentAudioDurationMs: currentAudioDurationMs.toFixed(0),
           timeSinceLastSend: timeSinceLastContinuousSend,
@@ -1237,16 +1248,18 @@ class AsrWorker {
           exceedsMaxChunkSize,
           isTimeoutRisk,
           hasTimedOut,
+          isVeryLongTimeout,
           chunksCount: buffer.chunks.length,
-          minRequired: MIN_CHUNK_DURATION_MS,
+          minRequired: minChunkForSend,
           provider: ASR_PROVIDER,
-          reason: !hasMinimumChunkSize ? `need ${MIN_CHUNK_DURATION_MS}ms, have ${currentAudioDurationMs.toFixed(0)}ms` : 
-                  (timeSinceLastContinuousSend < MAX_TIME_BETWEEN_SENDS_MS ? `waiting for timeout (${MAX_TIME_BETWEEN_SENDS_MS}ms)` : 'unknown'),
+          reason,
         });
       }
       
       // CRITICAL FIX: Actually send if conditions are met
-      if (shouldProcess && currentAudioDurationMs >= minChunkForSend) {
+      // For ElevenLabs, MUST have minimum 2000ms even in timeout scenarios
+      // For Deepgram, use original logic with timeout fallbacks
+      if (finalShouldProcess && currentAudioDurationMs >= minChunkForSend) {
         // Enhanced logging for chunk aggregation decisions
         console.debug(`[ASRWorker] 🎯 Timer: Processing buffer for ${interactionId}`, {
           currentAudioDurationMs: currentAudioDurationMs.toFixed(0),

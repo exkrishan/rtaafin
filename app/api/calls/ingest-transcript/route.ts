@@ -154,17 +154,34 @@ export async function POST(req: Request) {
     });
 
     // Insert into Supabase ingest_events table
+    // CRITICAL FIX: Use ON CONFLICT to handle duplicate (call_id, seq) gracefully
+    // This prevents errors when the same transcript chunk is sent multiple times (retries, etc.)
     try {
-      const { data, error } = await (supabase as any).from('ingest_events').insert({
-        call_id: body.callId,
-        seq: body.seq,
-        ts: body.ts,
-        text: body.text,
-        created_at: new Date().toISOString(),
-      }).select();
+      const { data, error } = await (supabase as any)
+        .from('ingest_events')
+        .upsert({
+          call_id: body.callId,
+          seq: body.seq,
+          ts: body.ts,
+          text: body.text,
+          created_at: new Date().toISOString(),
+        }, {
+          onConflict: 'call_id,seq',
+          ignoreDuplicates: false, // Update if duplicate exists
+        })
+        .select();
 
       if (error) {
-        console.error('[ingest-transcript] Supabase insert error:', error);
+        // Check if it's a duplicate key error (23505)
+        if (error.code === '23505') {
+          console.debug('[ingest-transcript] Duplicate transcript chunk (already exists)', {
+            callId: body.callId,
+            seq: body.seq,
+            note: 'This is normal if the same chunk is sent multiple times (retries, etc.)',
+          });
+        } else {
+          console.error('[ingest-transcript] Supabase insert error:', error);
+        }
         // Don't fail the request, just log it
         console.warn('[ingest-transcript] Continuing despite Supabase error');
       } else {

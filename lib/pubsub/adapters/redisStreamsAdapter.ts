@@ -450,6 +450,16 @@ export class RedisStreamsAdapter implements PubSubAdapter {
                       for (const messageEntry of messages) {
                         const [claimedMsgId, fields] = messageEntry;
                         try {
+                          // CRITICAL FIX: Ensure fields is an array before calling findIndex
+                          if (!Array.isArray(fields)) {
+                            console.error(`[RedisStreamsAdapter] Invalid message format: fields is not an array`, {
+                              msgId: claimedMsgId,
+                              fieldsType: typeof fields,
+                              fieldsValue: fields,
+                              messageEntry,
+                            });
+                            continue; // Skip this message
+                          }
                           const dataIndex = fields.findIndex((f: string) => f === 'data');
                           if (dataIndex >= 0 && dataIndex + 1 < fields.length) {
                             const envelope = JSON.parse(fields[dataIndex + 1]) as MessageEnvelope;
@@ -565,6 +575,16 @@ export class RedisStreamsAdapter implements PubSubAdapter {
                 const [msgId, fields] = messageEntry;
                 try {
                   // Parse message - fields is [key1, value1, key2, value2, ...]
+                  // CRITICAL FIX: Ensure fields is an array before calling findIndex
+                  if (!Array.isArray(fields)) {
+                    console.error(`[RedisStreamsAdapter] Invalid message format: fields is not an array`, {
+                      msgId,
+                      fieldsType: typeof fields,
+                      fieldsValue: fields,
+                      messageEntry,
+                    });
+                    continue; // Skip this message
+                  }
                   const dataIndex = fields.findIndex((f: string) => f === 'data');
                   if (dataIndex >= 0 && dataIndex + 1 < fields.length) {
                     const envelope = JSON.parse(fields[dataIndex + 1]) as MessageEnvelope;
