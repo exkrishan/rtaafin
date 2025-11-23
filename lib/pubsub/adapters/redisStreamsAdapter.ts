@@ -447,16 +447,53 @@ export class RedisStreamsAdapter implements PubSubAdapter {
                   if (claimed && claimed.length > 0) {
                     const [streamName, messages] = claimed[0];
                     if (messages && messages.length > 0) {
-                      for (const messageEntry of messages) {
+                      for (let i = 0; i < messages.length; i++) {
+                        const messageEntry = messages[i];
+                        
+                        // CRITICAL FIX: Validate messageEntry is an array before destructuring
+                        if (!Array.isArray(messageEntry)) {
+                          console.error(`[RedisStreamsAdapter] ❌ Invalid messageEntry format in pending messages (not array): expected [msgId, fields], got:`, {
+                            index: i,
+                            messageEntry,
+                            messageEntryType: typeof messageEntry,
+                            sample: typeof messageEntry === 'string' ? messageEntry.substring(0, 100) : String(messageEntry).substring(0, 100),
+                          });
+                          continue;
+                        }
+                        
+                        // Validate array has at least 2 elements
+                        if (messageEntry.length < 2) {
+                          console.error(`[RedisStreamsAdapter] ❌ Invalid messageEntry format in pending messages (too short): expected [msgId, fields], got array of length ${messageEntry.length}:`, {
+                            index: i,
+                            messageEntry,
+                            messageEntryLength: messageEntry.length,
+                          });
+                          continue;
+                        }
+                        
                         const [claimedMsgId, fields] = messageEntry;
+                        
+                        // Validate msgId is a string (not a character from string destructuring)
+                        if (typeof claimedMsgId !== 'string' || claimedMsgId.length === 0) {
+                          console.error(`[RedisStreamsAdapter] ❌ Invalid claimedMsgId format: expected non-empty string, got:`, {
+                            index: i,
+                            claimedMsgId,
+                            claimedMsgIdType: typeof claimedMsgId,
+                            messageEntry,
+                          });
+                          continue;
+                        }
+                        
                         try {
                           // CRITICAL FIX: Ensure fields is an array before calling findIndex
                           if (!Array.isArray(fields)) {
-                            console.error(`[RedisStreamsAdapter] Invalid message format: fields is not an array`, {
+                            console.error(`[RedisStreamsAdapter] ❌ Invalid message format in pending messages: fields is not an array`, {
+                              index: i,
                               msgId: claimedMsgId,
                               fieldsType: typeof fields,
                               fieldsValue: fields,
                               messageEntry,
+                              messageEntryLength: messageEntry.length,
                             });
                             continue; // Skip this message
                           }
@@ -571,19 +608,105 @@ export class RedisStreamsAdapter implements PubSubAdapter {
               }
 
               let processedCount = 0;
-              for (const messageEntry of messages) {
+              
+              // DEBUG: Log message structure on first read to understand actual format
+              if (subscription.firstRead && messages.length > 0) {
+                console.debug(`[RedisStreamsAdapter] 🔍 Message structure analysis for ${topic}:`, {
+                  messagesCount: messages.length,
+                  firstMessageType: typeof messages[0],
+                  firstMessageIsArray: Array.isArray(messages[0]),
+                  firstMessage: messages[0],
+                  firstMessageLength: Array.isArray(messages[0]) ? messages[0].length : 'N/A',
+                  firstMessageSample: typeof messages[0] === 'string' 
+                    ? messages[0].substring(0, 100) 
+                    : (Array.isArray(messages[0]) 
+                        ? `[array: ${messages[0].slice(0, 4).join(', ')}...]` 
+                        : String(messages[0]).substring(0, 100)),
+                });
+              }
+              
+              for (let i = 0; i < messages.length; i++) {
+                const messageEntry = messages[i];
+                
+                // CRITICAL FIX 1: Validate messageEntry is an array before destructuring
+                if (!Array.isArray(messageEntry)) {
+                  console.error(`[RedisStreamsAdapter] ❌ Invalid messageEntry format (not array): expected [msgId, fields], got:`, {
+                    index: i,
+                    messageEntry,
+                    messageEntryType: typeof messageEntry,
+                    sample: typeof messageEntry === 'string' ? messageEntry.substring(0, 100) : String(messageEntry).substring(0, 100),
+                    messagesSample: messages.slice(0, 3).map(m => typeof m === 'string' ? m.substring(0, 50) : (Array.isArray(m) ? `[array:${m.length}]` : String(m).substring(0, 50))),
+                  });
+                  continue; // Skip this message
+                }
+                
+                // CRITICAL FIX 1b: Validate array has at least 2 elements (msgId and fields)
+                if (messageEntry.length < 2) {
+                  console.error(`[RedisStreamsAdapter] ❌ Invalid messageEntry format (too short): expected [msgId, fields], got array of length ${messageEntry.length}:`, {
+                    index: i,
+                    messageEntry,
+                    messageEntryLength: messageEntry.length,
+                    messageEntryContents: messageEntry,
+                  });
+                  continue; // Skip this message
+                }
+                
                 const [msgId, fields] = messageEntry;
+                
+                // CRITICAL FIX 2: Validate msgId is a string (not a character from string destructuring)
+                if (typeof msgId !== 'string' || msgId.length === 0) {
+                  console.error(`[RedisStreamsAdapter] ❌ Invalid msgId format: expected non-empty string, got:`, {
+                    index: i,
+                    msgId,
+                    msgIdType: typeof msgId,
+                    msgIdLength: typeof msgId === 'string' ? msgId.length : 'N/A',
+                    messageEntry,
+                    messageEntryLength: messageEntry.length,
+                    note: 'If msgId is a single character, messageEntry might be a destructured string instead of [msgId, fields]',
+                  });
+                  continue;
+                }
+                
+                // CRITICAL FIX 2b: Validate msgId looks like a Redis message ID (timestamp-sequence format)
+                // Redis message IDs are like "1763915155045-0" or "1763915155045-1"
+                if (!/^\d+-\d+$/.test(msgId)) {
+                  console.warn(`[RedisStreamsAdapter] ⚠️ msgId doesn't match Redis message ID format (timestamp-sequence):`, {
+                    index: i,
+                    msgId,
+                    messageEntry,
+                    note: 'This might indicate a malformed message structure',
+                  });
+                  // Don't skip - might still be valid, just log warning
+                }
+                
                 try {
                   // Parse message - fields is [key1, value1, key2, value2, ...]
-                  // CRITICAL FIX: Ensure fields is an array before calling findIndex
+                  // CRITICAL FIX 3: Ensure fields is an array before calling findIndex
                   if (!Array.isArray(fields)) {
-                    console.error(`[RedisStreamsAdapter] Invalid message format: fields is not an array`, {
+                    console.error(`[RedisStreamsAdapter] ❌ Invalid message format: fields is not an array`, {
+                      index: i,
                       msgId,
                       fieldsType: typeof fields,
                       fieldsValue: fields,
+                      fieldsLength: typeof fields === 'string' ? fields.length : 'N/A',
                       messageEntry,
+                      messageEntryLength: messageEntry.length,
+                      messageEntryContents: messageEntry,
+                      note: 'If fields is a single character, messageEntry might be a destructured string. Expected: [msgId, [field1, value1, field2, value2, ...]]',
                     });
                     continue; // Skip this message
+                  }
+                  
+                  // CRITICAL FIX 3b: Validate fields array has even length (key-value pairs)
+                  if (fields.length % 2 !== 0) {
+                    console.warn(`[RedisStreamsAdapter] ⚠️ fields array has odd length (expected even for key-value pairs):`, {
+                      index: i,
+                      msgId,
+                      fieldsLength: fields.length,
+                      fields: fields.slice(0, 10), // Show first 10 elements
+                      note: 'Redis Streams fields should be [key1, value1, key2, value2, ...]',
+                    });
+                    // Don't skip - might still be processable
                   }
                   const dataIndex = fields.findIndex((f: string) => f === 'data');
                   if (dataIndex >= 0 && dataIndex + 1 < fields.length) {
