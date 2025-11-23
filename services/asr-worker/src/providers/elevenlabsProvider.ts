@@ -1080,6 +1080,9 @@ export class ElevenLabsProvider implements AsrProvider {
       return;
     }
 
+    // Note: Flushing queued transcripts is handled by the caller (ASRWorker)
+    // This ensures transcripts are published before connection is closed
+
     try {
       if (state.connection) {
         // Close the connection
@@ -1102,6 +1105,74 @@ export class ElevenLabsProvider implements AsrProvider {
       
       console.info(`[ElevenLabsProvider] Connection closed for ${interactionId}`);
     }
+  }
+
+  /**
+   * Process queued transcripts for all connections
+   * This method is called periodically to ensure queued transcripts are published
+   * even when audio isn't being sent (e.g., during silence detection)
+   * 
+   * @param callback - Function to call for each queued transcript
+   * @returns Number of transcripts processed
+   */
+  processQueuedTranscripts(
+    callback: (transcript: Transcript, interactionId: string) => void
+  ): number {
+    let processedCount = 0;
+    
+    // Iterate through all connections
+    for (const [interactionId, state] of this.connections.entries()) {
+      // Process all queued transcripts for this connection
+      while (state.transcriptQueue.length > 0) {
+        const transcript = state.transcriptQueue.shift();
+        if (transcript && transcript.text && transcript.text.trim().length > 0) {
+          // Only process non-empty transcripts
+          callback(transcript, interactionId);
+          processedCount++;
+        }
+      }
+    }
+    
+    if (processedCount > 0) {
+      console.debug(`[ElevenLabsProvider] Processed ${processedCount} queued transcript(s) from background processor`);
+    }
+    
+    return processedCount;
+  }
+
+  /**
+   * Flush remaining transcripts from a connection's queue
+   * Called when connection is closing to ensure no transcripts are lost
+   * 
+   * @param interactionId - Interaction ID to flush
+   * @param callback - Function to call for each queued transcript
+   * @returns Number of transcripts flushed
+   */
+  flushQueuedTranscripts(
+    interactionId: string,
+    callback: (transcript: Transcript, interactionId: string) => void
+  ): number {
+    const state = this.connections.get(interactionId);
+    if (!state) {
+      return 0;
+    }
+    
+    let flushedCount = 0;
+    
+    // Process all queued transcripts
+    while (state.transcriptQueue.length > 0) {
+      const transcript = state.transcriptQueue.shift();
+      if (transcript && transcript.text && transcript.text.trim().length > 0) {
+        callback(transcript, interactionId);
+        flushedCount++;
+      }
+    }
+    
+    if (flushedCount > 0) {
+      console.info(`[ElevenLabsProvider] Flushed ${flushedCount} queued transcript(s) for ${interactionId}`);
+    }
+    
+    return flushedCount;
   }
 
   async close(): Promise<void> {

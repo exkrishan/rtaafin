@@ -76,6 +76,7 @@ class AsrWorker {
   private bufferManager: BufferManager; // Comprehensive buffer lifecycle management
   private connectionHealthMonitor: ConnectionHealthMonitor; // Connection health monitoring
   private circuitBreaker: ElevenLabsCircuitBreaker; // Circuit breaker for ElevenLabs API
+  private queuedTranscriptProcessorInterval: NodeJS.Timeout | null = null; // Background processor for queued transcripts
 
   constructor() {
     this.pubsub = createPubSubAdapterFromEnv();
@@ -273,6 +274,12 @@ class AsrWorker {
   }
 
   async start(): Promise<void> {
+    // Start background processor for queued transcripts (ElevenLabs only)
+    // This ensures transcripts queued during silence detection are still published
+    if (ASR_PROVIDER === 'elevenlabs') {
+      this.startQueuedTranscriptProcessor();
+    }
+
     // Subscribe to audio topics
     // For POC, subscribe to audio_stream (shared stream)
     // In production, would subscribe to audio.{tenant_id} per tenant
@@ -1687,8 +1694,120 @@ class AsrWorker {
     }
   }
 
+  /**
+   * Start background processor for queued transcripts
+   * This processes transcripts that were queued when audio wasn't being sent
+   * (e.g., during silence detection)
+   */
+  private startQueuedTranscriptProcessor(): void {
+    // Only for ElevenLabs provider
+    if (ASR_PROVIDER !== 'elevenlabs') {
+      return;
+    }
+
+    // Check if provider has processQueuedTranscripts method
+    const providerAny = this.asrProvider as any;
+    if (typeof providerAny.processQueuedTranscripts !== 'function') {
+      console.warn('[ASRWorker] Provider does not support queued transcript processing');
+      return;
+    }
+
+    console.info('[ASRWorker] 🔄 Starting background processor for queued transcripts (runs every 500ms)');
+
+    // Process queued transcripts every 500ms
+    this.queuedTranscriptProcessorInterval = setInterval(() => {
+      try {
+        const processedCount = providerAny.processQueuedTranscripts(
+          (transcript: any, interactionId: string) => {
+            // Get or create buffer for this interaction
+            let buffer = this.buffers.get(interactionId);
+            
+            // If buffer doesn't exist, create a minimal one for publishing
+            if (!buffer) {
+              // Create minimal buffer for queued transcripts
+              buffer = {
+                interactionId,
+                tenantId: 'default', // Default tenant if not available
+                chunks: [],
+                timestamps: [],
+                sequences: [],
+                sampleRate: 16000, // Default sample rate
+                lastProcessed: Date.now(),
+                lastChunkReceived: Date.now(),
+                hasSentInitialChunk: false,
+                isProcessing: false,
+                lastContinuousSendTime: Date.now(),
+              };
+              // Don't add to buffers map - this is temporary for publishing only
+            }
+
+            // Generate a seq number based on timestamp (for queued transcripts)
+            // Use timestamp to ensure uniqueness
+            const seq = Math.floor(Date.now() / 1000); // Use seconds as seq for queued transcripts
+
+            // Publish transcript using existing handler
+            this.handleTranscriptResponse(buffer, transcript, seq).catch((error: any) => {
+              console.error(`[ASRWorker] Error publishing queued transcript for ${interactionId}:`, error);
+            });
+          }
+        );
+
+        if (processedCount > 0) {
+          console.debug(`[ASRWorker] Processed ${processedCount} queued transcript(s) from background processor`);
+        }
+      } catch (error: any) {
+        console.error('[ASRWorker] Error in queued transcript processor:', error);
+      }
+    }, 500); // Run every 500ms as specified in plan
+  }
+
   async stop(): Promise<void> {
     console.info('[ASRWorker] 🛑 Stopping ASR Worker service...');
+    
+    // Stop background processor
+    if (this.queuedTranscriptProcessorInterval) {
+      clearInterval(this.queuedTranscriptProcessorInterval);
+      this.queuedTranscriptProcessorInterval = null;
+      console.info('[ASRWorker] ✅ Stopped queued transcript processor');
+    }
+
+    // Flush remaining queued transcripts before stopping (ElevenLabs only)
+    if (ASR_PROVIDER === 'elevenlabs') {
+      const providerAny = this.asrProvider as any;
+      if (typeof providerAny.processQueuedTranscripts === 'function') {
+        try {
+          const flushedCount = providerAny.processQueuedTranscripts(
+            (transcript: any, interactionId: string) => {
+              let buffer = this.buffers.get(interactionId);
+              if (!buffer) {
+                buffer = {
+                  interactionId,
+                  tenantId: 'default',
+                  chunks: [],
+                  timestamps: [],
+                  sequences: [],
+                  sampleRate: 16000,
+                  lastProcessed: Date.now(),
+                  lastChunkReceived: Date.now(),
+                  hasSentInitialChunk: false,
+                  isProcessing: false,
+                  lastContinuousSendTime: Date.now(),
+                };
+              }
+              const seq = Math.floor(Date.now() / 1000);
+              this.handleTranscriptResponse(buffer, transcript, seq).catch((error: any) => {
+                console.error(`[ASRWorker] Error flushing queued transcript for ${interactionId}:`, error);
+              });
+            }
+          );
+          if (flushedCount > 0) {
+            console.info(`[ASRWorker] Flushed ${flushedCount} queued transcript(s) before shutdown`);
+          }
+        } catch (error: any) {
+          console.error('[ASRWorker] Error flushing queued transcripts:', error);
+        }
+      }
+    }
     
     // Unsubscribe from all topics
     for (const handle of this.subscriptions) {
