@@ -150,7 +150,9 @@ export async function POST(req: Request) {
       seq: body.seq,
       ts: body.ts,
       textLength: body.text.length,
+      textPreview: body.text.substring(0, 50),
       tenantId,
+      timestamp: new Date().toISOString(),
     });
 
     // Insert into Supabase ingest_events table
@@ -220,19 +222,34 @@ export async function POST(req: Request) {
     }
 
     // Phase 2: Intent detection and KB article recommendations
+    // OPTIMIZATION: Only detect intent for meaningful transcripts (skip short utterances)
+    // Also debounce to avoid excessive API calls
     let intent = 'unknown';
     let confidence = 0.0;
     let articles: KBArticle[] = [];
 
+    // Skip intent detection for very short transcripts (likely filler words)
+    const MIN_TEXT_LENGTH_FOR_INTENT = 10;
+    const shouldDetectIntent = body.text.trim().length >= MIN_TEXT_LENGTH_FOR_INTENT;
+
     try {
-      // Detect intent from the transcript text
-      console.info('[ingest-transcript] Detecting intent for seq:', body.seq, {
-        textLength: body.text.length,
-        textPreview: body.text.substring(0, 100),
-      });
-      const intentResult = await detectIntent(body.text);
-      intent = intentResult.intent;
-      confidence = intentResult.confidence;
+      if (shouldDetectIntent) {
+        // Detect intent from the transcript text
+        console.info('[ingest-transcript] Detecting intent for seq:', body.seq, {
+          textLength: body.text.length,
+          textPreview: body.text.substring(0, 100),
+        });
+        const intentResult = await detectIntent(body.text);
+        intent = intentResult.intent;
+        confidence = intentResult.confidence;
+      } else {
+        console.debug('[ingest-transcript] Skipping intent detection (text too short)', {
+          seq: body.seq,
+          textLength: body.text.length,
+          text: body.text,
+          minLength: MIN_TEXT_LENGTH_FOR_INTENT,
+        });
+      }
 
       console.info('[ingest-transcript] Intent detected:', { 
         intent, 

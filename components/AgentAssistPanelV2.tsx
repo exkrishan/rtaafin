@@ -399,6 +399,79 @@ export default function AgentAssistPanelV2({
       }
     });
 
+    // Handle call_end event - trigger disposition generation
+    eventSource.addEventListener('call_end', async (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        const eventCallId = data.callId || data.interaction_id || data.interactionId;
+        
+        console.log('[AgentAssistPanel] 📞 Call ended event received', {
+          eventCallId,
+          expectedCallId: interactionId,
+          matches: eventCallId === interactionId || !eventCallId,
+        });
+
+        // Only process if callId matches
+        if (!eventCallId || eventCallId === interactionId) {
+          // Trigger disposition generation via API
+          try {
+            const response = await fetch(`/api/calls/end`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                interactionId: interactionId || eventCallId,
+              }),
+            });
+
+            if (response.ok) {
+              const result = await response.json();
+              console.log('[AgentAssistPanel] ✅ Disposition generated', {
+                interactionId,
+                hasDisposition: !!result.disposition,
+              });
+
+              // If disposition was generated, trigger the disposition modal
+              if (result.disposition && fetchDispositionSummary) {
+                // Convert disposition result to Suggestion format
+                const suggestions = (result.disposition.suggestedDispositions || []).map((d: any) => ({
+                  code: d.mappedCode || d.originalLabel || 'unknown',
+                  title: d.mappedTitle || d.originalLabel || 'Unknown',
+                  score: d.confidence || d.score || 0,
+                  id: d.mappedId || null,
+                  subDisposition: d.subDisposition || undefined,
+                  subDispositionId: d.subDispositionId || null,
+                }));
+
+                const autoNotes = [
+                  result.disposition.issue,
+                  result.disposition.resolution,
+                  result.disposition.nextSteps,
+                ].filter(Boolean).join('\n\n');
+
+                // Trigger disposition modal via callback
+                fetchDispositionSummary({
+                  suggested: suggestions,
+                  autoNotes,
+                });
+              }
+            } else {
+              console.error('[AgentAssistPanel] Failed to generate disposition', {
+                status: response.status,
+                interactionId,
+              });
+            }
+          } catch (error: any) {
+            console.error('[AgentAssistPanel] Error generating disposition', {
+              error: error.message,
+              interactionId,
+            });
+          }
+        }
+      } catch (err) {
+        console.error('[AgentAssistPanel] Failed to parse call_end event', err, event.data);
+      }
+    });
+
     eventSource.addEventListener('intent_update', (event) => {
       try {
         const data = JSON.parse(event.data);

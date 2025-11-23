@@ -54,10 +54,13 @@ export default function TestAgentAssistPage() {
           setActiveCalls(data.calls);
           
           // Auto-select the latest call if it's different from current
-          if (data.latestCall && data.latestCall !== callId) {
-            console.log('[Test] 🎯 Auto-discovered new call:', data.latestCall);
-            setCallId(data.latestCall);
-            setLastDiscoveredCallId(data.latestCall);
+          // Only auto-select if no callId is manually set or if it's a new call
+          if (data.latestCall) {
+            if (!callId || callId === 'test-call-123' || data.latestCall !== lastDiscoveredCallId) {
+              console.log('[Test] 🎯 Auto-discovered new call:', data.latestCall);
+              setCallId(data.latestCall);
+              setLastDiscoveredCallId(data.latestCall);
+            }
           }
         } else {
           setActiveCalls([]);
@@ -74,7 +77,7 @@ export default function TestAgentAssistPage() {
     const interval = setInterval(discoverActiveCalls, 5000);
 
     return () => clearInterval(interval);
-  }, [autoDiscoveryEnabled, callId]);
+  }, [autoDiscoveryEnabled, callId, lastDiscoveredCallId]);
 
   // Handle KB search
   const handleKBSearch = async (query: string, context: { interactionId: string; recentUtterance?: string }): Promise<KBArticle[]> => {

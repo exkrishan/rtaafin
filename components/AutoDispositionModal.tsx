@@ -233,27 +233,15 @@ export default function AutoDispositionModal({
     const timeoutId = setTimeout(() => controller.abort(), 6000);
 
     try {
-      const response = await fetch('/api/calls/auto_notes', {
+      // Use new disposition API endpoint
+      const response = await fetch(`/api/calls/${callId}/disposition`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          callId,
-          tenantId: tenantId || 'default',
-          author: 'agent-ui',
-          notes,
-          dispositions: [
-            {
-              code: selectedDispositionObj.code,
-              title: selectedDispositionObj.title || selectedDispositionObj.code,
-              score: 'score' in selectedDispositionObj && typeof selectedDispositionObj.score === 'number' 
-                ? selectedDispositionObj.score 
-                : 0,
-            },
-          ],
-          dispositionId: selectedDispositionId,
+          disposition: selectedDispositionObj.code,
           subDisposition: selectedSubDisposition || undefined,
-          subDispositionId: selectedSubDispositionId,
-          confidence: averageScore,
+          notes: notes || undefined,
+          agentId: 'agent-ui', // TODO: Get from context
         }),
         signal: controller.signal,
       });

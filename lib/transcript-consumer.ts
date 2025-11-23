@@ -167,13 +167,30 @@ class TranscriptConsumer {
     });
 
     // Map interaction_id to callId
-    // For now, use interaction_id as callId (they should match)
-    // In production, you might have a mapping table
+    // CRITICAL: Ensure callId = interactionId for consistency
+    // This must match the callId used in Exotel start event (callSid)
     const callId = interactionId;
+
+    // Log callId mapping for debugging
+    if (callId !== interactionId) {
+      console.warn('[TranscriptConsumer] ⚠️ CallId mismatch detected!', {
+        interactionId,
+        callId,
+        note: 'callId should equal interactionId for proper SSE matching',
+      });
+    }
 
     // Forward to ingest-transcript API
     // This will trigger intent detection and SSE broadcast
     try {
+      console.debug('[TranscriptConsumer] Forwarding transcript to ingest API', {
+        interactionId,
+        callId,
+        seq: msg.seq,
+        textLength: msg.text.length,
+        textPreview: msg.text.substring(0, 50),
+      });
+
       const response = await fetch(this.nextJsApiUrl, {
         method: 'POST',
         headers: {

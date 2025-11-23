@@ -195,6 +195,40 @@ export class ExotelHandler {
       encoding: start.media_format.encoding,
       timestamp: new Date().toISOString(),
     }));
+
+    // CRITICAL: Register call in call registry for auto-discovery
+    // Use callSid as interactionId (consistent throughout pipeline)
+    const interactionId = start.call_sid || stream_sid;
+    try {
+      // Dynamic import to avoid circular dependencies
+      const { getCallRegistry } = await import('@/lib/call-registry');
+      const callRegistry = getCallRegistry();
+      
+      await callRegistry.registerCall({
+        interactionId,
+        callSid: start.call_sid,
+        from: start.from,
+        to: start.to,
+        tenantId: start.account_sid || 'exotel',
+        startTime: Date.now(),
+        status: 'active',
+        lastActivity: Date.now(),
+      });
+      
+      console.info('[exotel] ✅ Call registered in call registry', {
+        interactionId,
+        callSid: start.call_sid,
+        from: start.from,
+        to: start.to,
+      });
+    } catch (error: any) {
+      // Non-critical - log but don't fail
+      console.warn('[exotel] Failed to register call in registry', {
+        error: error.message,
+        interactionId,
+        callSid: start.call_sid,
+      });
+    }
   }
 
   private handleMedia(
@@ -477,6 +511,7 @@ export class ExotelHandler {
       });
 
       // Publish call end message to notify ASR worker and other services
+      // CRITICAL: Use callSid as interactionId (consistent with start event)
       const interactionId = state.callSid || state.streamSid;
       const callEndMessage = {
         interaction_id: interactionId,
@@ -496,6 +531,19 @@ export class ExotelHandler {
       }).catch((error) => {
         console.error('[exotel] Failed to publish call end event:', error);
       });
+
+      // Mark call as ended in call registry
+      try {
+        const { getCallRegistry } = await import('@/lib/call-registry');
+        const callRegistry = getCallRegistry();
+        await callRegistry.endCall(interactionId);
+        console.info('[exotel] ✅ Call marked as ended in registry', { interactionId });
+      } catch (error: any) {
+        console.warn('[exotel] Failed to update call registry on end', {
+          error: error.message,
+          interactionId,
+        });
+      }
 
       this.connections.delete(state.streamSid);
       ws.exotelState = undefined;

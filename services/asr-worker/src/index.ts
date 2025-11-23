@@ -1639,18 +1639,32 @@ class AsrWorker {
         return; // Skip processing if transcript is invalid
       }
       
+      // CRITICAL FIX: Filter empty transcripts before publishing
+      // Empty transcripts create noise and don't provide value
+      const hasText = transcript.text && transcript.text.trim().length > 0;
+      if (!hasText) {
+        console.debug(`[ASRWorker] ⏭️ Skipping empty transcript (not publishing)`, {
+          interaction_id: buffer.interactionId,
+          seq,
+          type: transcript.type,
+          provider: process.env.ASR_PROVIDER || 'mock',
+          note: 'Empty transcripts are filtered to reduce noise and improve performance',
+        });
+        return; // Don't publish empty transcripts
+      }
+
       // Record first partial latency
       if (transcript.type === 'partial' && !transcript.isFinal) {
         this.metrics.recordFirstPartial(buffer.interactionId);
       }
 
-      // Publish transcript message
+      // Publish transcript message (only non-empty transcripts reach here)
       const transcriptMsg: TranscriptMessage = {
         interaction_id: buffer.interactionId,
         tenant_id: buffer.tenantId,
         seq,
         type: transcript.type,
-        text: transcript.text || '',
+        text: transcript.text.trim(), // Ensure trimmed text
         confidence: transcript.confidence || 0.9,
         timestamp_ms: Date.now(),
       };
@@ -1658,25 +1672,15 @@ class AsrWorker {
       const topic = transcriptTopic(buffer.interactionId);
       await this.pubsub.publish(topic, transcriptMsg);
 
-      // Enhanced logging to debug empty text issue
-      const textPreview = transcript.text ? transcript.text.substring(0, 50) : '(EMPTY)';
-      console.info(`[ASRWorker] Published ${transcript.type} transcript`, {
+      // Enhanced logging for successful publish
+      const textPreview = transcript.text.substring(0, 50);
+      console.info(`[ASRWorker] ✅ Published ${transcript.type} transcript`, {
         interaction_id: buffer.interactionId,
         text: textPreview,
-        textLength: transcript.text?.length || 0,
+        textLength: transcript.text.length,
         seq,
         provider: process.env.ASR_PROVIDER || 'mock',
       });
-      
-      // Warn if text is empty
-      if (!transcript.text || transcript.text.trim().length === 0) {
-        console.warn(`[ASRWorker] ⚠️ WARNING: Published transcript with EMPTY text!`, {
-          interaction_id: buffer.interactionId,
-          seq,
-          type: transcript.type,
-          provider: process.env.ASR_PROVIDER || 'mock',
-        });
-      }
     } catch (error: any) {
       console.error(`[ASRWorker] Error handling transcript response:`, error);
       this.metrics.recordError(error.message || String(error));
@@ -1737,4 +1741,5 @@ process.on('SIGINT', async () => {
   await worker.stop();
   process.exit(0);
 });
+
 
