@@ -17,10 +17,10 @@ interface SaveDispositionRequest {
 
 export async function POST(
   req: Request,
-  { params }: { params: { interactionId: string } }
+  { params }: { params: Promise<{ interactionId: string }> }
 ) {
   try {
-    const { interactionId } = params;
+    const { interactionId } = await params;
     const body: SaveDispositionRequest = await req.json();
 
     if (!interactionId) {

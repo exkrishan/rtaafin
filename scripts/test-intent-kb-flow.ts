@@ -1,138 +1,169 @@
 /**
- * Test script to debug intent detection and KB article surfacing
- * 
- * Usage:
- *   npx tsx scripts/test-intent-kb-flow.ts
+ * Test script to debug intent detection and KB article flow
  */
 
-// Load environment variables from .env.local
-import { config } from 'dotenv';
-import { resolve } from 'path';
-config({ path: resolve(process.cwd(), '.env.local') });
-
-import { detectIntent, normalizeIntent } from '../lib/intent';
-import { getKbAdapter } from '../lib/kb-adapter';
+const BASE_URL = 'http://localhost:3000';
 
 async function testIntentDetection() {
-  console.log('\n=== Testing Intent Detection ===\n');
-
-  const testCases = [
-    "I'm following up on my replacement Platinum Credit Card. I reported fraud a few days ago.",
-    "I need help with a fraudulent transaction on my debit card.",
-    "Can you help me reset my SIM card?",
-    "I want to update my billing information.",
-    "There's an unauthorized charge on my credit card.",
-  ];
-
-  for (const text of testCases) {
-    console.log(`Testing: "${text.substring(0, 60)}..."`);
-    try {
-      const result = await detectIntent(text);
-      const normalized = normalizeIntent(result.intent);
-      console.log(`  → Intent: "${result.intent}"`);
-      console.log(`  → Normalized: "${normalized}"`);
-      console.log(`  → Confidence: ${result.confidence.toFixed(2)}\n`);
-    } catch (err) {
-      console.error(`  → Error: ${err}\n`);
+  console.log('\n🧪 Testing Intent Detection:\n');
+  
+  const testText = "Customer: I need to block my credit card due to fraud";
+  
+  try {
+    const response = await fetch(`${BASE_URL}/api/debug/intent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: testText }),
+    });
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.log(`   ❌ API returned ${response.status}: ${errorText}`);
+      return null;
     }
+    
+    const data = await response.json();
+    console.log('   Response:', JSON.stringify(data, null, 2));
+    
+    if (data.result?.intent === 'unknown') {
+      console.log(`   ⚠️  Intent detection returned 'unknown'`);
+      console.log(`   Check server logs for errors`);
+    } else {
+      console.log(`   ✅ Intent detected: ${data.result?.intent} (confidence: ${data.result?.confidence})`);
+    }
+    
+    return data;
+  } catch (error: any) {
+    console.log(`   ❌ Error: ${error.message}`);
+    return null;
+  }
+}
+
+async function testIngestTranscript() {
+  console.log('\n📝 Testing Ingest Transcript (Full Flow):\n');
+  
+  const testCallId = `test-call-${Date.now()}`;
+  const testText = "Customer: I need to block my credit card due to fraud";
+  
+  try {
+    const response = await fetch(`${BASE_URL}/api/calls/ingest-transcript`, {
+      method: 'POST',
+      headers: { 
+        'Content-Type': 'application/json',
+        'x-tenant-id': 'default',
+      },
+      body: JSON.stringify({
+        callId: testCallId,
+        seq: 1,
+        ts: new Date().toISOString(),
+        text: testText,
+      }),
+    });
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.log(`   ❌ API returned ${response.status}: ${errorText}`);
+      return null;
+    }
+    
+    const data = await response.json();
+    console.log('   Response:', JSON.stringify(data, null, 2));
+    
+    if (data.intent === 'unknown') {
+      console.log(`   ⚠️  Intent is 'unknown' - KB articles won't be fetched`);
+      console.log(`   This is why KB suggestions aren't appearing!`);
+    } else {
+      console.log(`   ✅ Intent: ${data.intent} (confidence: ${data.confidence})`);
+      console.log(`   ✅ KB Articles: ${data.articles?.length || 0}`);
+      
+      if (data.articles && data.articles.length > 0) {
+        console.log(`   Sample article: ${data.articles[0].title}`);
+      } else {
+        console.log(`   ⚠️  No KB articles returned (even though intent was detected)`);
+      }
+    }
+    
+    return data;
+  } catch (error: any) {
+    console.log(`   ❌ Error: ${error.message}`);
+    return null;
   }
 }
 
 async function testKBSearch() {
-  console.log('\n=== Testing KB Search ===\n');
-
-  const testQueries = [
-    'credit_card_fraud',
-    'credit_card',
-    'card_transaction',
-    'fraud',
-    'sim_replacement',
-    'account_security',
-  ];
-
-  const adapter = await getKbAdapter('default');
-
-  for (const query of testQueries) {
-    console.log(`Searching for: "${query}"`);
-    try {
-      const articles = await adapter.search(query, { max: 5 });
-      console.log(`  → Found ${articles.length} articles:`);
-      articles.forEach((article, idx) => {
-        console.log(`    ${idx + 1}. ${article.title} (${article.source})`);
-        if (article.snippet) {
-          console.log(`       "${article.snippet.substring(0, 60)}..."`);
-        }
-      });
-      console.log('');
-    } catch (err) {
-      console.error(`  → Error: ${err}\n`);
+  console.log('\n🔍 Testing KB Search Directly:\n');
+  
+  try {
+    const response = await fetch(`${BASE_URL}/api/kb/search?q=credit+card+fraud&tenantId=default&limit=5`);
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.log(`   ❌ API returned ${response.status}: ${errorText}`);
+      return null;
     }
-  }
-}
-
-async function testFullFlow() {
-  console.log('\n=== Testing Full Flow: Intent → KB Search ===\n');
-
-  const testText = "I'm following up on my replacement Platinum Credit Card. I reported fraud a few days ago, and I haven't received any update on the delivery status.";
-
-  console.log(`Input text: "${testText}"\n`);
-
-  // Step 1: Detect intent
-  console.log('Step 1: Detecting intent...');
-  const intentResult = await detectIntent(testText);
-  const normalizedIntent = normalizeIntent(intentResult.intent);
-  console.log(`  → Intent: "${intentResult.intent}"`);
-  console.log(`  → Normalized: "${normalizedIntent}"`);
-  console.log(`  → Confidence: ${intentResult.confidence.toFixed(2)}\n`);
-
-  // Step 2: Search KB with intent
-  console.log(`Step 2: Searching KB with intent "${normalizedIntent}"...`);
-  const adapter = await getKbAdapter('default');
-  const articles = await adapter.search(normalizedIntent, { max: 5 });
-  console.log(`  → Found ${articles.length} articles:\n`);
-  articles.forEach((article, idx) => {
-    console.log(`  ${idx + 1}. ${article.title}`);
-    console.log(`     Source: ${article.source}`);
-    if (article.snippet) {
-      console.log(`     Snippet: "${article.snippet.substring(0, 80)}..."`);
+    
+    const data = await response.json();
+    
+    if (!data.ok) {
+      console.log(`   ❌ KB search failed: ${data.error || 'unknown error'}`);
+      return null;
     }
-    console.log('');
-  });
-
-  // Step 3: Try expanded search terms
-  console.log('\nStep 3: Testing expanded search terms...');
-  const expandedTerms = [
-    normalizedIntent,
-    'credit_card',
-    'fraud',
-    'card_transaction',
-    'card_security',
-  ];
-
-  for (const term of expandedTerms) {
-    const results = await adapter.search(term, { max: 3 });
-    console.log(`  "${term}": ${results.length} results`);
-    if (results.length > 0) {
-      console.log(`    → ${results[0].title}`);
+    
+    console.log(`   ✅ KB search successful: ${data.results?.length || 0} articles found`);
+    if (data.results && data.results.length > 0) {
+      console.log(`   Sample: ${data.results[0].title}`);
     }
+    return data;
+  } catch (error: any) {
+    console.log(`   ❌ Error: ${error.message}`);
+    return null;
   }
 }
 
 async function main() {
-  console.log('🔍 Testing Intent Detection and KB Article Surfacing\n');
   console.log('='.repeat(60));
-
-  try {
-    await testIntentDetection();
-    await testKBSearch();
-    await testFullFlow();
-  } catch (err) {
-    console.error('Error:', err);
-    process.exit(1);
+  console.log('🔍 Intent Detection & KB Article Flow Debug');
+  console.log('='.repeat(60));
+  
+  const intentTest = await testIntentDetection();
+  const kbSearchTest = await testKBSearch();
+  const ingestTest = await testIngestTranscript();
+  
+  console.log('\n' + '='.repeat(60));
+  console.log('📊 Summary:');
+  console.log('='.repeat(60));
+  
+  if (intentTest?.result?.intent === 'unknown') {
+    console.log('   ❌ Intent Detection: FAILING (returning "unknown")');
+    console.log('   ⚠️  This is blocking KB article surfacing!');
+    console.log('\n   🔧 To fix:');
+    console.log('   1. Check server logs for OpenAI API errors');
+    console.log('   2. Verify LLM_API_KEY is set correctly');
+    console.log('   3. Verify LLM_PROVIDER=openai');
+    console.log('   4. Restart dev server after env changes');
+  } else {
+    console.log(`   ✅ Intent Detection: Working (${intentTest?.result?.intent})`);
   }
-
-  console.log('\n✅ Testing complete!');
+  
+  if (kbSearchTest?.ok) {
+    console.log(`   ✅ KB Search: Working (${kbSearchTest.results?.length || 0} articles)`);
+  } else {
+    console.log('   ❌ KB Search: FAILING');
+  }
+  
+  if (ingestTest?.intent === 'unknown') {
+    console.log('   ❌ Ingest Transcript: Intent detection failing');
+  } else if (ingestTest?.articles?.length > 0) {
+    console.log(`   ✅ Ingest Transcript: Working (${ingestTest.articles.length} articles)`);
+  } else {
+    console.log('   ⚠️  Ingest Transcript: Intent detected but no articles returned');
+  }
+  
+  console.log('\n💡 Next Steps:');
+  console.log('   1. Check browser console on /demo page for errors');
+  console.log('   2. Check server terminal logs for [intent] errors');
+  console.log('   3. Verify .env.local has correct LLM_API_KEY and LLM_PROVIDER');
+  console.log('   4. Restart dev server if env vars were changed');
 }
 
-main();
-
+main().catch(console.error);

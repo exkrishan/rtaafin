@@ -17,10 +17,10 @@ interface TranscriptChunk {
 
 export async function GET(
   req: Request,
-  { params }: { params: { interactionId: string } }
+  { params }: { params: Promise<{ interactionId: string }> }
 ) {
   try {
-    const { interactionId } = params;
+    const { interactionId } = await params;
 
     if (!interactionId) {
       return NextResponse.json(

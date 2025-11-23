@@ -74,7 +74,10 @@ export class ExotelHandler {
           break;
 
         case 'start':
-          this.handleStart(ws, data as ExotelStartEvent);
+          // Fire and forget - don't block on async call
+          this.handleStart(ws, data as ExotelStartEvent).catch((err) => {
+            console.error('[exotel] Error in handleStart:', err);
+          });
           break;
 
         case 'media':
@@ -82,7 +85,10 @@ export class ExotelHandler {
           break;
 
         case 'stop':
-          this.handleStop(ws, data as ExotelStopEvent);
+          // Fire and forget - don't block on async call
+          this.handleStop(ws, data as ExotelStopEvent).catch((err) => {
+            console.error('[exotel] Error in handleStop:', err);
+          });
           break;
 
         case 'dtmf':
@@ -109,10 +115,10 @@ export class ExotelHandler {
     // We can acknowledge or just wait for start event
   }
 
-  private handleStart(
+  private async handleStart(
     ws: WebSocket & { exotelState?: ExotelConnectionState },
     event: ExotelStartEvent
-  ): void {
+  ): Promise<void> {
     const { stream_sid, start } = event;
     // Exotel can send 8kHz, 16kHz, or 24kHz (per Exotel docs)
     // ElevenLabs supports 8kHz and 16kHz - accept both, prefer 16kHz for better transcription
@@ -199,36 +205,20 @@ export class ExotelHandler {
     // CRITICAL: Register call in call registry for auto-discovery
     // Use callSid as interactionId (consistent throughout pipeline)
     const interactionId = start.call_sid || stream_sid;
-    try {
-      // Dynamic import to avoid circular dependencies
-      const { getCallRegistry } = await import('@/lib/call-registry');
-      const callRegistry = getCallRegistry();
-      
-      await callRegistry.registerCall({
-        interactionId,
-        callSid: start.call_sid,
-        from: start.from,
-        to: start.to,
-        tenantId: start.account_sid || 'exotel',
-        startTime: Date.now(),
-        status: 'active',
-        lastActivity: Date.now(),
-      });
-      
-      console.info('[exotel] ✅ Call registered in call registry', {
-        interactionId,
-        callSid: start.call_sid,
-        from: start.from,
-        to: start.to,
-      });
-    } catch (error: any) {
+    // Register call asynchronously (don't block the handler)
+    this.registerCallInRegistry(interactionId, {
+      callSid: start.call_sid,
+      from: start.from,
+      to: start.to,
+      tenantId: start.account_sid || 'exotel',
+    }).catch((error: any) => {
       // Non-critical - log but don't fail
       console.warn('[exotel] Failed to register call in registry', {
         error: error.message,
         interactionId,
         callSid: start.call_sid,
       });
-    }
+    });
   }
 
   private handleMedia(
@@ -497,10 +487,10 @@ export class ExotelHandler {
     }
   }
 
-  private handleStop(
+  private async handleStop(
     ws: WebSocket & { exotelState?: ExotelConnectionState },
     event: ExotelStopEvent
-  ): void {
+  ): Promise<void> {
     const state = ws.exotelState;
     if (state) {
       console.info('[exotel] Stop event received', {
@@ -532,18 +522,13 @@ export class ExotelHandler {
         console.error('[exotel] Failed to publish call end event:', error);
       });
 
-      // Mark call as ended in call registry
-      try {
-        const { getCallRegistry } = await import('@/lib/call-registry');
-        const callRegistry = getCallRegistry();
-        await callRegistry.endCall(interactionId);
-        console.info('[exotel] ✅ Call marked as ended in registry', { interactionId });
-      } catch (error: any) {
+      // Mark call as ended in call registry (async, don't block)
+      this.endCallInRegistry(interactionId).catch((error: any) => {
         console.warn('[exotel] Failed to update call registry on end', {
           error: error.message,
           interactionId,
         });
-      }
+      });
 
       this.connections.delete(state.streamSid);
       ws.exotelState = undefined;
@@ -555,6 +540,56 @@ export class ExotelHandler {
 
   getConnectionState(streamSid: string): ExotelConnectionState | undefined {
     return this.connections.get(streamSid);
+  }
+
+  /**
+   * Register call in call registry (helper method to avoid path alias issues)
+   */
+  private async registerCallInRegistry(
+    interactionId: string,
+    metadata: { callSid: string; from: string; to: string; tenantId: string }
+  ): Promise<void> {
+    try {
+      // Use relative path to avoid @/ alias issues in ingest service
+      const { getCallRegistry } = await import('../../lib/call-registry');
+      const callRegistry = getCallRegistry();
+      
+      await callRegistry.registerCall({
+        interactionId,
+        callSid: metadata.callSid,
+        from: metadata.from,
+        to: metadata.to,
+        tenantId: metadata.tenantId,
+        startTime: Date.now(),
+        status: 'active',
+        lastActivity: Date.now(),
+      });
+      
+      console.info('[exotel] ✅ Call registered in call registry', {
+        interactionId,
+        callSid: metadata.callSid,
+        from: metadata.from,
+        to: metadata.to,
+      });
+    } catch (error: any) {
+      throw error; // Re-throw to be caught by caller
+    }
+  }
+
+  /**
+   * Mark call as ended in call registry (helper method)
+   */
+  private async endCallInRegistry(interactionId: string): Promise<void> {
+    try {
+      // Use relative path to avoid @/ alias issues in ingest service
+      // From services/ingest/src/ to lib/ = ../../../lib/
+      const { getCallRegistry } = await import('../../../lib/call-registry');
+      const callRegistry = getCallRegistry();
+      await callRegistry.endCall(interactionId);
+      console.info('[exotel] ✅ Call marked as ended in registry', { interactionId });
+    } catch (error: any) {
+      throw error; // Re-throw to be caught by caller
+    }
   }
 
   /**

@@ -18,7 +18,7 @@
 3. **Navigate to:** Cloud Storage → Buckets
 4. **Click "Create Bucket"**
 5. **Configure:**
-   - **Name:** `audio-dumps` (or any name you want)
+   - **Name:** `audiodumps` (or any name you want)
    - **Location:** Choose closest to you (e.g., `us-central1`)
    - **Storage class:** Standard (default)
    - **Access control:** Uniform (recommended)
@@ -52,7 +52,7 @@ That's it! No folder sharing, no Drive API complexity.
 | Key | Value | Description |
 |-----|-------|-------------|
 | `GCS_ENABLED` | `true` | Enable GCS uploads |
-| `GCS_BUCKET_NAME` | `audio-dumps` | Your bucket name |
+| `GCS_BUCKET_NAME` | `audiodumps` | Your bucket name |
 | `GOOGLE_APPLICATION_CREDENTIALS_JSON` | `{...your JSON...}` | Service account JSON (same as before) |
 
 **Note:** You can keep `GOOGLE_DRIVE_ENABLED=false` or remove it - we're using GCS now.
@@ -63,7 +63,7 @@ That's it! No folder sharing, no Drive API complexity.
 
 Render will auto-deploy. After deployment, files will upload to:
 ```
-gs://audio-dumps/audio-dumps/{interaction_id}/chunk-XXXXXX.wav
+gs://audiodumps/audio-dumps/{interaction_id}/chunk-XXXXXX.wav
 ```
 
 ---
@@ -73,7 +73,7 @@ gs://audio-dumps/audio-dumps/{interaction_id}/chunk-XXXXXX.wav
 ### Option 1: Google Cloud Console
 
 1. Go to: https://console.cloud.google.com/storage/browser
-2. Select your bucket: `audio-dumps`
+2. Select your bucket: `audiodumps`
 3. Navigate to: `audio-dumps/{interaction_id}/`
 4. Download files directly
 
@@ -81,17 +81,17 @@ gs://audio-dumps/audio-dumps/{interaction_id}/chunk-XXXXXX.wav
 
 Files will be accessible at:
 ```
-https://storage.googleapis.com/audio-dumps/audio-dumps/{interaction_id}/chunk-XXXXXX.wav
+https://storage.googleapis.com/audiodumps/audio-dumps/{interaction_id}/chunk-XXXXXX.wav
 ```
 
 ### Option 3: gsutil Command Line
 
 ```bash
 # List files for a call
-gsutil ls gs://audio-dumps/audio-dumps/{interaction_id}/
+gsutil ls gs://audiodumps/audio-dumps/{interaction_id}/
 
 # Download a file
-gsutil cp gs://audio-dumps/audio-dumps/{interaction_id}/chunk-000001.wav ./
+gsutil cp gs://audiodumps/audio-dumps/{interaction_id}/chunk-000001.wav ./
 ```
 
 ### Option 4: API Endpoint (Coming Soon)
@@ -162,10 +162,10 @@ For audio dumps, you're looking at pennies per month unless you have massive vol
 
 ## Quick Setup Checklist
 
-- [ ] Create GCS bucket named `audio-dumps`
+- [ ] Create GCS bucket named `audiodumps`
 - [ ] Grant service account `Storage Object Creator` role
 - [ ] Set `GCS_ENABLED=true` in Render
-- [ ] Set `GCS_BUCKET_NAME=audio-dumps` in Render
+- [ ] Set `GCS_BUCKET_NAME=audiodumps` in Render
 - [ ] Ensure `GOOGLE_APPLICATION_CREDENTIALS_JSON` is set
 - [ ] Deploy and test!
 
