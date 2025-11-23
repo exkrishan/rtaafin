@@ -446,17 +446,26 @@ export class RedisStreamsAdapter implements PubSubAdapter {
                   const claimed = await redis.xclaim(topic, consumerGroup, consumerName, 0, msgId) as [string, [string, string[]][]][] | null;
                   if (claimed && claimed.length > 0) {
                     const [streamName, messages] = claimed[0];
-                    if (messages && messages.length > 0) {
-                      for (let i = 0; i < messages.length; i++) {
-                        const messageEntry = messages[i];
+                    const messagesArray = messages as any[]; // Type assertion for Redis response
+                    if (messagesArray && messagesArray.length > 0) {
+                      for (let i = 0; i < messagesArray.length; i++) {
+                        const messageEntry = messagesArray[i] as any;
                         
                         // CRITICAL FIX: Validate messageEntry is an array before destructuring
                         if (!Array.isArray(messageEntry)) {
+                          let sample: string;
+                          if (typeof messageEntry === 'string') {
+                            sample = messageEntry.substring(0, 100);
+                          } else if (typeof messageEntry === 'object' && messageEntry !== null) {
+                            sample = JSON.stringify(messageEntry).substring(0, 100);
+                          } else {
+                            sample = String(messageEntry).substring(0, 100);
+                          }
                           console.error(`[RedisStreamsAdapter] ❌ Invalid messageEntry format in pending messages (not array): expected [msgId, fields], got:`, {
                             index: i,
                             messageEntry,
                             messageEntryType: typeof messageEntry,
-                            sample: typeof messageEntry === 'string' ? messageEntry.substring(0, 100) : String(messageEntry).substring(0, 100),
+                            sample,
                           });
                           continue;
                         }
@@ -600,42 +609,62 @@ export class RedisStreamsAdapter implements PubSubAdapter {
 
           if (results && results.length > 0) {
             const [streamName, messages] = results[0];
-            if (messages && messages.length > 0) {
+            const messagesArray = messages as any[]; // Type assertion for Redis response
+            if (messagesArray && messagesArray.length > 0) {
               // Mark that we've done at least one read
               if (subscription.firstRead) {
                 subscription.firstRead = false;
-                console.info(`[RedisStreamsAdapter] ✅ First read completed for ${topic}, found ${messages.length} message(s). Switching to '>' for new messages only.`);
+                console.info(`[RedisStreamsAdapter] ✅ First read completed for ${topic}, found ${messagesArray.length} message(s). Switching to '>' for new messages only.`);
               }
 
               let processedCount = 0;
               
               // DEBUG: Log message structure on first read to understand actual format
-              if (subscription.firstRead && messages.length > 0) {
+              if (subscription.firstRead && messagesArray.length > 0) {
+                const firstMsg = messagesArray[0] as any;
+                let firstMessageSample: string;
+                if (typeof firstMsg === 'string') {
+                  firstMessageSample = firstMsg.substring(0, 100);
+                } else if (Array.isArray(firstMsg)) {
+                  firstMessageSample = `[array: ${firstMsg.slice(0, 4).join(', ')}...]`;
+                } else {
+                  firstMessageSample = String(firstMsg).substring(0, 100);
+                }
                 console.debug(`[RedisStreamsAdapter] 🔍 Message structure analysis for ${topic}:`, {
-                  messagesCount: messages.length,
-                  firstMessageType: typeof messages[0],
-                  firstMessageIsArray: Array.isArray(messages[0]),
-                  firstMessage: messages[0],
-                  firstMessageLength: Array.isArray(messages[0]) ? messages[0].length : 'N/A',
-                  firstMessageSample: typeof messages[0] === 'string' 
-                    ? messages[0].substring(0, 100) 
-                    : (Array.isArray(messages[0]) 
-                        ? `[array: ${messages[0].slice(0, 4).join(', ')}...]` 
-                        : String(messages[0]).substring(0, 100)),
+                  messagesCount: messagesArray.length,
+                  firstMessageType: typeof firstMsg,
+                  firstMessageIsArray: Array.isArray(firstMsg),
+                  firstMessage: firstMsg,
+                  firstMessageLength: Array.isArray(firstMsg) ? firstMsg.length : 'N/A',
+                  firstMessageSample,
                 });
               }
               
-              for (let i = 0; i < messages.length; i++) {
-                const messageEntry = messages[i];
+              for (let i = 0; i < messagesArray.length; i++) {
+                const messageEntry = messagesArray[i] as any;
                 
                 // CRITICAL FIX 1: Validate messageEntry is an array before destructuring
                 if (!Array.isArray(messageEntry)) {
+                  let sample: string;
+                  if (typeof messageEntry === 'string') {
+                    sample = messageEntry.substring(0, 100);
+                  } else if (typeof messageEntry === 'object' && messageEntry !== null) {
+                    sample = JSON.stringify(messageEntry).substring(0, 100);
+                  } else {
+                    sample = String(messageEntry).substring(0, 100);
+                  }
+                  const messagesSample = messagesArray.slice(0, 3).map((m: any) => {
+                    if (typeof m === 'string') return m.substring(0, 50);
+                    if (Array.isArray(m)) return `[array:${m.length}]`;
+                    if (typeof m === 'object' && m !== null) return JSON.stringify(m).substring(0, 50);
+                    return String(m).substring(0, 50);
+                  });
                   console.error(`[RedisStreamsAdapter] ❌ Invalid messageEntry format (not array): expected [msgId, fields], got:`, {
                     index: i,
                     messageEntry,
                     messageEntryType: typeof messageEntry,
-                    sample: typeof messageEntry === 'string' ? messageEntry.substring(0, 100) : String(messageEntry).substring(0, 100),
-                    messagesSample: messages.slice(0, 3).map(m => typeof m === 'string' ? m.substring(0, 50) : (Array.isArray(m) ? `[array:${m.length}]` : String(m).substring(0, 50))),
+                    sample,
+                    messagesSample,
                   });
                   continue; // Skip this message
                 }
@@ -688,7 +717,7 @@ export class RedisStreamsAdapter implements PubSubAdapter {
                       msgId,
                       fieldsType: typeof fields,
                       fieldsValue: fields,
-                      fieldsLength: typeof fields === 'string' ? fields.length : 'N/A',
+                      fieldsLength: typeof fields === 'string' ? (fields as string).length : 'N/A',
                       messageEntry,
                       messageEntryLength: messageEntry.length,
                       messageEntryContents: messageEntry,
