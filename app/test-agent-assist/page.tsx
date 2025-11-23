@@ -23,8 +23,9 @@ const mockCustomer: Customer = {
 };
 
 export default function TestAgentAssistPage() {
-  const [callId, setCallId] = useState('test-call-123');
-  const [tenantId, setTenantId] = useState('default');
+  // Ensure callId is always a string, never undefined
+  const [callId, setCallId] = useState<string>('test-call-123');
+  const [tenantId] = useState('default');
   const [dispositionOpen, setDispositionOpen] = useState(false);
   const [dispositionData, setDispositionData] = useState<{
     suggested: Suggestion[];
