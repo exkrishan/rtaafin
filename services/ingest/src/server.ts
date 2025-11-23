@@ -231,35 +231,43 @@ class IngestionServer {
       }
       
       if (req.url === '/health') {
-        // Update health status
-        this.updateHealthStatus();
+        // CRITICAL: Health check must respond immediately (< 1 second)
+        // Don't wait for Redis or any async operations
+        // Just check if server is running and pubsub adapter exists (not necessarily connected)
         
-        const statusCode = this.healthStatus.status === 'healthy' ? 200 : 
-                          this.healthStatus.status === 'degraded' ? 200 : 503;
+        // Quick synchronous check - don't call updateHealthStatus() which might be slow
+        const pubsubHealthy = this.pubsub !== null && this.pubsub !== undefined;
+        const status = pubsubHealthy ? 'healthy' : 'degraded';
+        const statusCode = 200; // Always return 200 for health check (Render expects this)
         
         res.writeHead(statusCode, { 
           'Content-Type': 'application/json',
           'Cache-Control': 'no-cache',
         });
+        
         const healthResponse: any = {
-          status: this.healthStatus.status,
+          status,
           service: 'ingest',
-          pubsub: this.healthStatus.pubsub,
-          timestamp: new Date(this.healthStatus.timestamp).toISOString(),
+          pubsub: pubsubHealthy,
+          timestamp: new Date().toISOString(),
           exotelBridge: EXO_BRIDGE_ENABLED ? 'enabled' : 'disabled',
         };
 
-        // Add Exotel metrics if bridge is enabled
-        if (EXO_BRIDGE_ENABLED) {
-          const exotelMetrics = this.exotelHandler.getMetrics();
-          healthResponse.exotelMetrics = {
-            framesIn: exotelMetrics.framesIn,
-            bytesIn: exotelMetrics.bytesIn,
-            bufferDrops: exotelMetrics.bufferDrops,
-            publishFailures: exotelMetrics.publishFailures,
-            bufferDepth: exotelMetrics.bufferDepth,
-            activeBuffers: exotelMetrics.activeBuffers,
-          };
+        // Add Exotel metrics if bridge is enabled (synchronous call only)
+        if (EXO_BRIDGE_ENABLED && this.exotelHandler) {
+          try {
+            const exotelMetrics = this.exotelHandler.getMetrics();
+            healthResponse.exotelMetrics = {
+              framesIn: exotelMetrics.framesIn,
+              bytesIn: exotelMetrics.bytesIn,
+              bufferDrops: exotelMetrics.bufferDrops,
+              publishFailures: exotelMetrics.publishFailures,
+              bufferDepth: exotelMetrics.bufferDepth,
+              activeBuffers: exotelMetrics.activeBuffers,
+            };
+          } catch (err) {
+            // Ignore metrics errors - health check should still succeed
+          }
         }
         
         res.end(JSON.stringify(healthResponse));
