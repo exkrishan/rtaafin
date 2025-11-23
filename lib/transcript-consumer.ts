@@ -182,13 +182,15 @@ class TranscriptConsumer {
 
     // Forward to ingest-transcript API
     // This will trigger intent detection and SSE broadcast
+    // At this point, we know msg.text exists and is not empty (checked above)
     try {
+      const text = msg.text || ''; // Type guard - we know it exists from check above
       console.debug('[TranscriptConsumer] Forwarding transcript to ingest API', {
         interactionId,
         callId,
         seq: msg.seq,
-        textLength: msg.text.length,
-        textPreview: msg.text.substring(0, 50),
+        textLength: text.length,
+        textPreview: text.substring(0, 50),
       });
 
       const response = await fetch(this.nextJsApiUrl, {
@@ -201,7 +203,7 @@ class TranscriptConsumer {
           callId,
           seq: msg.seq,
           ts: new Date(msg.timestamp_ms).toISOString(),
-          text: msg.text,
+          text: text, // Use the type-guarded text variable
         }),
       });
 
