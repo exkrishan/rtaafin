@@ -551,7 +551,8 @@ export class ExotelHandler {
   ): Promise<void> {
     try {
       // Use relative path to avoid @/ alias issues in ingest service
-      const { getCallRegistry } = await import('../../lib/call-registry');
+      // From services/ingest/src/ to lib/ = ../../../lib/
+      const { getCallRegistry } = await import('../../../lib/call-registry');
       const callRegistry = getCallRegistry();
       
       await callRegistry.registerCall({
