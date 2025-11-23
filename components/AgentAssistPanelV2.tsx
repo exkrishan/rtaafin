@@ -430,28 +430,36 @@ export default function AgentAssistPanelV2({
                 hasDisposition: !!result.disposition,
               });
 
-              // If disposition was generated, trigger the disposition modal
-              if (result.disposition && fetchDispositionSummary) {
-                // Convert disposition result to Suggestion format
-                const suggestions = (result.disposition.suggestedDispositions || []).map((d: any) => ({
-                  code: d.mappedCode || d.originalLabel || 'unknown',
-                  title: d.mappedTitle || d.originalLabel || 'Unknown',
-                  score: d.confidence || d.score || 0,
-                  id: d.mappedId || null,
-                  subDisposition: d.subDisposition || undefined,
-                  subDispositionId: d.subDispositionId || null,
-                }));
+              // If disposition was generated, set disposition data directly
+              if (result.disposition) {
+                // Convert disposition result to DispositionData format
+                const firstDisposition = result.disposition.suggestedDispositions?.[0];
+                const dispositionData: DispositionData = {
+                  dispositionId: firstDisposition?.mappedId?.toString() || firstDisposition?.mappedCode || 'unknown',
+                  dispositionTitle: firstDisposition?.mappedTitle || firstDisposition?.originalLabel || 'Unknown',
+                  confidence: firstDisposition?.confidence || firstDisposition?.score || 0,
+                  subDispositions: firstDisposition?.subDisposition ? [
+                    {
+                      id: firstDisposition?.subDispositionId?.toString() || '1',
+                      title: firstDisposition?.subDisposition || 'Unknown',
+                    }
+                  ] : undefined,
+                  autoNotes: [
+                    result.disposition.issue,
+                    result.disposition.resolution,
+                    result.disposition.nextSteps,
+                  ].filter(Boolean).join('\n\n'),
+                };
 
-                const autoNotes = [
-                  result.disposition.issue,
-                  result.disposition.resolution,
-                  result.disposition.nextSteps,
-                ].filter(Boolean).join('\n\n');
-
-                // Trigger disposition modal via callback
-                fetchDispositionSummary({
-                  suggested: suggestions,
-                  autoNotes,
+                // Set disposition data to trigger modal
+                setDispositionData(dispositionData);
+                setDispositionNotes(dispositionData.autoNotes);
+                setSelectedDisposition(dispositionData.dispositionId);
+                
+                console.log('[AgentAssistPanel] ✅ Set disposition data from call_end event', {
+                  interactionId,
+                  dispositionId: dispositionData.dispositionId,
+                  dispositionTitle: dispositionData.dispositionTitle,
                 });
               }
             } else {
