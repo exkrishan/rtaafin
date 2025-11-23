@@ -36,37 +36,39 @@ export default function TestAgentAssistPage() {
   const [isPaused] = useState(false);
   const [callEnded] = useState(false);
   
-  // Auto-discovery state
-  const [activeCalls, setActiveCalls] = useState<Array<{ interactionId: string; lastActivity?: string }>>([]);
-  const [autoDiscoveryEnabled, setAutoDiscoveryEnabled] = useState(true);
+  // Auto-discovery state (silent, always enabled)
   const [lastDiscoveredCallId, setLastDiscoveredCallId] = useState<string | null>(null);
 
-  // Auto-discover active calls and auto-select latest
+  // Auto-discover active calls silently in background
+  // Always ensure callId has a value (never empty)
   useEffect(() => {
-    if (!autoDiscoveryEnabled) return;
-
     const discoverActiveCalls = async () => {
       try {
         const response = await fetch('/api/calls/active?limit=10');
         const data = await response.json();
         
-        if (data.ok && data.calls && data.calls.length > 0) {
-          setActiveCalls(data.calls);
-          
-          // Auto-select the latest call if it's different from current
-          // Only auto-select if no callId is manually set or if it's a new call
-          if (data.latestCall) {
-            if (!callId || callId === 'test-call-123' || data.latestCall !== lastDiscoveredCallId) {
-              console.log('[Test] 🎯 Auto-discovered new call:', data.latestCall);
+        if (data.ok && data.calls && data.calls.length > 0 && data.latestCall) {
+          // Auto-connect to latest call if it's valid
+          if (data.latestCall.trim && data.latestCall.trim().length > 0) {
+            if (data.latestCall !== lastDiscoveredCallId) {
+              console.log('[Test] 🎯 Auto-discovered new call (silent):', data.latestCall);
               setCallId(data.latestCall);
               setLastDiscoveredCallId(data.latestCall);
             }
           }
-        } else {
-          setActiveCalls([]);
+        }
+        
+        // CRITICAL: Always ensure callId has a value (never empty)
+        if (!callId || callId.trim().length === 0) {
+          console.log('[Test] No active calls, using default callId');
+          setCallId('test-call-123');
         }
       } catch (err: any) {
         console.error('[Test] Failed to discover active calls:', err);
+        // On error, ensure callId is not empty
+        if (!callId || callId.trim().length === 0) {
+          setCallId('test-call-123');
+        }
       }
     };
 
@@ -77,7 +79,15 @@ export default function TestAgentAssistPage() {
     const interval = setInterval(discoverActiveCalls, 5000);
 
     return () => clearInterval(interval);
-  }, [autoDiscoveryEnabled, callId, lastDiscoveredCallId]);
+  }, [callId, lastDiscoveredCallId]);
+
+  // Safeguard: Ensure callId is never empty or undefined
+  useEffect(() => {
+    if (!callId || (typeof callId === 'string' && callId.trim().length === 0)) {
+      console.warn('[Test] ⚠️ callId is empty, restoring default');
+      setCallId('test-call-123');
+    }
+  }, [callId]);
 
   // Handle KB search
   const handleKBSearch = async (query: string, context: { interactionId: string; recentUtterance?: string }): Promise<KBArticle[]> => {
@@ -187,75 +197,6 @@ export default function TestAgentAssistPage() {
 
         {/* Main Content Area */}
         <div className="flex-1 flex flex-col pr-[376px]">
-          {/* Auto-discovery controls - Simple header */}
-          <div className="bg-white border-b border-gray-200 p-3">
-            <div className="flex items-center gap-4">
-              <div className="flex items-center gap-2">
-                <input
-                  type="checkbox"
-                  id="autoDiscovery"
-                  checked={autoDiscoveryEnabled}
-                  onChange={(e) => setAutoDiscoveryEnabled(e.target.checked)}
-                  className="rounded"
-                />
-                <label htmlFor="autoDiscovery" className="text-sm font-medium text-gray-700">
-                  Auto-discover active calls
-                </label>
-              </div>
-              
-              {autoDiscoveryEnabled && activeCalls.length > 0 && (
-                <div className="flex items-center gap-2">
-                  <label className="text-sm font-medium text-gray-700">Active Interaction:</label>
-                  <select
-                    value={callId}
-                    onChange={(e) => {
-                      const newInteractionId = e.target.value;
-                      setCallId(newInteractionId);
-                      console.log('[Test] Interaction ID selected from dropdown:', newInteractionId);
-                    }}
-                    className="rounded-md border border-gray-300 px-2 py-1 text-sm"
-                  >
-                    {activeCalls.map((call) => (
-                      <option key={call.interactionId} value={call.interactionId}>
-                        {call.interactionId}
-                      </option>
-                    ))}
-                  </select>
-                  {lastDiscoveredCallId && lastDiscoveredCallId === callId && (
-                    <span className="text-xs text-green-600">✓ Auto-selected</span>
-                  )}
-                </div>
-              )}
-              
-              <div className="flex items-center gap-2 ml-auto">
-                <label className="text-sm font-medium text-gray-700">Interaction ID:</label>
-                <input
-                  id="interactionId"
-                  type="text"
-                  value={callId}
-                  onChange={(e) => {
-                    const newInteractionId = e.target.value.trim();
-                    setCallId(newInteractionId);
-                    if (newInteractionId) {
-                      console.log('[Test] Interaction ID updated:', newInteractionId);
-                    }
-                  }}
-                  className="rounded-md border border-gray-300 px-2 py-1 text-sm w-80"
-                  placeholder="Enter interaction ID (e.g. ab7cbdeac69d2a44ef890ecf164e19bh)"
-                />
-                <label className="text-sm font-medium text-gray-700">Tenant ID:</label>
-                <input
-                  id="tenantId"
-                  type="text"
-                  value={tenantId}
-                  onChange={(e) => setTenantId(e.target.value)}
-                  className="rounded-md border border-gray-300 px-2 py-1 text-sm w-32"
-                  placeholder="Enter tenant ID"
-                />
-              </div>
-            </div>
-          </div>
-
           {/* Center Column: Unified Call View */}
           <div className="flex-1 overflow-y-auto p-6">
             <CentralCallView
