@@ -1,6 +1,9 @@
 name: Keep Render Services Alive
 
 on:
+  push:
+    # Run on push to make workflow visible immediately
+    branches: [feat/exotel-deepgram-bridge, main]
   schedule:
     # Run every 10 minutes to keep services awake
     # Cron format: minute hour day month day-of-week
