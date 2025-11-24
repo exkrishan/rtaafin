@@ -72,7 +72,8 @@ class AsrWorker {
   private server: ReturnType<typeof createServer>;
   private subscriptions: any[] = [];
   private bufferTimers: Map<string, NodeJS.Timeout> = new Map(); // Track timers per buffer for cleanup
-  private endedCalls: Set<string> = new Set(); // Track ended calls to stop processing/logging
+  private endedCalls: Map<string, number> = new Map(); // Track ended calls with timestamp for grace period
+  private ENDED_CALL_GRACE_PERIOD_MS = 10000; // 10 seconds grace period for late-arriving audio
   private bufferManager: BufferManager; // Comprehensive buffer lifecycle management
   private connectionHealthMonitor: ConnectionHealthMonitor; // Connection health monitoring
   private circuitBreaker: ElevenLabsCircuitBreaker; // Circuit breaker for ElevenLabs API
@@ -393,14 +394,29 @@ class AsrWorker {
       msg_preview: JSON.stringify(msg).substring(0, 300),
     });
     
-    // CRITICAL: Stop processing if call has ended - log this so we know why it's skipped
+    // CRITICAL: Stop processing if call has ended (with grace period for late-arriving audio)
     if (interactionId && this.endedCalls.has(interactionId)) {
-      console.info(`[ASRWorker] ⏸️ Skipping audio - call has ended for ${interactionId}`, {
-        interaction_id: interactionId,
-        seq,
-        ended_calls_count: this.endedCalls.size,
-      });
-      return;
+      const endedAt = this.endedCalls.get(interactionId)!;
+      const timeSinceEnded = Date.now() - endedAt;
+      
+      if (timeSinceEnded > this.ENDED_CALL_GRACE_PERIOD_MS) {
+        // Call ended more than grace period ago - definitely skip
+        console.info(`[ASRWorker] ⏸️ Skipping audio - call ended ${timeSinceEnded}ms ago (grace period expired)`, {
+          interaction_id: interactionId,
+          seq,
+          ended_calls_count: this.endedCalls.size,
+          grace_period_ms: this.ENDED_CALL_GRACE_PERIOD_MS,
+        });
+        return;
+      } else {
+        // Within grace period - allow processing (late-arriving audio)
+        console.debug(`[ASRWorker] ⚠️ Processing late-arriving audio (${timeSinceEnded}ms after call_end, within ${this.ENDED_CALL_GRACE_PERIOD_MS}ms grace period)`, {
+          interaction_id: interactionId,
+          seq,
+          timeSinceEnded,
+        });
+        // Continue processing - don't return
+      }
     }
     
     // Check Exotel Bridge feature flag - only required for Deepgram provider
@@ -978,12 +994,14 @@ class AsrWorker {
         return;
       }
 
-      // CRITICAL: Mark call as ended to stop all processing and logging
-      this.endedCalls.add(interactionId);
-      console.info('[ASRWorker] Call end event received - stopping all processing and logging', {
+      // CRITICAL: Mark call as ended with timestamp (for grace period)
+      this.endedCalls.set(interactionId, Date.now());
+      console.info('[ASRWorker] Call end event received - will stop processing after grace period', {
         interaction_id: interactionId,
         reason: msg.reason,
         call_sid: msg.call_sid,
+        grace_period_ms: this.ENDED_CALL_GRACE_PERIOD_MS,
+        note: 'Late-arriving audio frames will be processed for 10 seconds after call_end',
       });
 
       // Use BufferManager to handle call end (includes comprehensive logging)
@@ -1047,6 +1065,13 @@ class AsrWorker {
     setInterval(() => {
       const now = Date.now();
       const staleBuffers: string[] = [];
+
+      // Clean up old ended calls (older than 1 minute)
+      for (const [interactionId, endedAt] of this.endedCalls.entries()) {
+        if (now - endedAt > 60000) { // 1 minute
+          this.endedCalls.delete(interactionId);
+        }
+      }
 
       for (const [interactionId, buffer] of this.buffers.entries()) {
         const timeSinceLastChunk = now - buffer.lastChunkReceived;
@@ -1118,12 +1143,20 @@ class AsrWorker {
         return;
       }
 
-      // CRITICAL: Stop processing if call has ended - no logs, no processing
+      // CRITICAL: Stop processing if call has ended (with grace period check)
       if (this.endedCalls.has(interactionId)) {
-        // Silently skip - call has ended, clear timer and stop
-        clearInterval(timer);
-        this.bufferTimers.delete(interactionId);
-        return;
+        const endedAt = this.endedCalls.get(interactionId)!;
+        const timeSinceEnded = Date.now() - endedAt;
+        
+        if (timeSinceEnded > this.ENDED_CALL_GRACE_PERIOD_MS) {
+          // Grace period expired - clear timer and stop
+          clearInterval(timer);
+          this.bufferTimers.delete(interactionId);
+          return;
+        } else {
+          // Within grace period - allow processing late-arriving audio
+          // Continue processing
+        }
       }
 
       // Skip if already processing or no chunks
@@ -1325,10 +1358,21 @@ class AsrWorker {
   }
 
   private async processBuffer(buffer: AudioBuffer, isTimeoutRisk: boolean = false): Promise<void> {
-    // CRITICAL: Stop processing if call has ended - no logs, no processing
+    // CRITICAL: Stop processing if call has ended (with grace period check)
     if (this.endedCalls.has(buffer.interactionId)) {
-      // Silently skip - call has ended, don't process or log anything
-      return;
+      const endedAt = this.endedCalls.get(buffer.interactionId)!;
+      const timeSinceEnded = Date.now() - endedAt;
+      
+      if (timeSinceEnded > this.ENDED_CALL_GRACE_PERIOD_MS) {
+        // Grace period expired - skip processing
+        return;
+      } else {
+        // Within grace period - allow processing late-arriving audio
+        console.debug(`[ASRWorker] Processing buffer for ended call (${timeSinceEnded}ms after call_end, within grace period)`, {
+          interaction_id: buffer.interactionId,
+        });
+        // Continue processing
+      }
     }
 
     if (buffer.chunks.length === 0) {
