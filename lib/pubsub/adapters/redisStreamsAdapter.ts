@@ -376,24 +376,18 @@ export class RedisStreamsAdapter implements PubSubAdapter {
     
     try {
       // Try to create consumer group starting from 0 (beginning of stream)
+      // This ensures we catch all messages from the start if this is a new group
       await this.redis.xgroup('CREATE', topic, groupName, '0', 'MKSTREAM');
       console.info(`[RedisStreamsAdapter] ✅ Created new consumer group ${groupName} for ${topic} from position 0`);
     } catch (error: unknown) {
-      // BUSYGROUP means group already exists - reset its position to 0
+      // BUSYGROUP means group already exists - DON'T reset it (would cause duplicates)
       const errorMessage = error instanceof Error ? error.message : String(error);
       console.info(`[RedisStreamsAdapter] ℹ️ Consumer group creation result for ${topic}: ${errorMessage}`);
       
       if (errorMessage.includes('BUSYGROUP')) {
-        console.info(`[RedisStreamsAdapter] 🔄 Consumer group ${groupName} already exists for ${topic}, resetting position to 0...`);
-        // Group exists - reset its read position to 0 to catch all messages
-        try {
-          await this.redis.xgroup('SETID', topic, groupName, '0');
-          console.info(`[RedisStreamsAdapter] ✅ Reset existing consumer group ${groupName} for ${topic} to position 0`);
-        } catch (setIdError: unknown) {
-          const setIdErrorMessage = setIdError instanceof Error ? setIdError.message : String(setIdError);
-          console.warn(`[RedisStreamsAdapter] ⚠️ Failed to reset consumer group position for ${topic}: ${setIdErrorMessage}`);
-          // Continue anyway - we'll handle pending messages in startConsumer
-        }
+        // CRITICAL FIX: Don't reset existing consumer groups - that causes duplicates!
+        // The first read with '0' will catch any undelivered messages, then we switch to '>'
+        console.info(`[RedisStreamsAdapter] ℹ️ Consumer group ${groupName} already exists for ${topic}. Will read undelivered messages on first read, then switch to new messages only.`);
         return;
       }
       // Other errors might mean stream doesn't exist yet, try without MKSTREAM
@@ -403,14 +397,8 @@ export class RedisStreamsAdapter implements PubSubAdapter {
       } catch (err2: unknown) {
         const err2Message = err2 instanceof Error ? err2.message : String(err2);
         if (err2Message.includes('BUSYGROUP')) {
-          // Group exists - reset its read position to 0
-          try {
-            await this.redis.xgroup('SETID', topic, groupName, '0');
-            console.info(`[RedisStreamsAdapter] ✅ Reset existing consumer group ${groupName} for ${topic} to position 0`);
-          } catch (setIdError2: unknown) {
-            const setIdError2Message = setIdError2 instanceof Error ? setIdError2.message : String(setIdError2);
-            console.warn(`[RedisStreamsAdapter] ⚠️ Failed to reset consumer group position for ${topic}: ${setIdError2Message}`);
-          }
+          // Group exists - don't reset it, just continue
+          console.info(`[RedisStreamsAdapter] ℹ️ Consumer group ${groupName} already exists for ${topic}. Will read undelivered messages on first read.`);
           return;
         }
         // If stream doesn't exist, it will be created on first XADD
@@ -609,21 +597,21 @@ export class RedisStreamsAdapter implements PubSubAdapter {
           }
           
           // Determine read position:
-          // - First read: Use '0' to read from beginning (catch any existing messages)
-          //   Note: With XREADGROUP, '0' reads messages that haven't been delivered to the group yet
-          //   This works for both new and existing consumer groups
-          // - Subsequent reads: ALWAYS use '>' to read new messages only
+          // CRITICAL FIX: Properly handle reading from beginning vs new messages
+          // - First read: Use '0' to read ALL undelivered messages (messages that haven't been delivered to this consumer group)
+          //   This catches messages published before subscription, even if consumer group already existed
+          // - Subsequent reads: Use '>' to read only NEW messages (messages published after last read)
           //   CRITICAL: Do NOT use lastReadId - once a message is ACKed, reading from its ID returns nothing
           //   This causes the consumer to get stuck and never read new messages
           let readPosition: string;
           if (subscription.firstRead) {
-            // First read: start from beginning to catch any existing messages
-            // Using '0' with XREADGROUP will read all messages that haven't been delivered to this consumer group
-            // This works even if consumer group exists - it reads undelivered messages from the beginning
+            // First read: use '0' to catch ALL undelivered messages from the beginning
+            // This works even if consumer group already exists - it reads all messages that haven't been
+            // delivered to this consumer group, regardless of when they were published
             readPosition = '0';
-            console.info(`[RedisStreamsAdapter] 🔍 First read for ${topic}, reading from beginning (position: 0) to catch existing undelivered messages`);
+            console.info(`[RedisStreamsAdapter] 🔍 First read for ${topic}, reading all undelivered messages (position: 0) to catch existing messages`);
           } else {
-            // After first read, ALWAYS use '>' to read new messages
+            // After first read, ALWAYS use '>' to read new messages only
             // Do NOT use lastReadId - that causes the consumer to get stuck
             // With Redis Streams consumer groups, '>' reads messages that haven't been delivered to this consumer
             readPosition = '>';

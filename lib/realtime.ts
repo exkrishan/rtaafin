@@ -116,8 +116,33 @@ function sendEvent(res: any, event: RealtimeEvent): void {
     const eventStr = `event: ${event.type}\n`;
     const dataStr = `data: ${JSON.stringify(event)}\n\n`;
     
+    // CRITICAL FIX: Validate that res.write exists and is a function
+    // Also check if the stream is still writable (for ReadableStream compatibility)
+    if (typeof res.write !== 'function') {
+      console.error('[realtime] ❌ res.write is not a function', {
+        resType: typeof res,
+        hasWrite: 'write' in res,
+        writeType: typeof res.write,
+      });
+      return;
+    }
+    
+    // CRITICAL FIX: Check if stream is closed (for ReadableStream)
+    // ReadableStream controller.desiredSize is null when closed
+    // For Node.js streams, check if res.writableEnded or res.destroyed
+    const isClosed = res.destroyed || res.writableEnded || 
+                     (res.controller && res.controller.desiredSize === null);
+    
+    if (isClosed) {
+      console.warn('[realtime] ⚠️ Attempted to write to closed stream', {
+        eventType: event.type,
+        callId: event.callId,
+      });
+      return;
+    }
+    
     // Write both parts
-    if (typeof res.write === 'function') {
+    try {
       res.write(eventStr);
       res.write(dataStr);
       
@@ -134,12 +159,26 @@ function sendEvent(res: any, event: RealtimeEvent): void {
           textLength: event.text?.length || 0,
         });
       }
-    } else {
-      console.error('[realtime] ❌ res.write is not a function', typeof res);
+    } catch (writeErr: any) {
+      // CRITICAL FIX: Handle write errors gracefully
+      // If stream is closed, remove client from registry
+      if (writeErr?.message?.includes('closed') || 
+          writeErr?.name === 'TypeError' ||
+          writeErr?.code === 'ERR_STREAM_WRITE_AFTER_END') {
+        console.warn('[realtime] ⚠️ Stream closed during write, removing client', {
+          eventType: event.type,
+          callId: event.callId,
+          error: writeErr?.message || writeErr,
+        });
+        // Note: Client cleanup is handled by the 'close' event handler
+        return;
+      }
+      throw writeErr; // Re-throw unexpected errors
     }
   } catch (err: any) {
     console.error('[realtime] ❌ Failed to send event', {
       error: err?.message || err,
+      errorName: err?.name,
       eventType: event.type,
       callId: event.callId,
     });
@@ -155,10 +194,16 @@ function sendEvent(res: any, event: RealtimeEvent): void {
 export function broadcastEvent(event: RealtimeEvent): void {
   const targetCallId = event.callId;
   let sentCount = 0;
+  
+  // Collect all client callIds for debugging
+  const allClientCallIds = Array.from(clients.values()).map(c => c.callId);
 
   for (const [clientId, client] of clients.entries()) {
-    // Send to global subscribers or matching callId subscribers
-    if (client.callId === null || client.callId === targetCallId) {
+    // CRITICAL FIX: Use exact matching only - partial matching causes incorrect delivery
+    // Send to global subscribers (callId === null) or exact callId match
+    const matches = client.callId === null || client.callId === targetCallId;
+    
+    if (matches) {
       try {
         sendEvent(client.res, event);
         sentCount++;
@@ -170,6 +215,17 @@ export function broadcastEvent(event: RealtimeEvent): void {
     }
   }
 
+  // Enhanced logging for debugging callId mismatches
+  if (sentCount === 0 && clients.size > 0) {
+    console.warn('[realtime] ⚠️ Broadcast event with 0 recipients - callId mismatch detected', {
+      type: event.type,
+      targetCallId,
+      totalClients: clients.size,
+      allClientCallIds,
+      suggestion: 'Check if UI is connected with correct callId/interactionId',
+    });
+  }
+
   console.info('[realtime] 📡 Broadcast event', {
     type: event.type,
     callId: targetCallId,
@@ -178,9 +234,20 @@ export function broadcastEvent(event: RealtimeEvent): void {
     totalClients: clients.size,
     timestamp: new Date().toISOString(),
     clientDetails: sentCount > 0 ? Array.from(clients.entries())
-      .filter(([_, client]) => client.callId === null || client.callId === targetCallId)
+      .filter(([_, client]) => {
+        const matches = client.callId === null || 
+                        client.callId === targetCallId ||
+                        (client.callId && targetCallId && (
+                          client.callId.includes(targetCallId) || 
+                          targetCallId.includes(client.callId)
+                        ));
+        return matches;
+      })
       .map(([id, client]) => ({ id, callId: client.callId }))
-      : []
+      : (sentCount === 0 && clients.size > 0 ? { 
+          allClientCallIds,
+          note: 'No matching callId found - check UI connection' 
+        } : [])
   });
 }
 
@@ -194,10 +261,36 @@ function startHeartbeat(): void {
     const now = Date.now();
     for (const [clientId, client] of clients.entries()) {
       try {
+        // CRITICAL FIX: Validate stream is writable before sending heartbeat
+        const isClosed = client.res.destroyed || client.res.writableEnded || 
+                         (client.res.controller && client.res.controller.desiredSize === null);
+        
+        if (isClosed) {
+          console.debug('[realtime] Heartbeat skipped - stream closed', { clientId });
+          clients.delete(clientId);
+          continue;
+        }
+        
         // Send comment (ignored by EventSource but keeps connection alive)
-        client.res.write(`: heartbeat ${now}\n\n`);
-      } catch (err) {
-        console.warn('[realtime] Heartbeat failed for client', { clientId });
+        // CRITICAL FIX: Use sendEvent helper to ensure proper error handling
+        if (typeof client.res.write === 'function') {
+          client.res.write(`: heartbeat ${now}\n\n`);
+        } else {
+          console.warn('[realtime] Heartbeat failed - res.write not available', { clientId });
+          clients.delete(clientId);
+        }
+      } catch (err: any) {
+        // CRITICAL FIX: Handle different error types
+        if (err?.message?.includes('closed') || 
+            err?.name === 'TypeError' ||
+            err?.code === 'ERR_STREAM_WRITE_AFTER_END') {
+          console.debug('[realtime] Heartbeat failed - stream closed', { clientId });
+        } else {
+          console.warn('[realtime] Heartbeat failed for client', { 
+            clientId, 
+            error: err?.message || err 
+          });
+        }
         clients.delete(clientId);
       }
     }

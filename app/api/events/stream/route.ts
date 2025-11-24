@@ -37,26 +37,62 @@ export async function GET(req: Request) {
   
   const stream = new ReadableStream({
     start(controller) {
-      // Create a mock response object that writes to the controller
+      // CRITICAL FIX: Create a mock response object that properly writes to ReadableStream
+      // The write() method must handle SSE format correctly and ensure data is properly encoded
+      // Store controller reference so realtime.ts can check if stream is closed
       const mockRes = {
+        controller, // CRITICAL FIX: Expose controller for closed-state checks
         setHeader: () => {},
         flushHeaders: () => {},
         write: (chunk: string) => {
           try {
-            const encoded = typeof chunk === 'string' 
-              ? new TextEncoder().encode(chunk)
-              : chunk;
-            controller.enqueue(encoded);
+            // CRITICAL FIX: Check if stream is closed before writing
+            if (controller.desiredSize === null) {
+              // Stream is closed, don't write
+              return;
+            }
+            
+            // CRITICAL FIX: Ensure chunk is properly encoded as UTF-8
+            // ReadableStream expects Uint8Array, so we need to encode strings
+            if (typeof chunk === 'string') {
+              const encoded = new TextEncoder().encode(chunk);
+              controller.enqueue(encoded);
+            } else if (chunk instanceof Uint8Array) {
+              controller.enqueue(chunk);
+            } else {
+              // Fallback: convert to string then encode
+              const encoded = new TextEncoder().encode(String(chunk));
+              controller.enqueue(encoded);
+            }
+          } catch (err: any) {
+            // Stream might be closed, log but don't throw
+            if (err?.name !== 'TypeError' || !err?.message?.includes('closed')) {
+              console.warn('[sse-endpoint] Write error (stream may be closed)', {
+                error: err?.message || err,
+                chunkType: typeof chunk,
+                chunkLength: typeof chunk === 'string' ? chunk.length : 'N/A',
+              });
+            }
+          }
+        },
+        flush: () => {
+          // CRITICAL FIX: Add flush method for compatibility with Node.js streams
+          // ReadableStream doesn't need explicit flush, but some code may call it
+          try {
+            // No-op for ReadableStream, but ensure controller is still open
+            if (controller.desiredSize === null) {
+              // Stream is closed
+              return;
+            }
           } catch (err) {
-            // Stream might be closed, ignore
-            console.warn('[sse-endpoint] Write error (stream may be closed)', err);
+            // Ignore flush errors
           }
         },
         end: () => {
           try {
             controller.close();
           } catch (err) {
-            // Already closed
+            // Already closed - ignore
           }
         },
       };

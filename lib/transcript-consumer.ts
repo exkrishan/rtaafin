@@ -29,12 +29,29 @@ interface ActiveSubscription {
   transcriptCount: number;
 }
 
+interface FailedTranscript {
+  interaction_id: string;
+  tenant_id: string;
+  seq: number;
+  type: 'partial' | 'final';
+  text: string;
+  confidence?: number;
+  timestamp_ms: number;
+  callId: string;
+  error: string;
+  failedAt: number;
+  retryCount: number;
+}
+
 class TranscriptConsumer {
   private pubsub: ReturnType<typeof createPubSubAdapterFromEnv>;
   private subscriptions: Map<string, ActiveSubscription> = new Map();
   private isRunning: boolean = false;
   private baseUrl: string;
   private nextJsApiUrl: string;
+  private deadLetterQueue: FailedTranscript[] = []; // In-memory dead-letter queue
+  private maxDeadLetterSize: number = 1000; // Max failed transcripts to keep in memory
+  private retryInterval: NodeJS.Timeout | null = null;
 
   constructor() {
     this.pubsub = createPubSubAdapterFromEnv();
@@ -350,8 +367,153 @@ class TranscriptConsumer {
         apiUrl: this.nextJsApiUrl,
         suggestion: 'Check if ingest API is accessible and baseUrl is correctly configured',
       });
+      
+      // P2 FIX: Add to dead-letter queue instead of silently dropping
+      this.addToDeadLetterQueue({
+        interaction_id: interactionId,
+        tenant_id: msg.tenant_id,
+        seq: msg.seq,
+        type: msg.type,
+        text: text,
+        confidence: msg.confidence,
+        timestamp_ms: msg.timestamp_ms,
+        callId,
+        error: lastError.message || String(lastError),
+        failedAt: Date.now(),
+        retryCount: MAX_RETRIES,
+      });
     }
     // Don't throw - continue processing other transcripts
+  }
+
+  /**
+   * P2 FIX: Add failed transcript to dead-letter queue
+   */
+  private addToDeadLetterQueue(failed: FailedTranscript): void {
+    // Prevent queue from growing too large
+    if (this.deadLetterQueue.length >= this.maxDeadLetterSize) {
+      // Remove oldest entries (FIFO)
+      const removed = this.deadLetterQueue.splice(0, 10);
+      console.warn('[TranscriptConsumer] Dead-letter queue full, removed oldest entries', {
+        removedCount: removed.length,
+        queueSize: this.deadLetterQueue.length,
+      });
+    }
+    
+    this.deadLetterQueue.push(failed);
+    console.warn('[TranscriptConsumer] Added to dead-letter queue', {
+      interaction_id: failed.interaction_id,
+      seq: failed.seq,
+      queueSize: this.deadLetterQueue.length,
+      error: failed.error,
+    });
+    
+    // Start retry processor if not already running
+    if (!this.retryInterval) {
+      this.startDeadLetterRetryProcessor();
+    }
+  }
+
+  /**
+   * P2 FIX: Retry failed transcripts from dead-letter queue
+   */
+  private startDeadLetterRetryProcessor(): void {
+    if (this.retryInterval) {
+      return; // Already running
+    }
+    
+    console.info('[TranscriptConsumer] Starting dead-letter queue retry processor');
+    
+    // Retry every 30 seconds
+    this.retryInterval = setInterval(async () => {
+      if (this.deadLetterQueue.length === 0) {
+        // Queue empty, stop retry processor
+        if (this.retryInterval) {
+          clearInterval(this.retryInterval);
+          this.retryInterval = null;
+        }
+        return;
+      }
+      
+      // Process up to 10 failed transcripts per retry cycle
+      const toRetry = this.deadLetterQueue.splice(0, 10);
+      console.info('[TranscriptConsumer] Retrying failed transcripts', {
+        count: toRetry.length,
+        remainingInQueue: this.deadLetterQueue.length,
+      });
+      
+      for (const failed of toRetry) {
+        // Only retry if retry count is below threshold (max 5 retries total)
+        if (failed.retryCount >= 5) {
+          console.error('[TranscriptConsumer] Max retries exceeded for dead-letter transcript', {
+            interaction_id: failed.interaction_id,
+            seq: failed.seq,
+            retryCount: failed.retryCount,
+          });
+          continue; // Skip this one, it's permanently failed
+        }
+        
+        try {
+          // Try to forward again
+          const response = await fetch(this.nextJsApiUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-tenant-id': failed.tenant_id || 'default',
+            },
+            body: JSON.stringify({
+              callId: failed.callId,
+              seq: failed.seq,
+              ts: new Date(failed.timestamp_ms).toISOString(),
+              text: failed.text,
+            }),
+            signal: AbortSignal.timeout(10000),
+          });
+          
+          if (response.ok) {
+            console.info('[TranscriptConsumer] ✅ Successfully retried dead-letter transcript', {
+              interaction_id: failed.interaction_id,
+              seq: failed.seq,
+            });
+            // Success - don't add back to queue
+          } else {
+            // Still failing - add back with incremented retry count
+            failed.retryCount++;
+            this.deadLetterQueue.push(failed);
+            console.warn('[TranscriptConsumer] Dead-letter retry failed, will retry again', {
+              interaction_id: failed.interaction_id,
+              seq: failed.seq,
+              retryCount: failed.retryCount,
+              status: response.status,
+            });
+          }
+        } catch (error: any) {
+          // Network error - add back with incremented retry count
+          failed.retryCount++;
+          this.deadLetterQueue.push(failed);
+          console.warn('[TranscriptConsumer] Dead-letter retry error, will retry again', {
+            interaction_id: failed.interaction_id,
+            seq: failed.seq,
+            retryCount: failed.retryCount,
+            error: error.message || String(error),
+          });
+        }
+      }
+    }, 30000); // Retry every 30 seconds
+  }
+
+  /**
+   * P2 FIX: Get dead-letter queue status
+   */
+  getDeadLetterQueueStatus(): { size: number; oldestFailedAt: number | null } {
+    const oldest = this.deadLetterQueue.length > 0 
+      ? Math.min(...this.deadLetterQueue.map(f => f.failedAt))
+      : null;
+    
+    return {
+      size: this.deadLetterQueue.length,
+      oldestFailedAt: oldest,
+    };
   }
 
   /**
@@ -367,7 +529,8 @@ class TranscriptConsumer {
     // Run discovery immediately
     await this.discoverAndSubscribeToNewStreams();
 
-    // Start periodic discovery (every 30 seconds to reduce log spam)
+    // Start periodic discovery (every 5 seconds for faster real-time discovery)
+    // CRITICAL FIX: Reduced from 30s to 5s to catch new transcript streams faster
     this.discoveryInterval = setInterval(async () => {
       if (!this.isRunning) {
         if (this.discoveryInterval) {
@@ -382,7 +545,7 @@ class TranscriptConsumer {
       } catch (error: any) {
         console.error('[TranscriptConsumer] Stream discovery error:', error);
       }
-    }, 30000); // Changed from 5000ms (5s) to 30000ms (30s) to reduce log spam
+    }, 5000); // CRITICAL FIX: Reduced from 30000ms (30s) to 5000ms (5s) for faster discovery
 
     console.info('[TranscriptConsumer] Stream discovery started (auto-subscribe mode)');
   }
@@ -527,6 +690,13 @@ class TranscriptConsumer {
     console.info('[TranscriptConsumer] Stopping transcript consumer...');
     this.isRunning = false;
 
+    // P2 FIX: Stop dead-letter retry processor
+    if (this.retryInterval) {
+      clearInterval(this.retryInterval);
+      this.retryInterval = null;
+      console.info('[TranscriptConsumer] Stopped dead-letter retry processor');
+    }
+
     // Stop discovery interval
     if (this.discoveryInterval) {
       clearInterval(this.discoveryInterval);
@@ -550,16 +720,99 @@ class TranscriptConsumer {
   }
 
   /**
-   * Get status information
+   * P2 FIX: Validate Redis connection
    */
+  async validateRedisConnection(): Promise<{ accessible: boolean; error?: string }> {
+    try {
+      const redisAdapter = this.pubsub as any;
+      if (!redisAdapter.redis) {
+        return { accessible: false, error: 'Redis client not initialized' };
+      }
+      
+      const redis = redisAdapter.redis;
+      
+      // Check if Redis is connected
+      if (redis.status !== 'ready' && redis.status !== 'connecting') {
+        return { accessible: false, error: `Redis status: ${redis.status}` };
+      }
+      
+      // Try a simple PING command
+      const result = await redis.ping();
+      if (result === 'PONG') {
+        return { accessible: true };
+      }
+      
+      return { accessible: false, error: 'PING did not return PONG' };
+    } catch (error: any) {
+      return { accessible: false, error: error.message || String(error) };
+    }
+  }
+
+  /**
+   * P2 FIX: Validate API endpoint is reachable
+   */
+  async validateApiConnection(): Promise<{ accessible: boolean; error?: string; statusCode?: number }> {
+    try {
+      // Try to reach the health endpoint or a simple GET request
+      const healthUrl = `${this.baseUrl}/api/health`;
+      const response = await fetch(healthUrl, {
+        method: 'GET',
+        signal: AbortSignal.timeout(5000), // 5 second timeout
+      });
+      
+      return {
+        accessible: response.ok,
+        statusCode: response.status,
+        error: response.ok ? undefined : `HTTP ${response.status}`,
+      };
+    } catch (error: any) {
+      return {
+        accessible: false,
+        error: error.message || String(error),
+      };
+    }
+  }
+
+  /**
+   * P2 FIX: Get comprehensive health status including connection validation
+   */
+  async getHealthStatus(): Promise<{
+    isRunning: boolean;
+    subscriptionsCount: number;
+    redis: { accessible: boolean; error?: string };
+    api: { accessible: boolean; error?: string; statusCode?: number };
+    deadLetterQueue: { size: number; oldestFailedAt: number | null };
+    baseUrl: string;
+    apiUrl: string;
+  }> {
+    const [redisStatus, apiStatus] = await Promise.all([
+      this.validateRedisConnection(),
+      this.validateApiConnection(),
+    ]);
+    
+    const deadLetterStatus = this.getDeadLetterQueueStatus();
+    
+    return {
+      isRunning: this.isRunning,
+      subscriptionsCount: this.subscriptions.size,
+      redis: redisStatus,
+      api: apiStatus,
+      deadLetterQueue: deadLetterStatus,
+      baseUrl: this.baseUrl,
+      apiUrl: this.nextJsApiUrl,
+    };
+  }
+
   getStatus(): {
     isRunning: boolean;
-    subscriptionCount: number;
+    subscriptionsCount: number;
     subscriptions: Array<{
       interactionId: string;
       transcriptCount: number;
       createdAt: Date;
     }>;
+    hasDiscoveryInterval: boolean;
+    deadLetterQueue: { size: number; oldestFailedAt: number | null };
   } {
     // Log status check for debugging
     if (!this.isRunning) {
@@ -569,6 +822,9 @@ class TranscriptConsumer {
         hasDiscoveryInterval: !!this.discoveryInterval,
       });
     }
+    
+    const deadLetterStatus = this.getDeadLetterQueueStatus();
+    
     return {
       isRunning: this.isRunning,
       subscriptionCount: this.subscriptions.size,
@@ -577,6 +833,8 @@ class TranscriptConsumer {
         transcriptCount: sub.transcriptCount,
         createdAt: sub.createdAt,
       })),
+      hasDiscoveryInterval: !!this.discoveryInterval,
+      deadLetterQueue: deadLetterStatus,
     };
   }
 }
