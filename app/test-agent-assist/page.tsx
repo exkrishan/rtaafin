@@ -108,6 +108,34 @@ export default function TestAgentAssistPage() {
     }
   }, [callId]);
 
+  // Subscribe to transcripts when callId changes
+  // CRITICAL: This ensures the Transcript Consumer subscribes to Redis transcript streams
+  // Without this, transcripts from ASR Worker won't be forwarded to the ingest API
+  useEffect(() => {
+    if (!callId || callId.trim().length === 0) {
+      return;
+    }
+
+    console.log('[Test] Subscribing to transcripts for:', callId);
+    // Subscribe to transcripts for this interaction ID
+    fetch('/api/transcripts/subscribe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ interactionId: callId }),
+    })
+      .then(res => res.json())
+      .then(data => {
+        if (data.ok) {
+          console.info('[Test] ✅ Subscribed to transcripts', { interactionId: callId });
+        } else {
+          console.error('[Test] ❌ Failed to subscribe to transcripts', data);
+        }
+      })
+      .catch(err => {
+        console.error('[Test] ❌ Error subscribing to transcripts:', err);
+      });
+  }, [callId]);
+
   // Handle KB search
   const handleKBSearch = async (query: string, context: { interactionId: string; recentUtterance?: string }): Promise<KBArticle[]> => {
     try {
