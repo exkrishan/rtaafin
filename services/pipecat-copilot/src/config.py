@@ -40,7 +40,8 @@ class Settings(BaseSettings):
     knowmax_base_url: Optional[str] = Field(default=None, description="Knowmax base URL")
 
     # Server Configuration
-    port: int = Field(default=5000, description="Server port")
+    # Render automatically sets PORT environment variable
+    port: int = Field(default=5000, description="Server port (reads from PORT env var)")
     host: str = Field(default="0.0.0.0", description="Server host")
     log_level: str = Field(default="INFO", description="Logging level")
 
