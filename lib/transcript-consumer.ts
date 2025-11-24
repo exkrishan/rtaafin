@@ -40,18 +40,35 @@ class TranscriptConsumer {
     this.pubsub = createPubSubAdapterFromEnv();
     
     // Determine base URL for internal API calls
-    // In production (Render), use the service's own URL
-    // In development, use localhost
+    // CRITICAL FIX: In production (Render), must use the service's own URL
+    // Priority order:
+    // 1. RENDER_SERVICE_URL (Render-specific, most reliable)
+    // 2. RENDER_EXTERNAL_URL (Render external URL)
+    // 3. NEXT_PUBLIC_BASE_URL (explicitly set)
+    // 4. VERCEL_URL (Vercel deployment)
+    // 5. Localhost (development only)
     const port = process.env.PORT || process.env.NEXT_PUBLIC_PORT || '3000';
     
-    // For internal calls, prefer localhost or service URL
-    if (process.env.NEXT_PUBLIC_BASE_URL) {
+    if (process.env.RENDER_SERVICE_URL) {
+      // Render service URL (e.g., https://frontend-8jdd.onrender.com)
+      this.baseUrl = process.env.RENDER_SERVICE_URL;
+      console.info('[TranscriptConsumer] Using RENDER_SERVICE_URL:', this.baseUrl);
+    } else if (process.env.RENDER_EXTERNAL_URL) {
+      // Render external URL (fallback)
+      this.baseUrl = process.env.RENDER_EXTERNAL_URL;
+      console.info('[TranscriptConsumer] Using RENDER_EXTERNAL_URL:', this.baseUrl);
+    } else if (process.env.NEXT_PUBLIC_BASE_URL) {
+      // Explicitly configured base URL
       this.baseUrl = process.env.NEXT_PUBLIC_BASE_URL;
+      console.info('[TranscriptConsumer] Using NEXT_PUBLIC_BASE_URL:', this.baseUrl);
     } else if (process.env.VERCEL_URL) {
+      // Vercel deployment
       this.baseUrl = `https://${process.env.VERCEL_URL}`;
+      console.info('[TranscriptConsumer] Using VERCEL_URL:', this.baseUrl);
     } else {
-      // Default to localhost for development
+      // Development: use localhost
       this.baseUrl = `http://localhost:${port}`;
+      console.warn('[TranscriptConsumer] ⚠️ Using localhost (development mode). Set RENDER_SERVICE_URL for production!');
     }
     
     this.nextJsApiUrl = `${this.baseUrl}/api/calls/ingest-transcript`;
@@ -60,7 +77,8 @@ class TranscriptConsumer {
       baseUrl: this.baseUrl,
       apiUrl: this.nextJsApiUrl,
       pubsubAdapter: process.env.PUBSUB_ADAPTER || 'redis_streams',
-      port,
+      environment: process.env.NODE_ENV || 'development',
+      note: 'Transcripts will be forwarded to this API URL',
     });
   }
 
