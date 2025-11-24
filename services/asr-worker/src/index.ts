@@ -1231,10 +1231,15 @@ class AsrWorker {
       const shouldProcess = hasMinimumChunkSize || exceedsMaxChunkSize || isTimeoutRisk || hasTimedOut || isVeryLongTimeout;
 
       // Minimum chunk for send: provider-specific minimum normally, timeout fallback minimum if timeout risk
-      // CRITICAL: For ElevenLabs, NEVER allow chunks smaller than 2000ms (2 seconds) per official documentation
+      // ElevenLabs: Require 2000ms for quality, but allow 1900ms+ after timeout to prevent deadlock
+      // Files are 1.9s, so we allow 1900ms after 5s wait as a compromise
       // For Deepgram, can allow smaller chunks on timeout to prevent deadlock
+      const CLOSE_ENOUGH_MS_MIN = 1900; // Allow 1900ms if we're very close (files are 1.9s)
+      const CLOSE_ENOUGH_TIMEOUT_MS_MIN = 5000; // Wait 5s before allowing 1900ms
       const minChunkForSend = isElevenLabs
-        ? MIN_CHUNK_DURATION_MS // Always require 2000ms for ElevenLabs - NEVER send less, even on timeout
+        ? (timeSinceLastContinuousSend >= CLOSE_ENOUGH_TIMEOUT_MS_MIN && currentAudioDurationMs >= CLOSE_ENOUGH_MS_MIN)
+          ? CLOSE_ENOUGH_MS_MIN // Allow 1900ms after 5s wait
+          : MIN_CHUNK_DURATION_MS // Normal: require 2000ms
         : (isTimeoutRisk 
             ? TIMEOUT_FALLBACK_MIN_MS 
             : (hasTimedOut && currentAudioDurationMs >= 200) // Allow 200ms on normal timeout (3s) to prevent deadlock
@@ -1243,11 +1248,14 @@ class AsrWorker {
                 ? 200
                 : MIN_CHUNK_DURATION_MS);
       
-      // CRITICAL FIX: For ElevenLabs, override shouldProcess to FALSE if we don't have minimum chunk size
-      // This prevents sending chunks < 2000ms even in timeout scenarios
-      // Better to wait longer than send suboptimal chunks that won't transcribe properly
+      // CRITICAL FIX: For ElevenLabs, require 2000ms minimum, but allow 1900ms+ after timeout to prevent deadlock
+      // Testing showed: 100ms = random sounds, 500ms = poor quality, 2000ms = works properly
+      // Files are 1.9s, so we allow 1900ms after 5s wait as a compromise
+      const CLOSE_ENOUGH_MS_TIMER = 1900; // Allow 1900ms if we're very close (files are 1.9s)
+      const CLOSE_ENOUGH_TIMEOUT_MS_TIMER = 5000; // Wait 5s before allowing 1900ms
       const finalShouldProcess = isElevenLabs
-        ? (shouldProcess && currentAudioDurationMs >= MIN_CHUNK_DURATION_MS) // For ElevenLabs, MUST have 2000ms minimum
+        ? (shouldProcess && (currentAudioDurationMs >= MIN_CHUNK_DURATION_MS || 
+            (timeSinceLastContinuousSend >= CLOSE_ENOUGH_TIMEOUT_MS_TIMER && currentAudioDurationMs >= CLOSE_ENOUGH_MS_TIMER))) // Allow 1900ms after 5s wait
         : shouldProcess; // For Deepgram, use original logic
       
       // DIAGNOSTIC: Calculate accumulation rate to detect slow audio arrival
@@ -1429,8 +1437,12 @@ class AsrWorker {
         const VERY_LONG_TIMEOUT_MS = isElevenLabs ? 15000 : 10000; // 15s for ElevenLabs to accumulate 2s, 10s for Deepgram
         
         if (isElevenLabs) {
-          // ElevenLabs: ALWAYS require 2000ms minimum - NEVER send smaller chunks
-          // Official docs: "transcript processing begins after the first 2 seconds"
+          // ElevenLabs: Require 2000ms for quality, but allow 1900ms+ after timeout to prevent deadlock
+          // Testing showed: 100ms = random sounds, 500ms = poor quality, 2000ms = works properly
+          // Files are 1.9s, so we need a compromise: allow 1900ms+ after waiting
+          const CLOSE_ENOUGH_MS = 1900; // Allow 1900ms if we're very close (files are 1.9s)
+          const CLOSE_ENOUGH_TIMEOUT_MS = 5000; // Wait 5s before allowing 1900ms
+          
           if (timeSinceLastSend >= VERY_LONG_TIMEOUT_MS && totalAudioDurationMs >= MIN_CHUNK_DURATION_MS) {
             // Very long timeout: send if we have minimum (2000ms)
             requiredDuration = MIN_CHUNK_DURATION_MS;
@@ -1452,8 +1464,20 @@ class AsrWorker {
               totalAudioDurationMs: totalAudioDurationMs.toFixed(0),
               note: 'ElevenLabs requires 2000ms (2 seconds) minimum per official documentation',
             });
+          } else if (timeSinceLastSend >= CLOSE_ENOUGH_TIMEOUT_MS && totalAudioDurationMs >= CLOSE_ENOUGH_MS) {
+            // Close enough: files are 1.9s, allow 1900ms after 5s wait to prevent deadlock
+            // This is a compromise - 1900ms is close to 2000ms and should still work reasonably well
+            requiredDuration = CLOSE_ENOUGH_MS;
+            console.warn(`[ASRWorker] ⚠️ Close enough threshold: sending ${totalAudioDurationMs.toFixed(0)}ms chunk (close to ${MIN_CHUNK_DURATION_MS}ms minimum) after ${timeSinceLastSend}ms wait`, {
+              interaction_id: buffer.interactionId,
+              provider: ASR_PROVIDER,
+              timeSinceLastSend,
+              totalAudioDurationMs: totalAudioDurationMs.toFixed(0),
+              chunksInBuffer: buffer.chunks.length,
+              note: 'Files are 1.9s instead of 2s. Allowing 1900ms to prevent deadlock while maintaining reasonable quality.',
+            });
           } else {
-            // Not enough audio yet - wait for minimum (2000ms)
+            // Not enough audio yet - wait for minimum (2000ms) or close enough (1900ms)
             requiredDuration = MIN_CHUNK_DURATION_MS;
           }
         } else {
