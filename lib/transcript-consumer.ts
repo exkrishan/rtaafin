@@ -902,3 +902,15 @@ export function getTranscriptConsumerStatus() {
   return consumer.getStatus();
 }
 
+/**
+ * Trigger stream discovery manually (for health checks and manual triggers)
+ */
+export async function triggerStreamDiscovery(): Promise<void> {
+  const consumer = getTranscriptConsumer();
+  if (consumer['isRunning']) {
+    await consumer['discoverAndSubscribeToNewStreams']();
+  } else {
+    console.warn('[TranscriptConsumer] Consumer not running, cannot trigger discovery');
+  }
+}
+
