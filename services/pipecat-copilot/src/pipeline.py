@@ -11,9 +11,9 @@ from pipecat.frames.frames import (
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.processors.frame_processor import FrameProcessor
-from pipecat.services.deepgram import DeepgramSTTService
-from pipecat.services.elevenlabs import ElevenLabsSTTService
-from pipecat.services.openai import OpenAISTTService
+from pipecat.services.deepgram.stt import DeepgramSTTService
+from pipecat.services.elevenlabs.stt import ElevenLabsSTTService
+from pipecat.services.openai.stt import OpenAISTTService
 
 from .config import settings
 
