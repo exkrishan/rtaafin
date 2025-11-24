@@ -42,19 +42,39 @@ export default function TestAgentAssistPage() {
 
   // Auto-discover active calls silently in background
   // Always ensure callId has a value (never empty)
+  // Includes recently ended calls (within 60 seconds) for real-time transcription
   useEffect(() => {
     const discoverActiveCalls = async () => {
       try {
         const response = await fetch('/api/calls/active?limit=10');
         const data = await response.json();
         
-        if (data.ok && data.calls && data.calls.length > 0 && data.latestCall) {
-          // Auto-connect to latest call if it's valid
-          if (data.latestCall.trim && data.latestCall.trim().length > 0) {
-            if (data.latestCall !== lastDiscoveredCallId) {
-              console.log('[Test] 🎯 Auto-discovered new call (silent):', data.latestCall);
-              setCallId(data.latestCall);
-              setLastDiscoveredCallId(data.latestCall);
+        if (data.ok && data.calls && data.calls.length > 0) {
+          // Use the most recent call from the array (already sorted by lastActivity)
+          // This includes both active calls and recently ended calls (within 60 seconds)
+          // This ensures real-time transcription works even if test script sends stop event
+          const mostRecentCall = data.calls[0];
+          
+          if (mostRecentCall && mostRecentCall.interactionId) {
+            const interactionId = mostRecentCall.interactionId;
+            if (interactionId !== lastDiscoveredCallId) {
+              console.log('[Test] 🎯 Auto-discovered call:', {
+                interactionId,
+                status: mostRecentCall.status,
+                lastActivity: new Date(mostRecentCall.lastActivity).toISOString(),
+                note: mostRecentCall.status === 'ended' ? 'Recently ended (within 60s) - still discoverable for real-time transcription' : 'Active call',
+              });
+              setCallId(interactionId);
+              setLastDiscoveredCallId(interactionId);
+            }
+          } else if (data.latestCall) {
+            // Fallback to latestCall if calls array structure is different
+            if (data.latestCall.trim && data.latestCall.trim().length > 0) {
+              if (data.latestCall !== lastDiscoveredCallId) {
+                console.log('[Test] 🎯 Auto-discovered new call (via latestCall):', data.latestCall);
+                setCallId(data.latestCall);
+                setLastDiscoveredCallId(data.latestCall);
+              }
             }
           }
         }

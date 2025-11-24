@@ -141,7 +141,10 @@ class CallRegistry {
   }
 
   /**
-   * Get all active calls
+   * Get all active calls (includes recently ended calls for UI auto-discovery)
+   * 
+   * For real-time transcription, we need to include calls that ended within the last 60 seconds
+   * so the UI can still discover and connect to them even if the test script sent a stop event.
    */
   async getActiveCalls(limit: number = 10): Promise<CallMetadata[]> {
     if (!this.redis) {
@@ -152,13 +155,21 @@ class CallRegistry {
       const pattern = `${CALL_METADATA_KEY_PREFIX}*`;
       const keys = await this.redis.keys(pattern);
       const calls: CallMetadata[] = [];
+      const now = Date.now();
+      const RECENTLY_ENDED_GRACE_PERIOD_MS = 60000; // 60 seconds - enough for UI to discover
 
-      for (const key of keys.slice(0, limit)) {
+      // Get more keys to filter (we'll filter by status and time)
+      for (const key of keys.slice(0, limit * 2)) {
         try {
           const data = await this.redis.get(key);
           if (data) {
             const metadata = JSON.parse(data) as CallMetadata;
-            if (metadata.status === 'active') {
+            const isActive = metadata.status === 'active';
+            const isRecentlyEnded = metadata.status === 'ended' && 
+                                   (now - metadata.lastActivity) < RECENTLY_ENDED_GRACE_PERIOD_MS;
+            
+            // Include active calls OR recently ended calls (for real-time transcription)
+            if (isActive || isRecentlyEnded) {
               calls.push(metadata);
             }
           }
@@ -171,7 +182,8 @@ class CallRegistry {
       // Sort by last activity (most recent first)
       calls.sort((a, b) => b.lastActivity - a.lastActivity);
 
-      return calls;
+      // Return only the limit requested
+      return calls.slice(0, limit);
     } catch (error: any) {
       console.error('[CallRegistry] Failed to get active calls', {
         error: error.message,
