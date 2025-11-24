@@ -70,12 +70,12 @@ class TranscriptConsumer {
    */
   async start(): Promise<void> {
     if (this.isRunning) {
-      console.warn('[TranscriptConsumer] Already running');
+      console.warn('[TranscriptConsumer] Already running, skipping start');
       return;
     }
 
-    this.isRunning = true;
     console.info('[TranscriptConsumer] Starting transcript consumer...');
+    this.isRunning = true;
 
     try {
       // Subscribe to all transcript topics
@@ -90,9 +90,18 @@ class TranscriptConsumer {
       // 3. Or use a single consumer that reads from multiple streams
 
       // Start a background worker that periodically checks for new transcript streams
-      this.startStreamDiscovery();
+      // Note: startStreamDiscovery is async but we don't await it - it runs in background
+      // Errors in discovery are caught internally and don't affect isRunning status
+      this.startStreamDiscovery().catch((error: any) => {
+        // Log error but don't stop the consumer - discovery is best-effort
+        console.error('[TranscriptConsumer] Stream discovery failed during start:', error);
+        // Don't set isRunning = false - consumer can still work with manual subscriptions
+      });
 
-      console.info('[TranscriptConsumer] ✅ Transcript consumer started');
+      console.info('[TranscriptConsumer] ✅ Transcript consumer started', {
+        isRunning: this.isRunning,
+        hasPubsub: !!this.pubsub,
+      });
     } catch (error: any) {
       console.error('[TranscriptConsumer] Failed to start:', error);
       this.isRunning = false;
@@ -444,6 +453,14 @@ class TranscriptConsumer {
       createdAt: Date;
     }>;
   } {
+    // Log status check for debugging
+    if (!this.isRunning) {
+      console.debug('[TranscriptConsumer] Status check: consumer is NOT running', {
+        hasPubsub: !!this.pubsub,
+        subscriptionCount: this.subscriptions.size,
+        hasDiscoveryInterval: !!this.discoveryInterval,
+      });
+    }
     return {
       isRunning: this.isRunning,
       subscriptionCount: this.subscriptions.size,
