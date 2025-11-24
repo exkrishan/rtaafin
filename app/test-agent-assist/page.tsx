@@ -41,7 +41,7 @@ export default function TestAgentAssistPage() {
   const [lastDiscoveredCallId, setLastDiscoveredCallId] = useState<string | null>(null);
 
   // Auto-discover active calls silently in background
-  // Always ensure callId has a value (never empty)
+  // CRITICAL: Poll more aggressively (every 2 seconds) for real-time transcription
   // Includes recently ended calls (within 60 seconds) for real-time transcription
   useEffect(() => {
     const discoverActiveCalls = async () => {
@@ -77,32 +77,30 @@ export default function TestAgentAssistPage() {
               }
             }
           }
-        }
-        
-        // CRITICAL: Always ensure callId has a value (never empty)
-        if (!callId || callId.trim().length === 0) {
-          console.log('[Test] No active calls, using default callId');
-          setCallId('test-call-123');
+        } else {
+          // No calls found - keep current callId (don't reset to test-call-123)
+          // This allows UI to stay connected to the last discovered call even if it's ended
+          console.debug('[Test] No active calls found, keeping current callId:', callId);
         }
       } catch (err: any) {
         console.error('[Test] Failed to discover active calls:', err);
-        // On error, ensure callId is not empty
-        if (!callId || callId.trim().length === 0) {
-          setCallId('test-call-123');
-        }
+        // On error, keep current callId (don't reset)
       }
     };
 
     // Initial discovery
     discoverActiveCalls();
 
-    // Poll every 5 seconds for new calls
-    const interval = setInterval(discoverActiveCalls, 5000);
+    // CRITICAL FIX: Poll every 2 seconds (instead of 5) for faster auto-discovery
+    // This ensures UI connects to new calls within 2 seconds of registration
+    const interval = setInterval(discoverActiveCalls, 2000);
 
     return () => clearInterval(interval);
   }, [callId, lastDiscoveredCallId]);
 
   // Safeguard: Ensure callId is never empty or undefined
+  // CRITICAL: Only set default if callId is truly empty (not just 'test-call-123')
+  // This prevents resetting to default when auto-discovery temporarily fails
   useEffect(() => {
     if (!callId || (typeof callId === 'string' && callId.trim().length === 0)) {
       console.warn('[Test] ⚠️ callId is empty, restoring default');
@@ -205,6 +203,16 @@ export default function TestAgentAssistPage() {
     console.log('[Test] Transcript event:', event);
   };
 
+  // Handle interactionId change from AgentAssistPanel (auto-discovery from transcripts)
+  const handleInteractionIdChange = (newInteractionId: string) => {
+    console.log('[Test] 🔄 InteractionId changed (from transcript):', {
+      from: callId,
+      to: newInteractionId,
+    });
+    setCallId(newInteractionId);
+    setLastDiscoveredCallId(newInteractionId);
+  };
+
   return (
     <div className="min-h-screen bg-surface">
       {/* Main Layout */}
@@ -263,6 +271,7 @@ export default function TestAgentAssistPage() {
           onTranscriptEvent={handleTranscriptEvent}
           triggerKBSearch={handleKBSearch}
           fetchDispositionSummary={handleDispositionSummary}
+          onInteractionIdChange={handleInteractionIdChange}
           emitTelemetry={(eventName, payload) => {
             console.log('[Test] Telemetry:', eventName, payload);
           }}

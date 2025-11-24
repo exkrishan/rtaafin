@@ -53,6 +53,7 @@ export interface AgentAssistPanelV2Props {
   useSse?: boolean; // If false, skip SSE connection (for demo mode)
   directTranscripts?: TranscriptUtterance[]; // Direct transcript updates (for demo mode)
   onKbArticlesUpdate?: (articles: KBArticle[], intent?: string, confidence?: number) => void; // Callback for KB articles from API
+  onInteractionIdChange?: (newInteractionId: string) => void; // Callback when component discovers a new interactionId from transcripts
 }
 
 export default function AgentAssistPanelV2({
@@ -72,6 +73,7 @@ export default function AgentAssistPanelV2({
   useSse = true,
   directTranscripts,
   onKbArticlesUpdate,
+  onInteractionIdChange,
 }: AgentAssistPanelV2Props) {
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [kbSuggestionsOpen, setKbSuggestionsOpen] = useState(true);
@@ -314,7 +316,24 @@ export default function AgentAssistPanelV2({
         }
         
         // Match callId - must match exactly or be missing (assume it's for this interaction)
+        // CRITICAL FIX: If UI is on default 'test-call-123' and we receive a transcript for a different ID,
+        // automatically switch to that ID for real-time transcription
+        const isDefaultCallId = interactionId === 'test-call-123';
         const callIdMatches = !eventCallId || eventCallId === interactionId;
+        
+        // Auto-switch if we're on default and receive a transcript for a real call
+        if (isDefaultCallId && eventCallId && eventCallId !== 'test-call-123' && eventCallId !== 'system') {
+          console.log('[AgentAssistPanel] 🔄 Auto-switching to discovered interactionId:', {
+            from: interactionId,
+            to: eventCallId,
+            note: 'Received transcript for real call, switching from default',
+          });
+          // Update parent component's interactionId (if callback provided)
+          // This will trigger a reconnection with the correct ID
+          if (onInteractionIdChange) {
+            onInteractionIdChange(eventCallId);
+          }
+        }
         
         if (callIdMatches && data.text && data.text.trim().length > 0) {
           // Determine speaker from text prefix (Agent: or Customer:)

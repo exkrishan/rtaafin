@@ -420,6 +420,48 @@ export class RedisStreamsAdapter implements PubSubAdapter {
     }
   }
 
+  /**
+   * Helper method to process a claimed message
+   */
+  private async processClaimedMessage(
+    topic: string,
+    consumerGroup: string,
+    subscription: RedisSubscription,
+    handler: (envelope: MessageEnvelope) => Promise<void>,
+    redis: RedisInstance,
+    msgId: string,
+    fields: any[]
+  ): Promise<void> {
+    try {
+      // Validate fields is an array
+      if (!Array.isArray(fields)) {
+        console.warn(`[RedisStreamsAdapter] ⚠️ Invalid fields format for ${msgId}: fields is not an array`, {
+          msgId,
+          fieldsType: typeof fields,
+          fieldsValue: fields,
+        });
+        return;
+      }
+      
+      // Parse message - fields is [key1, value1, key2, value2, ...]
+      const dataIndex = fields.findIndex((f: string) => f === 'data');
+      if (dataIndex >= 0 && dataIndex + 1 < fields.length) {
+        const envelope = JSON.parse(fields[dataIndex + 1]) as MessageEnvelope;
+        await handler(envelope);
+        await redis.xack(topic, consumerGroup, msgId);
+        subscription.lastReadId = msgId;
+        console.info(`[RedisStreamsAdapter] ✅ Processed pending message ${msgId} from ${topic}`);
+      } else {
+        console.warn(`[RedisStreamsAdapter] ⚠️ No 'data' field found in pending message ${msgId}:`, {
+          fields: fields.slice(0, 10), // Show first 10 fields
+          fieldsLength: fields.length,
+        });
+      }
+    } catch (error: unknown) {
+      console.error(`[RedisStreamsAdapter] Error processing pending message ${msgId}:`, error);
+    }
+  }
+
   private async startConsumer(subscription: RedisSubscription): Promise<void> {
     const { topic, consumerGroup, consumerName, handler, redis } = subscription;
 
@@ -443,82 +485,97 @@ export class RedisStreamsAdapter implements PubSubAdapter {
                 const msgId = pendingMsg[0] as string;
                 try {
                   // Claim the pending message (with 0 min idle time to claim immediately)
-                  const claimed = await redis.xclaim(topic, consumerGroup, consumerName, 0, msgId) as [string, [string, string[]][]][] | null;
-                  if (claimed && claimed.length > 0) {
-                    const [streamName, messages] = claimed[0];
-                    const messagesArray = messages as any[]; // Type assertion for Redis response
-                    if (messagesArray && messagesArray.length > 0) {
-                      for (let i = 0; i < messagesArray.length; i++) {
-                        const messageEntry = messagesArray[i] as any;
-                        
-                        // CRITICAL FIX: Validate messageEntry is an array before destructuring
-                        if (!Array.isArray(messageEntry)) {
-                          let sample: string;
-                          if (typeof messageEntry === 'string') {
-                            sample = messageEntry.substring(0, 100);
-                          } else if (typeof messageEntry === 'object' && messageEntry !== null) {
-                            sample = JSON.stringify(messageEntry).substring(0, 100);
-                          } else {
-                            sample = String(messageEntry).substring(0, 100);
-                          }
-                          console.error(`[RedisStreamsAdapter] ❌ Invalid messageEntry format in pending messages (not array): expected [msgId, fields], got:`, {
-                            index: i,
-                            messageEntry,
-                            messageEntryType: typeof messageEntry,
-                            sample,
-                          });
-                          continue;
-                        }
-                        
-                        // Validate array has at least 2 elements
-                        if (messageEntry.length < 2) {
-                          console.error(`[RedisStreamsAdapter] ❌ Invalid messageEntry format in pending messages (too short): expected [msgId, fields], got array of length ${messageEntry.length}:`, {
-                            index: i,
-                            messageEntry,
-                            messageEntryLength: messageEntry.length,
-                          });
-                          continue;
-                        }
-                        
-                        const [claimedMsgId, fields] = messageEntry;
-                        
-                        // Validate msgId is a string (not a character from string destructuring)
-                        if (typeof claimedMsgId !== 'string' || claimedMsgId.length === 0) {
-                          console.error(`[RedisStreamsAdapter] ❌ Invalid claimedMsgId format: expected non-empty string, got:`, {
-                            index: i,
-                            claimedMsgId,
-                            claimedMsgIdType: typeof claimedMsgId,
-                            messageEntry,
-                          });
-                          continue;
-                        }
-                        
-                        try {
-                          // CRITICAL FIX: Ensure fields is an array before calling findIndex
-                          if (!Array.isArray(fields)) {
-                            console.error(`[RedisStreamsAdapter] ❌ Invalid message format in pending messages: fields is not an array`, {
-                              index: i,
-                              msgId: claimedMsgId,
-                              fieldsType: typeof fields,
-                              fieldsValue: fields,
-                              messageEntry,
-                              messageEntryLength: messageEntry.length,
-                            });
-                            continue; // Skip this message
-                          }
-                          const dataIndex = fields.findIndex((f: string) => f === 'data');
-                          if (dataIndex >= 0 && dataIndex + 1 < fields.length) {
-                            const envelope = JSON.parse(fields[dataIndex + 1]) as MessageEnvelope;
-                            await handler(envelope);
-                            await redis.xack(topic, consumerGroup, claimedMsgId);
-                            subscription.lastReadId = claimedMsgId;
-                            console.info(`[RedisStreamsAdapter] ✅ Processed pending message ${claimedMsgId} from ${topic}`);
-                          }
-                        } catch (error: unknown) {
-                          console.error(`[RedisStreamsAdapter] Error processing pending message ${claimedMsgId}:`, error);
-                        }
+                  // XCLAIM can return different formats:
+                  // Format 1: [[streamName, [[msgId, [field, value, ...]]]]] (nested)
+                  // Format 2: [[streamName, [field, value, ...]]] (flat array - use msgId from XPENDING)
+                  const claimed = await redis.xclaim(topic, consumerGroup, consumerName, 0, msgId) as any;
+                  
+                  if (!claimed || !Array.isArray(claimed) || claimed.length === 0) {
+                    // No messages claimed (might have been processed by another consumer)
+                    console.debug(`[RedisStreamsAdapter] No messages claimed for ${msgId} (may have been processed)`);
+                    continue;
+                  }
+                  
+                  // Handle different response formats from XCLAIM
+                  let streamName: string;
+                  let messagesArray: any[];
+                  
+                  const firstEntry = claimed[0];
+                  if (Array.isArray(firstEntry) && firstEntry.length >= 2) {
+                    // Standard format: [streamName, messages]
+                    [streamName, messagesArray] = firstEntry;
+                  } else {
+                    // Unexpected format - log and skip
+                    console.warn(`[RedisStreamsAdapter] ⚠️ Unexpected XCLAIM response format for ${msgId}:`, {
+                      claimedType: typeof claimed,
+                      claimedLength: Array.isArray(claimed) ? claimed.length : 'N/A',
+                      firstEntryType: typeof firstEntry,
+                      firstEntryIsArray: Array.isArray(firstEntry),
+                      firstEntryLength: Array.isArray(firstEntry) ? firstEntry.length : 'N/A',
+                      sample: JSON.stringify(claimed).substring(0, 300),
+                    });
+                    continue;
+                  }
+                  
+                  // Validate messagesArray is an array
+                  if (!Array.isArray(messagesArray)) {
+                    console.warn(`[RedisStreamsAdapter] ⚠️ XCLAIM returned non-array messages for ${msgId}:`, {
+                      messagesType: typeof messagesArray,
+                      messages: messagesArray,
+                      claimed: JSON.stringify(claimed).substring(0, 300),
+                    });
+                    continue;
+                  }
+                  
+                  if (messagesArray.length === 0) {
+                    // No messages in the claimed response
+                    continue;
+                  }
+                  
+                  // CRITICAL FIX: Handle two possible formats:
+                  // 1. Nested: [[msgId, [field, value, ...]]] - messagesArray contains tuples
+                  // 2. Flat: [field, value, ...] - messagesArray IS the fields array
+                  
+                  // Check if first element is a tuple [msgId, fields] or just a field name
+                  const firstElement = messagesArray[0];
+                  const isNestedFormat = Array.isArray(firstElement) && 
+                                        firstElement.length >= 2 && 
+                                        typeof firstElement[0] === 'string' && 
+                                        firstElement[0].includes('-'); // Redis ID format
+                  
+                  if (isNestedFormat) {
+                    // Format 1: Nested array of [msgId, [field, value, ...]] tuples
+                    for (let i = 0; i < messagesArray.length; i++) {
+                      const messageEntry = messagesArray[i] as any;
+                      
+                      if (!Array.isArray(messageEntry) || messageEntry.length < 2) {
+                        console.warn(`[RedisStreamsAdapter] ⚠️ Invalid nested messageEntry format for ${msgId}:`, {
+                          index: i,
+                          messageEntry,
+                          messageEntryType: typeof messageEntry,
+                          messageEntryLength: Array.isArray(messageEntry) ? messageEntry.length : 'N/A',
+                        });
+                        continue;
                       }
+                      
+                      const [claimedMsgId, fields] = messageEntry;
+                      
+                      if (typeof claimedMsgId !== 'string' || !Array.isArray(fields)) {
+                        console.warn(`[RedisStreamsAdapter] ⚠️ Invalid nested messageEntry structure for ${msgId}:`, {
+                          index: i,
+                          claimedMsgId,
+                          claimedMsgIdType: typeof claimedMsgId,
+                          fieldsType: typeof fields,
+                        });
+                        continue;
+                      }
+                      
+                      await this.processClaimedMessage(topic, consumerGroup, subscription, handler, redis, claimedMsgId, fields);
                     }
+                  } else {
+                    // Format 2: Flat array [field, value, field, value, ...]
+                    // Use the msgId from XPENDING since it's not in the flat array
+                    await this.processClaimedMessage(topic, consumerGroup, subscription, handler, redis, msgId, messagesArray);
                   }
                 } catch (claimError: unknown) {
                   console.warn(`[RedisStreamsAdapter] Failed to claim pending message ${msgId}:`, claimError);
