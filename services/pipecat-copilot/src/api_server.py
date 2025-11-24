@@ -78,6 +78,11 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     logger.info("[api] Shutting down Pipecat Copilot service...")
+    
+    # Cleanup pipeline resources (including aiohttp session)
+    if websocket_server and websocket_server.pipeline:
+        await websocket_server.pipeline.cleanup()
+        logger.info("[api] Pipeline resources cleaned up")
 
 
 # Create FastAPI app

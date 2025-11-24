@@ -2,6 +2,7 @@
 
 import logging
 import asyncio
+import aiohttp
 from typing import Optional, Callable, Dict, Any
 from pipecat.frames.frames import (
     AudioRawFrame,
@@ -102,8 +103,12 @@ class TranscriptProcessor(FrameProcessor):
         await self.push_frame(frame)
 
 
-def create_stt_service() -> Any:
-    """Create STT service based on configuration"""
+def create_stt_service(aiohttp_session: Optional[aiohttp.ClientSession] = None) -> Any:
+    """Create STT service based on configuration
+    
+    Args:
+        aiohttp_session: Optional aiohttp session for services that require it (e.g., ElevenLabs)
+    """
     provider = settings.stt_provider.lower()
 
     if provider == "deepgram":
@@ -125,9 +130,13 @@ def create_stt_service() -> Any:
         if not api_key:
             raise ValueError("ELEVENLABS_API_KEY is required when STT_PROVIDER=elevenlabs")
 
+        if not aiohttp_session:
+            raise ValueError("aiohttp_session is required for ElevenLabs STT service")
+
         logger.info("[pipeline] Creating ElevenLabs STT service")
         return ElevenLabsSTTService(
             api_key=api_key,
+            aiohttp_session=aiohttp_session,
         )
 
     elif provider == "openai":
@@ -146,7 +155,11 @@ def create_stt_service() -> Any:
 
 
 class PipecatPipeline:
-    """Main Pipecat pipeline manager"""
+    """Main Pipecat pipeline manager
+    
+    Manages Pipecat pipelines for multiple streams with proper resource management.
+    Creates and reuses aiohttp session for efficient HTTP connections.
+    """
 
     def __init__(self, callback: Optional[TranscriptCallback] = None):
         self.callback = callback
@@ -154,6 +167,16 @@ class PipecatPipeline:
         self.runners: Dict[str, PipelineRunner] = {}
         self.audio_processors: Dict[str, AudioInputProcessor] = {}
         self.callbacks: Dict[str, TranscriptCallback] = {}
+        
+        # Create shared aiohttp session for services that need it (e.g., ElevenLabs)
+        # This allows connection pooling and proper resource management
+        self.aiohttp_session: Optional[aiohttp.ClientSession] = None
+        
+    async def _ensure_session(self):
+        """Ensure aiohttp session is created (lazy initialization)"""
+        if self.aiohttp_session is None or self.aiohttp_session.closed:
+            self.aiohttp_session = aiohttp.ClientSession()
+            logger.info("[pipeline] Created aiohttp session for STT services")
 
     async def create_pipeline(
         self, stream_sid: str, call_sid: str, sample_rate: int, callback: Optional[TranscriptCallback] = None
@@ -176,8 +199,11 @@ class PipecatPipeline:
         # Store callback for this stream
         self.callbacks[stream_sid] = callback
 
-        # Create STT service
-        stt_service = create_stt_service()
+        # Ensure aiohttp session exists (for services that need it)
+        await self._ensure_session()
+
+        # Create STT service with shared session
+        stt_service = create_stt_service(aiohttp_session=self.aiohttp_session)
 
         # Adjust sample rate if service supports it
         if hasattr(stt_service, "sample_rate"):
@@ -248,4 +274,15 @@ class PipecatPipeline:
             del self.audio_processors[stream_sid]
 
         logger.info(f"[pipeline] Pipeline stopped and cleaned up for stream: {stream_sid}")
+
+    async def cleanup(self):
+        """Cleanup resources, including aiohttp session"""
+        # Close all active pipelines first
+        for stream_sid in list(self.pipelines.keys()):
+            await self.stop_pipeline(stream_sid)
+        
+        # Close aiohttp session if it exists
+        if self.aiohttp_session and not self.aiohttp_session.closed:
+            await self.aiohttp_session.close()
+            logger.info("[pipeline] Closed aiohttp session")
 
