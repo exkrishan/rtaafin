@@ -351,8 +351,7 @@ class TranscriptConsumer {
         suggestion: 'Check if ingest API is accessible and baseUrl is correctly configured',
       });
     }
-      // Don't throw - continue processing other transcripts
-    }
+    // Don't throw - continue processing other transcripts
   }
 
   /**
