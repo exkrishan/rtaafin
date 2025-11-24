@@ -228,13 +228,19 @@ class KBService:
                 or_conditions.append(f"tags.cs.{{{word}}}")
 
             # Query Supabase
-            response = (
-                self.supabase_client.table("kb_articles")
-                .select("id, title, snippet, url, tags")
-                .or(",".join(or_conditions))
-                .limit(max_results)
-                .execute()
-            )
+            # Build OR query using Supabase filter syntax
+            # Supabase Python client uses .or() method with comma-separated string
+            query_builder = self.supabase_client.table("kb_articles").select("id, title, snippet, url, tags")
+            
+            # Apply OR conditions - Supabase Python client uses .or() method
+            # Note: 'or' is a Python keyword, so Supabase uses .or_() method
+            if or_conditions:
+                or_string = ",".join(or_conditions)
+                # Supabase Python client uses .or_() (since 'or' is a Python keyword)
+                query_builder = query_builder.or_(or_string)
+            
+            # Execute query with limit
+            response = query_builder.limit(max_results).execute()
 
             articles = []
             for item in response.data:
