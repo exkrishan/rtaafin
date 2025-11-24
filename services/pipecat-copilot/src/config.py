@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     stt_provider: str = Field(default="elevenlabs", description="STT provider: deepgram, elevenlabs, or openai")
     deepgram_api_key: Optional[str] = Field(default=None, description="Deepgram API key")
     elevenlabs_api_key: Optional[str] = Field(default=None, description="ElevenLabs API key")
+    elevenlabs_model: str = Field(default="scribe_v2_realtime", description="ElevenLabs model ID (default: scribe_v2_realtime)")
+    elevenlabs_language: str = Field(default="en", description="ElevenLabs language code (default: en)")
     openai_api_key: Optional[str] = Field(default=None, description="OpenAI API key")
 
     # LLM Configuration
@@ -30,9 +32,6 @@ class Settings(BaseSettings):
     frontend_api_url: str = Field(default="http://localhost:3000", description="Next.js frontend API base URL")
     supabase_url: Optional[str] = Field(default=None, description="Supabase URL")
     supabase_service_role_key: Optional[str] = Field(default=None, description="Supabase service role key")
-
-    # Redis Configuration
-    redis_url: Optional[str] = Field(default=None, description="Redis connection URL")
 
     # KB Configuration
     kb_adapter_type: str = Field(default="db", description="KB adapter type: db or knowmax")
@@ -47,6 +46,11 @@ class Settings(BaseSettings):
 
     # Health Check
     health_check_path: str = Field(default="/health", description="Health check endpoint path")
+    
+    # Error Handling & Retries
+    max_retries: int = Field(default=3, description="Maximum number of retries for external API calls")
+    retry_delay: float = Field(default=1.0, description="Initial retry delay in seconds (exponential backoff)")
+    request_timeout: float = Field(default=30.0, description="Request timeout in seconds for external APIs")
 
     class Config:
         env_file = ".env"
@@ -60,8 +64,15 @@ class Settings(BaseSettings):
         # Validate STT provider
         if self.stt_provider == "deepgram" and not self.deepgram_api_key:
             errors.append("DEEPGRAM_API_KEY is required when STT_PROVIDER=deepgram")
-        elif self.stt_provider == "elevenlabs" and not self.elevenlabs_api_key:
-            errors.append("ELEVENLABS_API_KEY is required when STT_PROVIDER=elevenlabs")
+        elif self.stt_provider == "elevenlabs":
+            if not self.elevenlabs_api_key:
+                errors.append("ELEVENLABS_API_KEY is required when STT_PROVIDER=elevenlabs")
+            # Validate ElevenLabs model
+            if self.elevenlabs_model not in ["scribe_v2_realtime", "scribe_v1"]:
+                logger.warning(
+                    f"[config] Unusual ElevenLabs model: {self.elevenlabs_model}. "
+                    f"Expected: scribe_v2_realtime or scribe_v1"
+                )
         elif self.stt_provider == "openai" and not self.openai_api_key:
             errors.append("OPENAI_API_KEY is required when STT_PROVIDER=openai")
 

@@ -133,11 +133,26 @@ def create_stt_service(aiohttp_session: Optional[aiohttp.ClientSession] = None) 
         if not aiohttp_session:
             raise ValueError("aiohttp_session is required for ElevenLabs STT service")
 
-        logger.info("[pipeline] Creating ElevenLabs STT service")
-        return ElevenLabsSTTService(
+        logger.info(
+            f"[pipeline] Creating ElevenLabs STT service: "
+            f"model={settings.elevenlabs_model}, language={settings.elevenlabs_language}"
+        )
+        
+        # Create ElevenLabs STT service with explicit configuration
+        # Pipecat's ElevenLabsSTTService accepts api_key and aiohttp_session
+        # Model and language may be set via environment or service properties
+        stt_service = ElevenLabsSTTService(
             api_key=api_key,
             aiohttp_session=aiohttp_session,
         )
+        
+        # Set model and language if service supports it
+        if hasattr(stt_service, "model_id"):
+            stt_service.model_id = settings.elevenlabs_model
+        if hasattr(stt_service, "language"):
+            stt_service.language = settings.elevenlabs_language
+        
+        return stt_service
 
     elif provider == "openai":
         api_key = settings.openai_api_key or settings.llm_api_key
@@ -206,8 +221,10 @@ class PipecatPipeline:
         stt_service = create_stt_service(aiohttp_session=self.aiohttp_session)
 
         # Adjust sample rate if service supports it
+        # This is critical for ElevenLabs - it needs to know the audio format
         if hasattr(stt_service, "sample_rate"):
             stt_service.sample_rate = sample_rate
+            logger.info(f"[pipeline] Set STT service sample_rate to {sample_rate} Hz")
 
         # Create transcript processor
         transcript_processor = TranscriptProcessor(

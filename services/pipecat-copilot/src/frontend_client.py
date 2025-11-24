@@ -1,12 +1,13 @@
 """Client for communicating with Next.js frontend API"""
 
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import httpx
 
 from .config import settings
 from .kb_service import KBArticle
 from .disposition_generator import DispositionSummary
+from .utils import retry_with_backoff, generate_correlation_id
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,7 @@ class FrontendClient:
         seq: int,
         is_final: bool,
         tenant_id: str = "default",
+        correlation_id: Optional[str] = None,
     ) -> bool:
         """
         Send transcript to frontend via ingest-transcript API
@@ -37,11 +39,14 @@ class FrontendClient:
             seq: Sequence number
             is_final: Whether this is a final transcript
             tenant_id: Tenant identifier
+            correlation_id: Optional correlation ID for tracing
 
         Returns:
             True if successful, False otherwise
         """
-        try:
+        corr_id = correlation_id or generate_correlation_id()
+        
+        async def _send():
             url = f"{self.base_url}/api/calls/ingest-transcript"
 
             payload = {
@@ -57,19 +62,33 @@ class FrontendClient:
 
                 if response.status_code == 200:
                     logger.debug(
-                        f"[frontend] Transcript sent: call={call_id}, seq={seq}, "
+                        f"[frontend] {corr_id} Transcript sent: call={call_id}, seq={seq}, "
                         f"is_final={is_final}"
                     )
                     return True
                 else:
+                    error_msg = f"HTTP {response.status_code}: {response.text[:200]}"
                     logger.error(
-                        f"[frontend] Failed to send transcript: {response.status_code}, "
-                        f"{response.text[:200]}"
+                        f"[frontend] {corr_id} Failed to send transcript: {error_msg}"
                     )
-                    return False
+                    raise httpx.HTTPStatusError(
+                        f"Failed to send transcript: {error_msg}",
+                        request=response.request,
+                        response=response,
+                    )
 
+        try:
+            return await retry_with_backoff(
+                _send,
+                max_retries=settings.max_retries,
+                initial_delay=settings.retry_delay,
+                correlation_id=corr_id,
+                retryable_exceptions=(httpx.RequestError, httpx.HTTPStatusError),
+            )
         except Exception as e:
-            logger.error(f"[frontend] Error sending transcript: {e}")
+            logger.error(
+                f"[frontend] {corr_id} Error sending transcript after retries: {e}"
+            )
             return False
 
     async def send_intent(
@@ -159,6 +178,7 @@ class FrontendClient:
         call_id: str,
         disposition: DispositionSummary,
         tenant_id: str = "default",
+        correlation_id: Optional[str] = None,
     ) -> bool:
         """
         Send disposition summary to frontend
@@ -167,11 +187,14 @@ class FrontendClient:
             call_id: Call identifier
             disposition: Disposition summary
             tenant_id: Tenant identifier
+            correlation_id: Optional correlation ID for tracing
 
         Returns:
             True if successful, False otherwise
         """
-        try:
+        corr_id = correlation_id or generate_correlation_id()
+        
+        async def _send():
             url = f"{self.base_url}/api/calls/auto_notes"
 
             # Convert dispositions to expected format
@@ -193,23 +216,37 @@ class FrontendClient:
                 "author": "pipecat-copilot",
             }
 
-            async with httpx.AsyncClient(timeout=30.0) as client:  # Longer timeout for disposition
+            async with httpx.AsyncClient(timeout=settings.request_timeout) as client:
                 response = await client.post(url, json=payload)
 
                 if response.status_code == 200:
                     logger.info(
-                        f"[frontend] Disposition sent: call={call_id}, "
+                        f"[frontend] {corr_id} Disposition sent: call={call_id}, "
                         f"dispositions={len(dispositions)}"
                     )
                     return True
                 else:
+                    error_msg = f"HTTP {response.status_code}: {response.text[:200]}"
                     logger.error(
-                        f"[frontend] Failed to send disposition: {response.status_code}, "
-                        f"{response.text[:200]}"
+                        f"[frontend] {corr_id} Failed to send disposition: {error_msg}"
                     )
-                    return False
+                    raise httpx.HTTPStatusError(
+                        f"Failed to send disposition: {error_msg}",
+                        request=response.request,
+                        response=response,
+                    )
 
+        try:
+            return await retry_with_backoff(
+                _send,
+                max_retries=settings.max_retries,
+                initial_delay=settings.retry_delay,
+                correlation_id=corr_id,
+                retryable_exceptions=(httpx.RequestError, httpx.HTTPStatusError),
+            )
         except Exception as e:
-            logger.error(f"[frontend] Error sending disposition: {e}")
+            logger.error(
+                f"[frontend] {corr_id} Error sending disposition after retries: {e}"
+            )
             return False
 

@@ -96,14 +96,51 @@ app = FastAPI(
 
 @app.get(settings.health_check_path)
 async def health_check():
-    """Health check endpoint"""
-    return JSONResponse(
-        {
-            "status": "ok",
-            "service": "pipecat-copilot",
-            "version": "0.1.0",
-        }
-    )
+    """Health check endpoint with dependency checks"""
+    from .config import settings as app_settings
+    import httpx
+    
+    health_status = {
+        "status": "ok",
+        "service": "pipecat-copilot",
+        "version": "0.1.0",
+        "checks": {
+            "config": "ok",
+            "frontend_api": "unknown",
+            "supabase": "unknown",
+        },
+    }
+    
+    # Check frontend API
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(f"{app_settings.frontend_api_url}/api/health")
+            health_status["checks"]["frontend_api"] = (
+                "ok" if response.status_code == 200 else "degraded"
+            )
+    except Exception as e:
+        health_status["checks"]["frontend_api"] = f"error: {str(e)[:50]}"
+        health_status["status"] = "degraded"
+    
+    # Check Supabase if configured
+    if app_settings.supabase_url and app_settings.supabase_service_role_key:
+        try:
+            from supabase import create_client
+            supabase = create_client(
+                app_settings.supabase_url,
+                app_settings.supabase_service_role_key,
+            )
+            # Simple query to check connection
+            supabase.table("kb_articles").select("id").limit(1).execute()
+            health_status["checks"]["supabase"] = "ok"
+        except Exception as e:
+            health_status["checks"]["supabase"] = f"error: {str(e)[:50]}"
+            health_status["status"] = "degraded"
+    else:
+        health_status["checks"]["supabase"] = "not_configured"
+    
+    status_code = 200 if health_status["status"] == "ok" else 503
+    return JSONResponse(health_status, status_code=status_code)
 
 
 @app.websocket("/v1/ingest")

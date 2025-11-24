@@ -91,11 +91,9 @@ class ExotelHandler:
             elif event_type == ExotelEventType.STOP:
                 return self._handle_stop(data)
             elif event_type == ExotelEventType.DTMF:
-                logger.info(f"[exotel] DTMF received: {data}")
-                return None
+                return self._handle_dtmf(data)
             elif event_type == ExotelEventType.MARK:
-                logger.info(f"[exotel] Mark received: {data}")
-                return None
+                return self._handle_mark(data)
             else:
                 logger.warning(f"[exotel] Unknown event type: {event_type}")
                 return None
@@ -252,6 +250,51 @@ class ExotelHandler:
     def get_connection_state(self, stream_sid: str) -> Optional[ExotelConnectionState]:
         """Get connection state for a stream"""
         return self.connections.get(stream_sid)
+
+    def _handle_dtmf(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Handle DTMF (key press) event"""
+        try:
+            stream_sid = data.get("stream_sid", "")
+            dtmf_data = data.get("dtmf", {})
+            digit = dtmf_data.get("digit", "")
+            
+            logger.info(
+                f"[exotel] DTMF received: stream_sid={stream_sid}, digit={digit}"
+            )
+            
+            # Return DTMF event for potential processing
+            return {
+                "type": "dtmf",
+                "stream_sid": stream_sid,
+                "digit": digit,
+                "data": data,
+            }
+        except Exception as e:
+            logger.error(f"[exotel] Error handling DTMF event: {e}")
+            return None
+
+    def _handle_mark(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Handle mark event (used in bidirectional streaming)"""
+        try:
+            stream_sid = data.get("stream_sid", "")
+            mark_data = data.get("mark", {})
+            mark_name = mark_data.get("name", "")
+            
+            logger.info(
+                f"[exotel] Mark received: stream_sid={stream_sid}, name={mark_name}"
+            )
+            
+            # Mark events are typically used for tracking media processing
+            # In unidirectional streaming, we can log but don't need to process
+            return {
+                "type": "mark",
+                "stream_sid": stream_sid,
+                "mark_name": mark_name,
+                "data": data,
+            }
+        except Exception as e:
+            logger.error(f"[exotel] Error handling mark event: {e}")
+            return None
 
     def remove_connection(self, stream_sid: str) -> None:
         """Remove connection state"""

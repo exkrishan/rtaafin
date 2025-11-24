@@ -12,6 +12,7 @@ from .intent_detector import IntentDetector
 from .kb_service import KBService
 from .disposition_generator import DispositionGenerator
 from .frontend_client import FrontendClient
+from .utils import generate_correlation_id
 
 logger = logging.getLogger(__name__)
 
@@ -47,13 +48,15 @@ class CopilotTranscriptCallback(TranscriptCallback):
             f"call={call_sid}, text={text[:50]}"
         )
 
-        # Forward to frontend
+        # Forward to frontend with correlation ID
+        corr_id = generate_correlation_id()
         await self.frontend_client.send_transcript(
             call_id=call_sid,
             text=text,
             seq=self.seq,
             is_final=False,
             tenant_id=self.tenant_id,
+            correlation_id=corr_id,
         )
 
     async def on_final_transcript(
@@ -68,13 +71,15 @@ class CopilotTranscriptCallback(TranscriptCallback):
             f"call={call_sid}, text={text[:100]}"
         )
 
-        # Forward to frontend
+        # Forward to frontend with correlation ID
+        corr_id = generate_correlation_id()
         await self.frontend_client.send_transcript(
             call_id=call_sid,
             text=text,
             seq=self.seq,
             is_final=True,
             tenant_id=self.tenant_id,
+            correlation_id=corr_id,
         )
 
         # Detect intent
@@ -146,7 +151,11 @@ class WebSocketServer:
         
         Note: WebSocket is already accepted in api_server.py before calling this method
         """
-        logger.info(f"[websocket] Handling WebSocket connection (already accepted)")
+        # Generate correlation ID for this connection
+        connection_corr_id = generate_correlation_id()
+        logger.info(
+            f"[websocket] {connection_corr_id} Handling WebSocket connection (already accepted)"
+        )
 
         current_stream_sid: Optional[str] = None
         callback: Optional[CopilotTranscriptCallback] = None
@@ -155,6 +164,7 @@ class WebSocketServer:
             while True:
                 # Receive message
                 message = await websocket.receive_text()
+                message_corr_id = generate_correlation_id()
 
                 # Parse Exotel message
                 event_data = self.exotel_handler.handle_message(message)
@@ -168,6 +178,11 @@ class WebSocketServer:
                     # Initialize pipeline for this stream
                     state: ExotelConnectionState = event_data["state"]
                     current_stream_sid = state.stream_sid
+
+                    logger.info(
+                        f"[websocket] {message_corr_id} Start event: stream={current_stream_sid}, "
+                        f"call={state.call_sid}, sample_rate={state.sample_rate}Hz"
+                    )
 
                     # Create callback
                     callback = CopilotTranscriptCallback(
@@ -191,10 +206,11 @@ class WebSocketServer:
                     self.connections[current_stream_sid] = {
                         "state": state,
                         "callback": callback,
+                        "correlation_id": connection_corr_id,
                     }
 
                     logger.info(
-                        f"[websocket] Pipeline started for stream: {current_stream_sid}"
+                        f"[websocket] {message_corr_id} Pipeline started for stream: {current_stream_sid}"
                     )
 
                 elif event_type == "media":
@@ -203,6 +219,12 @@ class WebSocketServer:
                     state: ExotelConnectionState = event_data.get("state")
 
                     if audio_bytes and state:
+                        # Log periodically to avoid spam
+                        if state.seq % 100 == 0:
+                            logger.debug(
+                                f"[websocket] {message_corr_id} Processing audio chunk: "
+                                f"stream={state.stream_sid}, seq={state.seq}, size={len(audio_bytes)}"
+                            )
                         await self.pipeline.process_audio(
                             stream_sid=state.stream_sid,
                             audio_bytes=audio_bytes,
@@ -213,6 +235,11 @@ class WebSocketServer:
                     # Stop pipeline and generate disposition
                     state: ExotelConnectionState = event_data.get("state")
                     stream_sid = state.stream_sid if state else current_stream_sid
+
+                    logger.info(
+                        f"[websocket] {message_corr_id} Stop event: stream={stream_sid}, "
+                        f"reason={event_data.get('reason', 'unknown')}"
+                    )
 
                     if stream_sid and stream_sid in self.connections:
                         connection = self.connections[stream_sid]
@@ -226,6 +253,10 @@ class WebSocketServer:
                             full_transcript = callback.get_full_transcript()
                             if full_transcript:
                                 try:
+                                    logger.info(
+                                        f"[websocket] {message_corr_id} Generating disposition for "
+                                        f"stream={stream_sid}, transcript_length={len(full_transcript)}"
+                                    )
                                     disposition = await self.disposition_generator.generate_disposition(
                                         transcript=full_transcript,
                                         call_id=state.call_sid if state else stream_sid,
@@ -236,24 +267,40 @@ class WebSocketServer:
                                         call_id=state.call_sid if state else stream_sid,
                                         disposition=disposition,
                                         tenant_id=state.account_sid if state else "default",
+                                        correlation_id=message_corr_id,
                                     )
 
                                 except Exception as e:
                                     logger.error(
-                                        f"[websocket] Error generating disposition: {e}"
+                                        f"[websocket] {message_corr_id} Error generating disposition: {e}",
+                                        exc_info=True,
                                     )
 
                         # Cleanup
                         del self.connections[stream_sid]
                         self.exotel_handler.remove_connection(stream_sid)
 
-                    logger.info(f"[websocket] Pipeline stopped for stream: {stream_sid}")
+                    logger.info(
+                        f"[websocket] {message_corr_id} Pipeline stopped for stream: {stream_sid}"
+                    )
                     break
+                
+                elif event_type in ["dtmf", "mark"]:
+                    # Handle DTMF and MARK events (logged in handler)
+                    logger.debug(
+                        f"[websocket] {message_corr_id} {event_type} event processed: "
+                        f"stream={event_data.get('stream_sid', 'unknown')}"
+                    )
 
         except WebSocketDisconnect:
-            logger.info(f"[websocket] WebSocket disconnected: {current_stream_sid}")
+            logger.info(
+                f"[websocket] {connection_corr_id} WebSocket disconnected: {current_stream_sid}"
+            )
         except Exception as e:
-            logger.error(f"[websocket] Error handling WebSocket: {e}")
+            logger.error(
+                f"[websocket] {connection_corr_id} Error handling WebSocket: {e}",
+                exc_info=True,
+            )
         finally:
             # Cleanup on disconnect
             if current_stream_sid:
@@ -261,4 +308,7 @@ class WebSocketServer:
                     await self.pipeline.stop_pipeline(current_stream_sid)
                     del self.connections[current_stream_sid]
                 self.exotel_handler.remove_connection(current_stream_sid)
+                logger.info(
+                    f"[websocket] {connection_corr_id} Cleaned up connection for stream: {current_stream_sid}"
+                )
 
