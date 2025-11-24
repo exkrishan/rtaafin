@@ -818,7 +818,7 @@ class TranscriptConsumer {
     if (!this.isRunning) {
       console.debug('[TranscriptConsumer] Status check: consumer is NOT running', {
         hasPubsub: !!this.pubsub,
-        subscriptionCount: this.subscriptions.size,
+        subscriptionsCount: this.subscriptions.size,
         hasDiscoveryInterval: !!this.discoveryInterval,
       });
     }
@@ -827,7 +827,7 @@ class TranscriptConsumer {
     
     return {
       isRunning: this.isRunning,
-      subscriptionCount: this.subscriptions.size,
+      subscriptionsCount: this.subscriptions.size,
       subscriptions: Array.from(this.subscriptions.values()).map((sub) => ({
         interactionId: sub.interactionId,
         transcriptCount: sub.transcriptCount,
