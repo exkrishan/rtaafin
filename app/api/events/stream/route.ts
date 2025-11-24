@@ -44,7 +44,7 @@ export async function GET(req: Request) {
         controller, // CRITICAL FIX: Expose controller for closed-state checks
         setHeader: () => {},
         flushHeaders: () => {},
-        write: (chunk: string) => {
+        write: (chunk: string | Uint8Array) => {
           try {
             // CRITICAL FIX: Check if stream is closed before writing
             if (controller.desiredSize === null) {
