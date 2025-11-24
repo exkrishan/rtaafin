@@ -5,13 +5,12 @@ import asyncio
 from typing import Optional, Callable, Dict, Any
 from pipecat.frames.frames import (
     AudioRawFrame,
-    TextFrame,
     TranscriptionFrame,
     Frame,
 )
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
-from pipecat.processors.aggregators.llm_response import LLMMessagesFrameAggregator
+from pipecat.processors.frame_processor import FrameProcessor
 from pipecat.services.deepgram import DeepgramSTTService
 from pipecat.services.elevenlabs import ElevenLabsSTTService
 from pipecat.services.openai import OpenAISTTService
@@ -69,10 +68,11 @@ class AudioInputProcessor:
         self.is_running = False
 
 
-class TranscriptProcessor:
+class TranscriptProcessor(FrameProcessor):
     """Processor that handles transcript frames from STT service"""
 
     def __init__(self, callback: TranscriptCallback, stream_sid: str, call_sid: str):
+        super().__init__()
         self.callback = callback
         self.stream_sid = stream_sid
         self.call_sid = call_sid
@@ -97,6 +97,9 @@ class TranscriptProcessor:
                 await self.callback.on_partial_transcript(
                     text, self.stream_sid, self.call_sid, metadata
                 )
+        
+        # Pass frame through to next processor
+        await self.push_frame(frame)
 
 
 def create_stt_service() -> Any:
