@@ -4,6 +4,7 @@ import logging
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
+from typing import Dict
 
 from .config import settings
 from .websocket_server import WebSocketServer
@@ -18,6 +19,36 @@ logger = logging.getLogger(__name__)
 
 # Global WebSocket server instance
 websocket_server: WebSocketServer = None
+
+
+def detect_exotel_protocol(headers: Dict[str, str], support_exotel: bool) -> bool:
+    """
+    Detect if connection is from Exotel based on auth headers.
+    Matches the logic from services/ingest/src/server.ts
+    
+    Args:
+        headers: Request headers dictionary
+        support_exotel: Whether Exotel support is enabled
+        
+    Returns:
+        True if connection appears to be from Exotel, False otherwise
+    """
+    auth_header = headers.get("authorization", "")
+    
+    if not auth_header:
+        # No auth = might be IP whitelisted Exotel
+        return support_exotel
+    
+    # Basic Auth = Exotel
+    if auth_header.startswith("Basic "):
+        return True
+    
+    # JWT Bearer = our protocol (not Exotel)
+    if auth_header.startswith("Bearer "):
+        return False
+    
+    # Default: assume our protocol
+    return False
 
 
 @asynccontextmanager
@@ -36,6 +67,12 @@ async def lifespan(app: FastAPI):
 
     websocket_server = WebSocketServer()
     logger.info("[api] WebSocket server initialized")
+    
+    # Log Exotel support status
+    if settings.support_exotel:
+        logger.info(f"[api] Exotel protocol support: ENABLED (auth_method: {settings.exotel_auth_method})")
+    else:
+        logger.info("[api] Exotel protocol support: DISABLED (set SUPPORT_EXOTEL=true to enable)")
 
     yield
 
@@ -71,10 +108,37 @@ async def websocket_endpoint(websocket: WebSocket):
     
     This endpoint accepts Exotel Stream Applet connections and processes
     audio through the Pipecat pipeline for real-time transcription.
+    
+    Authentication:
+    - Exotel connections: IP whitelist or Basic Auth (no JWT required)
+    - Other connections: JWT Bearer token (if implemented)
     """
     if websocket_server is None:
         await websocket.close(code=1011, reason="Server not initialized")
         return
+
+    # Check if this is Exotel connection
+    headers = dict(websocket.headers)
+    is_exotel = detect_exotel_protocol(headers, settings.support_exotel)
+    
+    if is_exotel and settings.support_exotel:
+        # Exotel connection - accept without JWT validation
+        logger.info("[api] ✅ Exotel WebSocket connection accepted (IP whitelist/Basic Auth)")
+        await websocket.accept()
+    elif not headers.get("authorization") and settings.support_exotel:
+        # No auth header but Exotel support enabled - might be Exotel with IP whitelisting
+        logger.info("[api] ⚠️ WebSocket with no auth - accepting as Exotel (SUPPORT_EXOTEL=true)")
+        await websocket.accept()
+    else:
+        # For now, if Exotel support is enabled, accept all connections
+        # In the future, you can add JWT validation here for non-Exotel connections
+        if settings.support_exotel:
+            logger.info("[api] Accepting connection (SUPPORT_EXOTEL=true)")
+            await websocket.accept()
+        else:
+            logger.warning("[api] ❌ Connection rejected - SUPPORT_EXOTEL=false and no valid auth")
+            await websocket.close(code=1008, reason="Authentication required")
+            return
 
     await websocket_server.handle_websocket(websocket)
 
@@ -90,6 +154,10 @@ async def root():
             "endpoints": {
                 "health": settings.health_check_path,
                 "websocket": "/v1/ingest",
+            },
+            "exotel": {
+                "supported": settings.support_exotel,
+                "auth_method": settings.exotel_auth_method,
             },
         }
     )

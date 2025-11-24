@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     """Application settings loaded from environment variables"""
 
     # Exotel Configuration
+    support_exotel: bool = Field(default=True, description="Enable Exotel protocol support")
     exotel_auth_method: str = Field(default="ip_whitelist", description="Authentication method: ip_whitelist or basic_auth")
     exotel_basic_auth_user: Optional[str] = Field(default=None, description="Basic auth username")
     exotel_basic_auth_pass: Optional[str] = Field(default=None, description="Basic auth password")

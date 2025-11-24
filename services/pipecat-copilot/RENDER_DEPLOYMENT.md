@@ -72,7 +72,8 @@ LOG_LEVEL=INFO
 #### Optional Variables
 
 ```bash
-# Exotel Authentication (if using Basic Auth)
+# Exotel Authentication
+SUPPORT_EXOTEL=true  # Enable Exotel protocol support
 EXOTEL_AUTH_METHOD=ip_whitelist  # or basic_auth
 EXOTEL_BASIC_AUTH_USER=your_username  # if using basic_auth
 EXOTEL_BASIC_AUTH_PASS=your_password  # if using basic_auth

@@ -65,7 +65,8 @@ The service will start on `http://localhost:5000` by default.
 See `.env.example` for all available configuration options. Key variables:
 
 #### Exotel Configuration
-- `EXOTEL_AUTH_METHOD`: Authentication method (`ip_whitelist` or `basic_auth`)
+- `SUPPORT_EXOTEL`: Enable Exotel protocol support (`true` or `false`, default: `true`)
+- `EXOTEL_AUTH_METHOD`: Authentication method (`ip_whitelist` or `basic_auth`, default: `ip_whitelist`)
 - `EXOTEL_BASIC_AUTH_USER`: Basic auth username (if using basic_auth)
 - `EXOTEL_BASIC_AUTH_PASS`: Basic auth password (if using basic_auth)
 
