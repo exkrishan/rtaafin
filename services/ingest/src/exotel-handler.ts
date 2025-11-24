@@ -9,6 +9,8 @@ import { AudioFrame } from './types';
 import { PubSubAdapter } from './types';
 import { callEndTopic } from '@rtaa/pubsub/topics';
 import { dumpAudioChunk } from './audio-dumper';
+import * as path from 'path';
+import * as fs from 'fs';
 
 export interface ExotelConnectionState {
   streamSid: string;
@@ -550,9 +552,31 @@ export class ExotelHandler {
     metadata: { callSid: string; from: string; to: string; tenantId: string }
   ): Promise<void> {
     try {
-      // Use relative path to avoid @/ alias issues in ingest service
-      // From services/ingest/src/ to lib/ = ../../../lib/
-      const { getCallRegistry } = await import('../../../lib/call-registry');
+      // Use absolute path resolution to ensure it works after compilation
+      // Build script copies lib/call-registry.js to services/ingest/dist/call-registry.js
+      // So it's in the same directory as exotel-handler.js after compilation
+      // Try same directory first (./call-registry), then fallback to lib/call-registry
+      const distPath = path.resolve(__dirname, './call-registry');
+      const libPath = path.resolve(__dirname, '../../../../lib/call-registry');
+      let callRegistryPath: string;
+      
+      // Check if dist/call-registry.js exists (production build)
+      if (fs.existsSync(distPath + '.js')) {
+        callRegistryPath = distPath;
+      } else if (fs.existsSync(libPath + '.js')) {
+        // Fallback to lib/call-registry.js (dev or if dist copy failed)
+        callRegistryPath = libPath;
+      } else {
+        // Last resort: try require.resolve (handles .js extension automatically)
+        try {
+          require.resolve(distPath);
+          callRegistryPath = distPath;
+        } catch {
+          callRegistryPath = libPath;
+        }
+      }
+      
+      const { getCallRegistry } = require(callRegistryPath);
       const callRegistry = getCallRegistry();
       
       await callRegistry.registerCall({
@@ -582,9 +606,31 @@ export class ExotelHandler {
    */
   private async endCallInRegistry(interactionId: string): Promise<void> {
     try {
-      // Use relative path to avoid @/ alias issues in ingest service
-      // From services/ingest/src/ to lib/ = ../../../lib/
-      const { getCallRegistry } = await import('../../../lib/call-registry');
+      // Use absolute path resolution to ensure it works after compilation
+      // Build script copies lib/call-registry.js to services/ingest/dist/call-registry.js
+      // So it's in the same directory as exotel-handler.js after compilation
+      // Try same directory first (./call-registry), then fallback to lib/call-registry
+      const distPath = path.resolve(__dirname, './call-registry');
+      const libPath = path.resolve(__dirname, '../../../../lib/call-registry');
+      let callRegistryPath: string;
+      
+      // Check if dist/call-registry.js exists (production build)
+      if (fs.existsSync(distPath + '.js')) {
+        callRegistryPath = distPath;
+      } else if (fs.existsSync(libPath + '.js')) {
+        // Fallback to lib/call-registry.js (dev or if dist copy failed)
+        callRegistryPath = libPath;
+      } else {
+        // Last resort: try require.resolve (handles .js extension automatically)
+        try {
+          require.resolve(distPath);
+          callRegistryPath = distPath;
+        } catch {
+          callRegistryPath = libPath;
+        }
+      }
+      
+      const { getCallRegistry } = require(callRegistryPath);
       const callRegistry = getCallRegistry();
       await callRegistry.endCall(interactionId);
       console.info('[exotel] ✅ Call marked as ended in registry', { interactionId });
