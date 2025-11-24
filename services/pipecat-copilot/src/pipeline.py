@@ -49,6 +49,7 @@ class AudioInputProcessor:
     ) -> None:
         """Process audio bytes and feed to pipeline"""
         if not self.is_running:
+            logger.warning(f"[AudioInputProcessor] Not running, ignoring audio for {stream_sid}")
             return
 
         # Create AudioRawFrame with PCM16 audio
@@ -58,7 +59,29 @@ class AudioInputProcessor:
             sample_rate=sample_rate,
             num_channels=1,  # Mono audio from Exotel
         )
-        await self.pipeline.queue_frames([frame])
+        
+        # Track frame count for logging
+        if not hasattr(self, '_frame_count'):
+            self._frame_count = 0
+        self._frame_count += 1
+        
+        # Log first few frames and periodically
+        if self._frame_count <= 5 or self._frame_count % 50 == 0:
+            logger.info(
+                f"[AudioInputProcessor] Queuing audio frame {self._frame_count}: "
+                f"stream={stream_sid}, size={len(audio_bytes)} bytes, sample_rate={sample_rate} Hz"
+            )
+        
+        try:
+            await self.pipeline.queue_frames([frame])
+            if self._frame_count <= 5:
+                logger.debug(f"[AudioInputProcessor] Successfully queued frame {self._frame_count}")
+        except Exception as e:
+            logger.error(
+                f"[AudioInputProcessor] Error queuing frame {self._frame_count}: {e}",
+                exc_info=True
+            )
+            raise
 
     async def start(self):
         """Start the processor"""
@@ -80,9 +103,29 @@ class TranscriptProcessor(FrameProcessor):
 
     async def process_frame(self, frame: Frame) -> None:
         """Process transcript frames"""
+        # Track received frames for debugging
+        if not hasattr(self, '_received_frame_count'):
+            self._received_frame_count = 0
+        self._received_frame_count += 1
+        
+        frame_type = type(frame).__name__
+        
+        # Log all frames initially, then only TranscriptionFrames
+        if self._received_frame_count <= 10:
+            logger.info(
+                f"[TranscriptProcessor] Received frame {self._received_frame_count}: "
+                f"type={frame_type}, stream={self.stream_sid}, call={self.call_sid}"
+            )
+        
         if isinstance(frame, TranscriptionFrame):
             text = frame.text
             is_final = getattr(frame, "is_final", False)
+            
+            logger.info(
+                f"[TranscriptProcessor] ✅ TranscriptionFrame received: "
+                f"text='{text[:100]}{'...' if len(text) > 100 else ''}', "
+                f"is_final={is_final}, stream={self.stream_sid}, call={self.call_sid}"
+            )
 
             metadata = {
                 "stream_sid": self.stream_sid,
@@ -103,11 +146,15 @@ class TranscriptProcessor(FrameProcessor):
         await self.push_frame(frame)
 
 
-def create_stt_service(aiohttp_session: Optional[aiohttp.ClientSession] = None) -> Any:
+def create_stt_service(
+    aiohttp_session: Optional[aiohttp.ClientSession] = None,
+    sample_rate: Optional[int] = None
+) -> Any:
     """Create STT service based on configuration
     
     Args:
         aiohttp_session: Optional aiohttp session for services that require it (e.g., ElevenLabs)
+        sample_rate: Sample rate for the audio (required for ElevenLabs, optional for others)
     """
     provider = settings.stt_provider.lower()
 
@@ -121,7 +168,7 @@ def create_stt_service(aiohttp_session: Optional[aiohttp.ClientSession] = None) 
             api_key=api_key,
             model="nova-2",  # Use latest Deepgram model
             language="en",
-            sample_rate=16000,  # Will be adjusted per stream
+            sample_rate=sample_rate or 16000,  # Use provided or default
             channels=1,
         )
 
@@ -133,24 +180,35 @@ def create_stt_service(aiohttp_session: Optional[aiohttp.ClientSession] = None) 
         if not aiohttp_session:
             raise ValueError("aiohttp_session is required for ElevenLabs STT service")
 
+        if not sample_rate:
+            raise ValueError("sample_rate is required for ElevenLabs STT service")
+
         logger.info(
             f"[pipeline] Creating ElevenLabs STT service: "
-            f"model={settings.elevenlabs_model}, language={settings.elevenlabs_language}"
+            f"model={settings.elevenlabs_model}, language={settings.elevenlabs_language}, "
+            f"sample_rate={sample_rate}"
         )
         
-        # Create ElevenLabs STT service with explicit configuration
-        # Pipecat's ElevenLabsSTTService accepts api_key and aiohttp_session
-        # Model and language may be set via environment or service properties
+        # Create ElevenLabs STT service with all required parameters
+        # CRITICAL: sample_rate must be passed during initialization (it's read-only)
         stt_service = ElevenLabsSTTService(
             api_key=api_key,
             aiohttp_session=aiohttp_session,
+            sample_rate=sample_rate,  # Must be passed during initialization
         )
         
-        # Set model and language if service supports it
-        if hasattr(stt_service, "model_id"):
-            stt_service.model_id = settings.elevenlabs_model
-        if hasattr(stt_service, "language"):
-            stt_service.language = settings.elevenlabs_language
+        # Try to set model and language if service supports it (these might be settable)
+        try:
+            if hasattr(stt_service, "model_id"):
+                stt_service.model_id = settings.elevenlabs_model
+        except (AttributeError, TypeError) as e:
+            logger.debug(f"[pipeline] model_id not settable on ElevenLabsSTTService: {e}")
+        
+        try:
+            if hasattr(stt_service, "language"):
+                stt_service.language = settings.elevenlabs_language
+        except (AttributeError, TypeError) as e:
+            logger.debug(f"[pipeline] language not settable on ElevenLabsSTTService: {e}")
         
         return stt_service
 
@@ -217,14 +275,15 @@ class PipecatPipeline:
         # Ensure aiohttp session exists (for services that need it)
         await self._ensure_session()
 
-        # Create STT service with shared session
-        stt_service = create_stt_service(aiohttp_session=self.aiohttp_session)
-
-        # Adjust sample rate if service supports it
-        # This is critical for ElevenLabs - it needs to know the audio format
-        if hasattr(stt_service, "sample_rate"):
-            stt_service.sample_rate = sample_rate
-            logger.info(f"[pipeline] Set STT service sample_rate to {sample_rate} Hz")
+        # Create STT service with shared session AND sample_rate
+        # CRITICAL: For ElevenLabs, sample_rate must be passed during initialization
+        # It cannot be set as a property afterward (it's read-only)
+        stt_service = create_stt_service(
+            aiohttp_session=self.aiohttp_session,
+            sample_rate=sample_rate  # Pass sample_rate during creation
+        )
+        
+        logger.info(f"[pipeline] STT service created with sample_rate: {sample_rate} Hz")
 
         # Create transcript processor
         transcript_processor = TranscriptProcessor(
@@ -270,6 +329,19 @@ class PipecatPipeline:
             logger.warning(f"[pipeline] No processor found for stream: {stream_sid}")
             return
 
+        # Log periodically to avoid spam
+        if not hasattr(self, '_audio_chunk_count'):
+            self._audio_chunk_count = {}
+        if stream_sid not in self._audio_chunk_count:
+            self._audio_chunk_count[stream_sid] = 0
+        self._audio_chunk_count[stream_sid] += 1
+        
+        if self._audio_chunk_count[stream_sid] <= 3 or self._audio_chunk_count[stream_sid] % 50 == 0:
+            logger.debug(
+                f"[pipeline] Processing audio chunk {self._audio_chunk_count[stream_sid]}: "
+                f"stream={stream_sid}, size={len(audio_bytes)} bytes, sample_rate={sample_rate} Hz"
+            )
+        
         await processor.process_audio(audio_bytes, sample_rate, stream_sid)
 
     async def stop_pipeline(self, stream_sid: str) -> None:
