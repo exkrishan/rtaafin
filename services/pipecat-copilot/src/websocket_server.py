@@ -142,9 +142,11 @@ class WebSocketServer:
         self.connections: Dict[str, Dict] = {}
 
     async def handle_websocket(self, websocket: WebSocket, stream_sid: Optional[str] = None):
-        """Handle a WebSocket connection from Exotel"""
-        await websocket.accept()
-        logger.info(f"[websocket] New WebSocket connection accepted")
+        """Handle a WebSocket connection from Exotel
+        
+        Note: WebSocket is already accepted in api_server.py before calling this method
+        """
+        logger.info(f"[websocket] Handling WebSocket connection (already accepted)")
 
         current_stream_sid: Optional[str] = None
         callback: Optional[CopilotTranscriptCallback] = None
