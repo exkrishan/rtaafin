@@ -229,7 +229,11 @@ class PipecatPipeline:
 
             self.pipelines[stream_sid] = pipeline
             self.runners[stream_sid] = runner
-            self.audio_processors[stream_sid] = AudioInputProcessor(pipeline)
+            
+            # Create and start audio processor
+            audio_processor = AudioInputProcessor(pipeline)
+            await audio_processor.start()  # CRITICAL: Start the processor so it accepts audio
+            self.audio_processors[stream_sid] = audio_processor
 
             # Start the pipeline runner
             await runner.start()
