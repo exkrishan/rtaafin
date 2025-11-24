@@ -14,42 +14,48 @@ export async function GET(req: Request) {
   try {
     const status = getTranscriptConsumerStatus();
     
-    // CRITICAL FIX: Always ensure consumer is running (even if it says it is)
-    // This handles cases where the service woke from sleep and consumer state is stale
+    // CRITICAL FIX: Health check must return quickly (< 2 seconds) to avoid timeout
+    // Run heavy operations in background (non-blocking)
     if (typeof window === 'undefined') {
-      // Always try to start consumer (it will skip if already running)
+      // Start consumer if not running (non-blocking with timeout)
       if (!status.isRunning) {
         console.info('[health] Transcript consumer not running, attempting to start...');
-        try {
-          await startTranscriptConsumer();
-          console.info('[health] ✅ Transcript consumer started via health check');
-        } catch (error: any) {
+        // Fire and forget - don't wait for it
+        startTranscriptConsumer().catch((error: any) => {
           console.error('[health] Failed to auto-start transcript consumer:', error.message);
-        }
+        });
       }
       
-      // CRITICAL: Always trigger stream discovery on health check
+      // CRITICAL: Trigger stream discovery in background (non-blocking)
       // This ensures we discover new transcript streams even after service wake-up
-      try {
-        await triggerStreamDiscovery();
-        console.info('[health] ✅ Stream discovery triggered');
-      } catch (error: any) {
+      // But don't block the health check response
+      triggerStreamDiscovery().catch((error: any) => {
         console.warn('[health] Stream discovery failed (non-critical):', error.message);
-      }
+      });
     }
     
-    // Get updated status after potential restart
+    // Get basic status immediately (fast, synchronous)
     const updatedStatus = getTranscriptConsumerStatus();
     
-    // P2 FIX: Get comprehensive health status including connection validation
+    // P2 FIX: Get comprehensive health status with timeout (max 1 second)
+    // This prevents health check from hanging on slow connections
     let healthStatus: any = null;
     try {
       const consumer = getTranscriptConsumer();
       if (consumer && typeof (consumer as any).getHealthStatus === 'function') {
-        healthStatus = await (consumer as any).getHealthStatus();
+        // Use Promise.race to timeout after 1 second
+        const healthPromise = (consumer as any).getHealthStatus();
+        const timeoutPromise = new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Health check timeout')), 1000)
+        );
+        
+        healthStatus = await Promise.race([healthPromise, timeoutPromise]);
       }
     } catch (error: any) {
-      console.warn('[health] Failed to get comprehensive health status:', error.message);
+      // Timeout or error - non-critical, just log and continue
+      if (error.message !== 'Health check timeout') {
+        console.warn('[health] Failed to get comprehensive health status:', error.message);
+      }
     }
     
     // Determine overall health status
@@ -69,7 +75,7 @@ export async function GET(req: Request) {
       status: overallStatus,
       service: process.env.SERVICE_NAME || process.env.RENDER_SERVICE_NAME || 'frontend',
       transcriptConsumer: updatedStatus,
-      // P2 FIX: Include comprehensive health status
+      // P2 FIX: Include comprehensive health status (if available)
       health: healthStatus ? {
         redis: healthStatus.redis,
         api: healthStatus.api,
