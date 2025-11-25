@@ -1309,7 +1309,17 @@ export default function AgentAssistPanelV2({
                               </button>
                             )}
                             <span className="text-xs text-gray-500">
-                              {new Date(utterance.timestamp).toLocaleTimeString()}
+                              {(() => {
+                                try {
+                                  const date = new Date(utterance.timestamp);
+                                  if (isNaN(date.getTime())) {
+                                    return new Date().toLocaleTimeString();
+                                  }
+                                  return date.toLocaleTimeString();
+                                } catch (err) {
+                                  return new Date().toLocaleTimeString();
+                                }
+                              })()}
                             </span>
                             {utterance.confidence < 0.7 && (
                               <span className="px-1.5 py-0.5 bg-red-100 text-red-700 text-xs rounded">

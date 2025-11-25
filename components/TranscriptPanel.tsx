@@ -225,7 +225,17 @@ export default function TranscriptPanel({
                     <span className="text-xs font-medium">{speaker}</span>
                     {line.ts && (
                       <span className="text-xs text-gray-500">
-                        {new Date(line.ts).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}
+                        {(() => {
+                          try {
+                            const date = new Date(line.ts);
+                            if (isNaN(date.getTime())) {
+                              return '';
+                            }
+                            return date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+                          } catch (err) {
+                            return '';
+                          }
+                        })()}
                       </span>
                     )}
                   </div>

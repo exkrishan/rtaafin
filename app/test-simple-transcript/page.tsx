@@ -117,7 +117,17 @@ export default function SimpleTranscriptTestPage() {
                     {transcript.speaker === 'agent' ? '👤 Agent' : '👤 Customer'}
                   </span>
                   <span style={{ fontSize: '12px', color: '#6b7280' }}>
-                    {new Date(transcript.timestamp).toLocaleTimeString()}
+                    {(() => {
+                      try {
+                        const date = new Date(transcript.timestamp);
+                        if (isNaN(date.getTime())) {
+                          return 'Invalid Date';
+                        }
+                        return date.toLocaleTimeString();
+                      } catch (err) {
+                        return 'Invalid Date';
+                      }
+                    })()}
                   </span>
                 </div>
                 <div style={{ fontSize: '16px', color: '#111827' }}>

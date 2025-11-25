@@ -113,10 +113,16 @@ export function useRealtimeTranscript(
       const eventSource = new EventSource(url);
       eventSourceRef.current = eventSource;
 
-      // Connection timeout: if onopen doesn't fire within 5 seconds, consider it failed
+      // CRITICAL FIX: Increased timeout for production (Render.com can be slow to wake up)
+      // Connection timeout: if onopen doesn't fire within 15 seconds, consider it failed
+      const connectionTimeoutMs = 15000; // 15 seconds for production environments
       connectionTimeoutRef.current = setTimeout(() => {
         if (eventSource.readyState !== EventSource.OPEN) {
-          console.warn('[useRealtimeTranscript] ⚠️ Connection timeout (5s)');
+          console.warn(`[useRealtimeTranscript] ⚠️ Connection timeout (${connectionTimeoutMs / 1000}s)`, {
+            callId,
+            readyState: eventSource.readyState,
+            reconnectAttempts: reconnectAttemptsRef.current,
+          });
           eventSource.close();
           setError('Connection timeout - server may be slow');
           setIsConnected(false);
@@ -129,7 +135,7 @@ export function useRealtimeTranscript(
             reconnectTimeoutRef.current = setTimeout(connect, delay);
           }
         }
-      }, 5000);
+      }, connectionTimeoutMs);
 
       // Connection opened successfully
       eventSource.onopen = () => {
@@ -194,13 +200,23 @@ export function useRealtimeTranscript(
             return;
           }
 
-          // Match callId - must match exactly or be missing (assume it's for this call)
-          const callIdMatches = !eventCallId || eventCallId === callId;
+          // CRITICAL FIX: Improved callId matching - case-insensitive and handles edge cases
+          // Must match exactly (case-insensitive) or be missing (assume it's for this call)
+          let callIdMatches = !eventCallId || eventCallId === callId;
+          
+          if (!callIdMatches && eventCallId && callId) {
+            // Try case-insensitive matching
+            const normalizedEventCallId = String(eventCallId).trim().toLowerCase();
+            const normalizedCallId = String(callId).trim().toLowerCase();
+            callIdMatches = normalizedEventCallId === normalizedCallId;
+          }
           
           if (!callIdMatches) {
             console.debug('[useRealtimeTranscript] CallId mismatch, skipping', {
               eventCallId,
               expectedCallId: callId,
+              normalizedEvent: eventCallId ? String(eventCallId).trim().toLowerCase() : null,
+              normalizedExpected: callId ? String(callId).trim().toLowerCase() : null,
             });
             return;
           }
@@ -228,12 +244,31 @@ export function useRealtimeTranscript(
             return;
           }
 
+          // CRITICAL FIX: Validate and parse timestamp properly to avoid "Invalid Date"
+          let timestamp: string;
+          if (data.ts) {
+            // Try to parse the timestamp
+            const parsedDate = new Date(data.ts);
+            if (isNaN(parsedDate.getTime())) {
+              // Invalid timestamp, use current time
+              console.warn('[useRealtimeTranscript] Invalid timestamp, using current time', {
+                originalTs: data.ts,
+                callId,
+              });
+              timestamp = new Date().toISOString();
+            } else {
+              timestamp = parsedDate.toISOString();
+            }
+          } else {
+            timestamp = new Date().toISOString();
+          }
+
           // Create utterance
           const utterance: TranscriptUtterance = {
             id: data.seq?.toString() || `${Date.now()}-${Math.random()}`,
             text,
             speaker,
-            timestamp: data.ts || new Date().toISOString(),
+            timestamp,
             seq: data.seq,
             confidence: data.confidence || 0.95,
           };
