@@ -21,21 +21,22 @@ export const dynamic = 'force-dynamic';
  * - callId: Optional. Subscribe to specific call. Omit for global feed.
  */
 export async function GET(req: Request) {
-  const url = new URL(req.url);
-  const callId = url.searchParams.get('callId') || null;
+  try {
+    const url = new URL(req.url);
+    const callId = url.searchParams.get('callId') || null;
 
-  console.info('[sse-endpoint] 🔌 New SSE connection request', {
-    callId: callId || 'global',
-    userAgent: req.headers.get('user-agent')?.substring(0, 50),
-    timestamp: new Date().toISOString(),
-  });
+    console.info('[sse-endpoint] 🔌 New SSE connection request', {
+      callId: callId || 'global',
+      userAgent: req.headers.get('user-agent')?.substring(0, 50),
+      timestamp: new Date().toISOString(),
+    });
 
-  // Create a ReadableStream to handle SSE
-  // Use a closure-safe approach for Turbopack
-  const streamCallId = callId; // Capture in const for closure
-  let closeHandler: (() => void) | null = null;
-  
-  const stream = new ReadableStream({
+    // Create a ReadableStream to handle SSE
+    // Use a closure-safe approach for Turbopack
+    const streamCallId = callId; // Capture in const for closure
+    let closeHandler: (() => void) | null = null;
+    
+    const stream = new ReadableStream({
     start(controller) {
       // CRITICAL FIX: Send initial connection event IMMEDIATELY when stream starts
       // This ensures EventSource's onopen event fires properly
@@ -52,6 +53,7 @@ export async function GET(req: Request) {
       
       try {
         // Send immediately via controller (before registering client)
+        // This ensures headers are sent and browser's onopen event fires
         const encoded = new TextEncoder().encode(initialEventStr);
         controller.enqueue(encoded);
         console.log('[sse-endpoint] ✅ Sent initial connection event immediately', {
@@ -60,9 +62,18 @@ export async function GET(req: Request) {
           timestamp: new Date().toISOString(),
         });
       } catch (err: any) {
-        console.warn('[sse-endpoint] Failed to send initial event', {
+        console.error('[sse-endpoint] Failed to send initial event', {
           error: err?.message || err,
+          stack: err?.stack,
         });
+        // If we can't send initial event, try to send error event
+        try {
+          const errorEvent = `event: error\ndata: ${JSON.stringify({ error: 'Failed to initialize stream' })}\n\n`;
+          controller.enqueue(new TextEncoder().encode(errorEvent));
+        } catch {
+          // If even that fails, we'll let the outer try-catch handle it
+          throw err;
+        }
       }
 
       // CRITICAL FIX: Create a mock response object that properly writes to ReadableStream
@@ -137,11 +148,18 @@ export async function GET(req: Request) {
       };
 
       // Register SSE client
+      // CRITICAL: Don't close stream if registration fails - initial event was already sent
+      // The browser already knows it's connected, so let the stream continue
       try {
         registerSseClient(mockReq, mockRes, streamCallId);
-      } catch (err) {
-        console.error('[sse-endpoint] Failed to register client', err);
-        controller.error(err);
+      } catch (err: any) {
+        console.error('[sse-endpoint] Failed to register client', {
+          error: err?.message || err,
+          stack: err?.stack,
+          callId: streamCallId || 'global',
+        });
+        // DON'T call controller.error() - let stream continue
+        // The initial event was already sent, so browser knows it's connected
       }
     },
     cancel() {
@@ -158,22 +176,44 @@ export async function GET(req: Request) {
           console.warn('[sse-endpoint] Error in close handler', err);
         }
       }
-    },
-  });
+    });
 
-  // Return SSE response
-  return new Response(stream, {
-    headers: {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache, no-transform',
-      'Connection': 'keep-alive',
-      'X-Accel-Buffering': 'no',
-      // CORS for dev (restrict in production)
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type',
-    },
-  });
+    // Return SSE response
+    return new Response(stream, {
+      headers: {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache, no-transform',
+        'Connection': 'keep-alive',
+        'X-Accel-Buffering': 'no',
+        // CORS for dev (restrict in production)
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type',
+      },
+    });
+  } catch (err: any) {
+    // CRITICAL: If stream creation fails completely, return error response instead of hanging
+    console.error('[sse-endpoint] Fatal error creating SSE stream', {
+      error: err?.message || err,
+      stack: err?.stack,
+      timestamp: new Date().toISOString(),
+    });
+    
+    return new Response(
+      JSON.stringify({ 
+        error: 'Failed to create SSE stream', 
+        message: err?.message || 'Unknown error',
+        timestamp: new Date().toISOString(),
+      }),
+      { 
+        status: 500,
+        headers: { 
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*',
+        }
+      }
+    );
+  }
 }
 
 /**
