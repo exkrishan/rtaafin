@@ -38,25 +38,31 @@ export async function GET(req: Request) {
     
     const stream = new ReadableStream({
     start(controller) {
-      // CRITICAL FIX: Send comment line FIRST to trigger headers and onopen
-      // EventSource's onopen fires when it receives ANY data, including comments
-      // Comment lines (starting with :) are ignored by EventSource but trigger the connection
+      // CRITICAL FIX: Send data line FIRST (without event type) to trigger onopen
+      // EventSource's onopen fires when it receives data, even without event type
+      // We send a simple data line first, then the proper event
       try {
-        // Send comment line first - this triggers headers to be sent and onopen to fire
-        const commentLine = `: connected\n\n`;
-        controller.enqueue(new TextEncoder().encode(commentLine));
-        console.log('[sse-endpoint] ✅ Sent connection comment (triggers onopen)', {
+        // Send a simple data line first - this definitely triggers onopen
+        // Format: data: <json>\n\n (no event: line means it's a 'message' event)
+        const initialData = {
+          type: 'connection',
+          callId: streamCallId || 'system',
+          message: 'connected',
+        };
+        const initialDataStr = `data: ${JSON.stringify(initialData)}\n\n`;
+        controller.enqueue(new TextEncoder().encode(initialDataStr));
+        console.log('[sse-endpoint] ✅ Sent initial data line (triggers onopen)', {
           callId: streamCallId || 'global',
           timestamp: new Date().toISOString(),
         });
       } catch (err: any) {
-        console.error('[sse-endpoint] Failed to send comment line', {
+        console.error('[sse-endpoint] Failed to send initial data line', {
           error: err?.message || err,
           stack: err?.stack,
         });
       }
 
-      // Then send initial connection event
+      // Then send initial connection event with proper event type
       const clientId = `client_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
       const initialEvent = {
         type: 'transcript_line',
