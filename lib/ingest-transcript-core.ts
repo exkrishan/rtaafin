@@ -174,9 +174,6 @@ export async function ingestTranscriptCore(
     }
 
     const tenantId = params.tenantId || 'default';
-    
-    // Fix 1.1: Use validated callId throughout
-    const validatedCallId = String(params.callId).trim();
 
     console.info('[ingest-transcript-core] Processing transcript chunk', {
       callId: validatedCallId,
