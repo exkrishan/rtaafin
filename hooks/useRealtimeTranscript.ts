@@ -57,7 +57,7 @@ export function useRealtimeTranscript(
     onCallEnd,
     onIntentUpdate,
     autoReconnect = true,
-    reconnectDelay = 2000,
+    reconnectDelay = 5000, // 5 second base delay for Render.com wake-up
   } = options || {};
 
   // CRITICAL: Use refs for ALL callbacks to prevent infinite reconnection loop
@@ -132,9 +132,9 @@ export function useRealtimeTranscript(
       const eventSource = new EventSource(url);
       eventSourceRef.current = eventSource;
 
-      // CRITICAL FIX: Increased timeout for production (Render.com can be slow to wake up)
-      // Connection timeout: if onopen doesn't fire within 15 seconds, consider it failed
-      const connectionTimeoutMs = 15000; // 15 seconds for production environments
+      // CRITICAL FIX: Increased timeout for Render.com free tier (takes 50s+ to wake up from sleep)
+      // Connection timeout: if onopen doesn't fire within 60 seconds, consider it failed
+      const connectionTimeoutMs = 60000; // 60 seconds to handle Render.com 50s+ wake-up delay
       connectionTimeoutRef.current = setTimeout(() => {
         if (eventSource.readyState !== EventSource.OPEN) {
           console.warn(`[useRealtimeTranscript] ⚠️ Connection timeout (${connectionTimeoutMs / 1000}s)`, {

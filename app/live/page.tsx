@@ -255,8 +255,37 @@ function LivePageContent() {
       });
   }, [callId]);
 
+  // Wake up Render.com service before connecting to SSE (free tier takes 50s+ to wake up)
+  useEffect(() => {
+    if (!callId || callId.trim().length === 0) {
+      return;
+    }
+
+    // Make a quick request to wake up the service (don't wait for response)
+    // This helps reduce the initial connection delay
+    const wakeUpController = new AbortController();
+    const wakeUpTimeout = setTimeout(() => wakeUpController.abort(), 5000); // 5s timeout
+    
+    fetch('/api/health', { 
+      method: 'HEAD', 
+      cache: 'no-cache',
+      signal: wakeUpController.signal,
+    })
+      .then(() => {
+        console.log('[Live] ✅ Service wake-up request completed');
+      })
+      .catch(() => {
+        // Ignore errors - just trying to wake up the service
+        console.log('[Live] Service wake-up request (expected to timeout/error on free tier)');
+      })
+      .finally(() => {
+        clearTimeout(wakeUpTimeout);
+      });
+  }, [callId]);
+
   // CRITICAL: Use hook EXACTLY like simple UI - NO CALLBACKS
   // This matches the working pattern from test-simple-transcript
+  // Note: Connection timeout is now 60s to handle Render.com free tier wake-up delay
   const { 
     transcripts, 
     isConnected: transcriptConnected, 
