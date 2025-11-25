@@ -37,6 +37,34 @@ export async function GET(req: Request) {
   
   const stream = new ReadableStream({
     start(controller) {
+      // CRITICAL FIX: Send initial connection event IMMEDIATELY when stream starts
+      // This ensures EventSource's onopen event fires properly
+      // We send this BEFORE registering the client so the browser gets it right away
+      const clientId = `client_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+      const initialEvent = {
+        type: 'transcript_line',
+        callId: streamCallId || 'system',
+        text: `Connected to realtime stream (clientId: ${clientId})`,
+      };
+      
+      // Format as SSE event: event: <type>\ndata: <json>\n\n
+      const initialEventStr = `event: ${initialEvent.type}\ndata: ${JSON.stringify(initialEvent)}\n\n`;
+      
+      try {
+        // Send immediately via controller (before registering client)
+        const encoded = new TextEncoder().encode(initialEventStr);
+        controller.enqueue(encoded);
+        console.log('[sse-endpoint] ✅ Sent initial connection event immediately', {
+          clientId,
+          callId: streamCallId || 'global',
+          timestamp: new Date().toISOString(),
+        });
+      } catch (err: any) {
+        console.warn('[sse-endpoint] Failed to send initial event', {
+          error: err?.message || err,
+        });
+      }
+
       // CRITICAL FIX: Create a mock response object that properly writes to ReadableStream
       // The write() method must handle SSE format correctly and ensure data is properly encoded
       // Store controller reference so realtime.ts can check if stream is closed
