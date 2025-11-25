@@ -1,10 +1,10 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { useRealtimeTranscript } from '@/hooks/useRealtimeTranscript';
 
-export default function SimpleTranscriptTestPage() {
+function SimpleTranscriptTestContent() {
   const searchParams = useSearchParams();
   // CRITICAL FIX: Read callId from URL parameter, fallback to default
   const urlCallId = searchParams.get('callId');
@@ -178,6 +178,26 @@ export default function SimpleTranscriptTestPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+export default function SimpleTranscriptTestPage() {
+  return (
+    <Suspense fallback={
+      <div style={{ 
+        padding: '20px', 
+        fontFamily: 'system-ui, sans-serif',
+        maxWidth: '1200px',
+        margin: '0 auto'
+      }}>
+        <h1 style={{ fontSize: '24px', marginBottom: '20px' }}>
+          🧪 Simple Transcript Test (Loading...)
+        </h1>
+        <div>Loading page...</div>
+      </div>
+    }>
+      <SimpleTranscriptTestContent />
+    </Suspense>
   );
 }
 
