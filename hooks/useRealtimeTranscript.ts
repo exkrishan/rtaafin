@@ -41,6 +41,10 @@ export function useRealtimeTranscript(
     reconnectDelay?: number;
   }
 ): UseRealtimeTranscriptResult {
+  // CRITICAL: Limit transcript array size to prevent memory issues (OOM crashes)
+  // 1000 transcripts = ~300 KB per call, safe for 500+ concurrent calls
+  const MAX_TRANSCRIPTS = 1000;
+  
   const [transcripts, setTranscripts] = useState<TranscriptUtterance[]>([]);
   const [isConnected, setIsConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -304,7 +308,21 @@ export function useRealtimeTranscript(
               });
               return prev;
             }
-            return [...prev, utterance];
+            
+            // CRITICAL FIX: Limit transcript array size to prevent memory issues (OOM crashes)
+            // Keep only the most recent MAX_TRANSCRIPTS to prevent unbounded growth
+            const newTranscripts = [...prev, utterance];
+            if (newTranscripts.length > MAX_TRANSCRIPTS) {
+              const pruned = newTranscripts.slice(-MAX_TRANSCRIPTS);
+              console.warn('[useRealtimeTranscript] ⚠️ Pruned transcripts to prevent memory issues', {
+                before: newTranscripts.length,
+                after: pruned.length,
+                callId,
+                note: `Keeping only the most recent ${MAX_TRANSCRIPTS} transcripts`,
+              });
+              return pruned;
+            }
+            return newTranscripts;
           });
 
           // Call callback if provided (via ref to avoid dependency issues)

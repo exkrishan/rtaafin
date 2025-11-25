@@ -85,7 +85,12 @@ export function registerSseClient(req: any, res: any, callId: string | null = nu
   // Cleanup on disconnect
   req.on('close', () => {
     const client = clients.get(clientId);
-    const durationMs = client?.createdAt ? Date.now() - client.createdAt.getTime() : 0;
+    if (!client) {
+      // Already cleaned up, ignore
+      return;
+    }
+    
+    const durationMs = client.createdAt ? Date.now() - client.createdAt.getTime() : 0;
 
     console.info('[realtime] ❌ SSE client disconnected', {
       clientId,
@@ -93,7 +98,21 @@ export function registerSseClient(req: any, res: any, callId: string | null = nu
       duration: `${durationMs}ms`,
       timestamp: new Date().toISOString(),
     });
+    
+    // CRITICAL FIX: Ensure client is removed to prevent memory leaks
     clients.delete(clientId);
+    
+    // CRITICAL FIX: Clean up response stream to free resources
+    try {
+      if (client.res && typeof client.res.end === 'function') {
+        client.res.end();
+      } else if (client.res && client.res.controller && typeof client.res.controller.close === 'function') {
+        // Handle ReadableStream controller
+        client.res.controller.close();
+      }
+    } catch (err) {
+      // Ignore cleanup errors (stream may already be closed)
+    }
 
     // Stop heartbeat if no clients left
     if (clients.size === 0) {
@@ -363,7 +382,11 @@ export function disconnectAllClients(): void {
   console.info('[realtime] Disconnecting all clients', { count: clients.size });
   for (const [clientId, client] of clients.entries()) {
     try {
-      client.res.end();
+      if (client.res && typeof client.res.end === 'function') {
+        client.res.end();
+      } else if (client.res && client.res.controller && typeof client.res.controller.close === 'function') {
+        client.res.controller.close();
+      }
     } catch (err) {
       // Ignore errors during shutdown
     }
@@ -371,6 +394,66 @@ export function disconnectAllClients(): void {
   clients.clear();
   stopHeartbeat();
 }
+
+/**
+ * Periodic cleanup of stale SSE clients (prevents memory leaks)
+ * Removes clients that have been connected for more than 1 hour
+ */
+let staleClientCleanupTimer: NodeJS.Timeout | null = null;
+
+export function startStaleClientCleanup(): void {
+  if (staleClientCleanupTimer) return; // Already running
+  
+  const CLEANUP_INTERVAL_MS = 60000; // Check every minute
+  const MAX_CLIENT_AGE_MS = 3600000; // 1 hour
+  
+  staleClientCleanupTimer = setInterval(() => {
+    const now = Date.now();
+    let cleanedCount = 0;
+    
+    for (const [clientId, client] of clients.entries()) {
+      const age = now - client.createdAt.getTime();
+      if (age > MAX_CLIENT_AGE_MS) {
+        console.warn('[realtime] Removing stale client', { 
+          clientId, 
+          callId: client.callId || 'global',
+          age: `${Math.round(age / 1000)}s`,
+          maxAge: `${MAX_CLIENT_AGE_MS / 1000}s`,
+        });
+        
+        try {
+          if (client.res && typeof client.res.end === 'function') {
+            client.res.end();
+          } else if (client.res && client.res.controller && typeof client.res.controller.close === 'function') {
+            client.res.controller.close();
+          }
+        } catch (err) {
+          // Ignore cleanup errors
+        }
+        
+        clients.delete(clientId);
+        cleanedCount++;
+      }
+    }
+    
+    if (cleanedCount > 0) {
+      console.info('[realtime] Stale client cleanup completed', { 
+        cleanedCount, 
+        remainingClients: clients.size 
+      });
+    }
+    
+    // Stop heartbeat if no clients left
+    if (clients.size === 0) {
+      stopHeartbeat();
+    }
+  }, CLEANUP_INTERVAL_MS);
+  
+  console.info('[realtime] Stale client cleanup started');
+}
+
+// Start stale client cleanup on module load
+startStaleClientCleanup();
 
 /**
  * Placeholder for WebSocket support (not implemented in Phase 3)
