@@ -102,6 +102,18 @@ Use specific intents: credit_card_block, credit_card_fraud, credit_card_replacem
       // Note: Model names should NOT include "models/" prefix in the URL
       let model = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
       
+      // CRITICAL FIX: Auto-fallback invalid model names to gemini-2.0-flash
+      // gemini-1.5-flash is not available in v1 API and causes 404 errors
+      const invalidModels = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-1.0'];
+      if (invalidModels.includes(model)) {
+        console.warn('[intent] ⚠️ Invalid Gemini model detected, falling back to gemini-2.0-flash', {
+          invalidModel: model,
+          fallback: 'gemini-2.0-flash',
+          note: 'Update GEMINI_MODEL environment variable to gemini-2.0-flash',
+        });
+        model = 'gemini-2.0-flash';
+      }
+      
       // Use gemini-2.0-flash if 2.5 is specified (to avoid thinking token issues)
       const actualModel = model.includes('2.5') ? 'gemini-2.0-flash' : model;
       const url = `https://generativelanguage.googleapis.com/v1/models/${actualModel}:generateContent?key=${apiKey}`;

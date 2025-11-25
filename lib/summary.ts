@@ -253,8 +253,23 @@ async function callLLM(prompt: string, timeoutMs: number, retryOnRateLimit = tru
         
         // Use gemini-2.5-flash (latest, fastest) or gemini-2.5-pro (more capable)
         // Note: Model names should NOT include "models/" prefix in the URL
-        const model = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
-        const url = `https://generativelanguage.googleapis.com/v1/models/${model}:generateContent?key=${apiKey}`;
+        let model = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+        
+        // CRITICAL FIX: Auto-fallback invalid model names to gemini-2.0-flash
+        // gemini-1.5-flash is not available in v1 API and causes 404 errors
+        const invalidModels = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-1.0'];
+        if (invalidModels.includes(model)) {
+          console.warn('[summary] ⚠️ Invalid Gemini model detected, falling back to gemini-2.0-flash', {
+            invalidModel: model,
+            fallback: 'gemini-2.0-flash',
+            note: 'Update GEMINI_MODEL environment variable to gemini-2.0-flash',
+          });
+          model = 'gemini-2.0-flash';
+        }
+        
+        // Convert 2.5 to 2.0 to avoid thinking token issues
+        const actualModel = model.includes('2.5') ? 'gemini-2.0-flash' : model;
+        const url = `https://generativelanguage.googleapis.com/v1/models/${actualModel}:generateContent?key=${apiKey}`;
         
         const fullPrompt = `You are an assistant that summarizes customer support calls into structured JSON. Return ONLY valid JSON, no markdown code blocks, no explanations, no text before or after the JSON.
 
