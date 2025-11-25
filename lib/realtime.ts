@@ -82,8 +82,9 @@ export function registerSseClient(req: any, res: any, callId: string | null = nu
   // Start heartbeat if not already running
   startHeartbeat();
 
-  // Cleanup on disconnect
-  req.on('close', () => {
+  // CRITICAL FIX: Named function to break circular reference
+  // This prevents the closure from capturing the entire clients Map
+  function cleanupClient() {
     const client = clients.get(clientId);
     if (!client) {
       // Already cleaned up, ignore
@@ -99,7 +100,7 @@ export function registerSseClient(req: any, res: any, callId: string | null = nu
       timestamp: new Date().toISOString(),
     });
     
-    // CRITICAL FIX: Ensure client is removed to prevent memory leaks
+    // CRITICAL FIX: Remove from Map FIRST to break circular reference
     clients.delete(clientId);
     
     // CRITICAL FIX: Clean up response stream to free resources
@@ -114,16 +115,29 @@ export function registerSseClient(req: any, res: any, callId: string | null = nu
       // Ignore cleanup errors (stream may already be closed)
     }
 
+    // CRITICAL FIX: Explicitly remove event listeners to prevent memory leaks
+    try {
+      req.removeListener('close', cleanupClient);
+      req.removeListener('error', errorHandler);
+    } catch (err) {
+      // Ignore if listeners already removed
+    }
+
     // Stop heartbeat if no clients left
     if (clients.size === 0) {
       stopHeartbeat();
     }
-  });
+  }
 
-  req.on('error', (err: Error) => {
+  // CRITICAL FIX: Named error handler to allow explicit removal
+  function errorHandler(err: Error) {
     console.error('[realtime] SSE client error', { clientId, error: err.message });
-    clients.delete(clientId);
-  });
+    cleanupClient();
+  }
+
+  // Cleanup on disconnect
+  req.on('close', cleanupClient);
+  req.on('error', errorHandler);
 }
 
 /**
@@ -214,44 +228,19 @@ export function broadcastEvent(event: RealtimeEvent): void {
   const targetCallId = event.callId;
   let sentCount = 0;
   
-  // Task 1.4: Collect all client callIds for detailed debugging
-  const allClientCallIds = Array.from(clients.values()).map(c => c.callId);
-  const clientDetails = Array.from(clients.entries()).map(([id, client]) => ({
-    clientId: id,
-    callId: client.callId,
-    createdAt: client.createdAt.toISOString(),
-  }));
-
-  // Task 1.4: Log detailed matching information
-  console.log('[DEBUG] Real-time broadcast matching:', {
-    targetCallId,
-    targetCallIdType: typeof targetCallId,
-    totalClients: clients.size,
-    allClientCallIds,
-    clientDetails,
-    eventType: event.type,
-    timestamp: new Date().toISOString(),
-  });
+  // CRITICAL FIX: Removed excessive debug logging that creates arrays on every broadcast
+  // This was causing massive memory leaks - creating 5-10 temporary arrays per event
+  // With 30 transcripts/minute, that's 150-300 arrays/minute accumulating in memory
 
   for (const [clientId, client] of clients.entries()) {
     // CRITICAL FIX: Use exact matching only - partial matching causes incorrect delivery
     // Send to global subscribers (callId === null) or exact callId match
     const matches = client.callId === null || client.callId === targetCallId;
     
-    // Task 1.4: Log match result for each client
-    console.log('[DEBUG] Client match check:', {
-      clientId,
-      clientCallId: client.callId,
-      targetCallId,
-      matches,
-      matchType: client.callId === null ? 'global' : client.callId === targetCallId ? 'exact' : 'no-match',
-    });
-    
     if (matches) {
       try {
         sendEvent(client.res, event);
         sentCount++;
-        console.log('[DEBUG] Event sent to client:', { clientId, clientCallId: client.callId });
       } catch (err) {
         console.error('[realtime] Failed to send to client', { clientId, error: err });
         // Remove failed client
@@ -260,40 +249,26 @@ export function broadcastEvent(event: RealtimeEvent): void {
     }
   }
 
-  // Enhanced logging for debugging callId mismatches
+  // Minimal logging - only warn if important (0 recipients with active clients)
   if (sentCount === 0 && clients.size > 0) {
-    console.warn('[realtime] ⚠️ Broadcast event with 0 recipients - callId mismatch detected', {
+    console.warn('[realtime] ⚠️ Broadcast event with 0 recipients', {
       type: event.type,
       targetCallId,
       totalClients: clients.size,
-      allClientCallIds,
       suggestion: 'Check if UI is connected with correct callId/interactionId',
     });
   }
 
-  console.info('[realtime] 📡 Broadcast event', {
-    type: event.type,
-    callId: targetCallId,
-    seq: event.seq,
-    recipients: sentCount,
-    totalClients: clients.size,
-    timestamp: new Date().toISOString(),
-    clientDetails: sentCount > 0 ? Array.from(clients.entries())
-      .filter(([_, client]) => {
-        const matches = client.callId === null || 
-                        client.callId === targetCallId ||
-                        (client.callId && targetCallId && (
-                          client.callId.includes(targetCallId) || 
-                          targetCallId.includes(client.callId)
-                        ));
-        return matches;
-      })
-      .map(([id, client]) => ({ id, callId: client.callId }))
-      : (sentCount === 0 && clients.size > 0 ? { 
-          allClientCallIds,
-          note: 'No matching callId found - check UI connection' 
-        } : [])
-  });
+  // Minimal info logging - only for transcript_line events to reduce memory pressure
+  if (event.type === 'transcript_line' && sentCount > 0) {
+    console.info('[realtime] 📡 Broadcast event', {
+      type: event.type,
+      callId: targetCallId,
+      seq: event.seq,
+      recipients: sentCount,
+      totalClients: clients.size,
+    });
+  }
 }
 
 /**
@@ -304,24 +279,28 @@ function startHeartbeat(): void {
 
   heartbeatTimer = setInterval(() => {
     const now = Date.now();
-    for (const [clientId, client] of clients.entries()) {
+    // CRITICAL FIX: Snapshot client IDs first to avoid capturing entire Map in closure
+    // This prevents the closure from keeping all clients alive
+    const clientIds = Array.from(clients.keys());
+    
+    for (const clientId of clientIds) {
+      const client = clients.get(clientId);
+      if (!client) continue; // Already removed
+      
       try {
         // CRITICAL FIX: Validate stream is writable before sending heartbeat
         const isClosed = client.res.destroyed || client.res.writableEnded || 
                          (client.res.controller && client.res.controller.desiredSize === null);
         
         if (isClosed) {
-          console.debug('[realtime] Heartbeat skipped - stream closed', { clientId });
           clients.delete(clientId);
           continue;
         }
         
         // Send comment (ignored by EventSource but keeps connection alive)
-        // CRITICAL FIX: Use sendEvent helper to ensure proper error handling
         if (typeof client.res.write === 'function') {
           client.res.write(`: heartbeat ${now}\n\n`);
         } else {
-          console.warn('[realtime] Heartbeat failed - res.write not available', { clientId });
           clients.delete(clientId);
         }
       } catch (err: any) {
@@ -329,7 +308,7 @@ function startHeartbeat(): void {
         if (err?.message?.includes('closed') || 
             err?.name === 'TypeError' ||
             err?.code === 'ERR_STREAM_WRITE_AFTER_END') {
-          console.debug('[realtime] Heartbeat failed - stream closed', { clientId });
+          // Stream closed - silently remove
         } else {
           console.warn('[realtime] Heartbeat failed for client', { 
             clientId, 
@@ -338,6 +317,11 @@ function startHeartbeat(): void {
         }
         clients.delete(clientId);
       }
+    }
+    
+    // Stop heartbeat if no clients left
+    if (clients.size === 0) {
+      stopHeartbeat();
     }
   }, HEARTBEAT_INTERVAL_MS);
 

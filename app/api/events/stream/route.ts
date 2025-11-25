@@ -149,7 +149,9 @@ export async function GET(req: Request) {
           }
         }
         
+        // CRITICAL FIX: Nullify all references to allow garbage collection
         streamController = null;
+        closeHandler = null;
       },
     });
 
