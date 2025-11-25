@@ -302,7 +302,6 @@ function LivePageContent() {
       };
 
       setDispositionData(dispositionData);
-      setViewMode('disposition');
       setDispositionOpen(true);
     } catch (err: any) {
       console.error('[Live] Failed to generate summary', err);
