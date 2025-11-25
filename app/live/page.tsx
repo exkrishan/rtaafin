@@ -1,19 +1,14 @@
 'use client';
 
-import { useState, useEffect } from 'react';
-import TranscriptPanel from '@/components/TranscriptPanel';
+import { useState, useEffect, useRef } from 'react';
 import AutoDispositionModal, { Suggestion } from '@/components/AutoDispositionModal';
 import AgentAssistPanelV2, { KBArticle, DispositionData } from '@/components/AgentAssistPanelV2';
 import { Customer } from '@/components/CustomerDetailsHeader';
 import CentralCallView from '@/components/CentralCallView';
 import LeftSidebar from '@/components/LeftSidebar';
+import LiveTranscriptPanel from '@/components/LiveTranscriptPanel';
 import ToastContainer from '@/components/ToastContainer';
-
-interface EnvCheck {
-  name: string;
-  value: string | undefined;
-  required: boolean;
-}
+import { useRealtimeTranscript } from '@/hooks/useRealtimeTranscript';
 
 // Mock customer data for live (would come from API in production)
 const mockCustomer: Customer = {
@@ -35,93 +30,204 @@ export default function LivePage() {
   const [tenantId] = useState('default');
   const [viewMode, setViewMode] = useState<'agent-assist' | 'disposition'>('agent-assist');
   const [dispositionOpen, setDispositionOpen] = useState(false);
-  const [transcriptUtterances, setTranscriptUtterances] = useState<Array<{
-    utterance_id: string;
-    speaker: 'agent' | 'customer';
-    text: string;
-    confidence: number;
-    timestamp: string;
-  }>>([]);
   const [dispositionData, setDispositionData] = useState<{
     suggested: Suggestion[];
     autoNotes: string;
   } | null>(null);
-  const [envStatus, setEnvStatus] = useState<{
-    missing: string[];
-    available: string[];
-  }>({ missing: [], available: [] });
+  const [kbArticles, setKbArticles] = useState<KBArticle[]>([]);
 
-  // Check environment variables on mount
+  // Auto-discovery state (from test-agent-assist pattern)
+  const [lastDiscoveredCallId, setLastDiscoveredCallId] = useState<string | null>(null);
+  const [isAutoDiscovering, setIsAutoDiscovering] = useState(true);
+  
+  // Retry state for exponential backoff
+  const discoveryRetryCountRef = useRef(0);
+  const isDiscoveryPausedRef = useRef(false);
+  const lastSuccessTimeRef = useRef<number>(Date.now());
+
+  // CRITICAL: Read callId from URL parameter FIRST (before auto-discovery)
+  // This ensures manual callId from URL takes precedence over auto-discovery
   useEffect(() => {
-    const requiredEnvVars = [
-      'REDIS_URL',
-      'GEMINI_API_KEY',
-      'NEXT_PUBLIC_SUPABASE_URL',
-      'SUPABASE_SERVICE_ROLE_KEY',
-    ];
-
-    const optionalEnvVars = [
-      'LLM_API_KEY',
-      'LLM_PROVIDER',
-      'DEEPGRAM_API_KEY',
-    ];
-
-    const missing: string[] = [];
-    const available: string[] = [];
-
-    // Check required vars (we can only check client-side accessible ones)
-    // For server-side vars, we'll show a banner
-    const clientAccessibleVars = ['NEXT_PUBLIC_SUPABASE_URL'];
+    const params = new URLSearchParams(window.location.search);
+    const urlCallId = params.get('callId');
     
-    requiredEnvVars.forEach(varName => {
-      if (clientAccessibleVars.includes(varName)) {
-        const value = process.env[`NEXT_PUBLIC_${varName}`] || process.env[varName];
-        if (!value) {
-          missing.push(varName);
-        } else {
-          available.push(varName);
-        }
-      } else {
-        // Server-side only - assume missing for now (will be checked via API)
-        missing.push(varName);
+    if (urlCallId && urlCallId.trim().length > 0) {
+      const trimmedCallId = urlCallId.trim();
+      console.log('[Live] 🎯 Using callId from URL parameter:', trimmedCallId);
+      setCallId(trimmedCallId);
+      setLastDiscoveredCallId(trimmedCallId);
+      setIsAutoDiscovering(false); // Disable auto-discovery when URL param is set
+    } else {
+      console.log('[Live] No URL parameter provided, will use auto-discovery');
+      setIsAutoDiscovering(true);
+    }
+  }, []); // Run once on mount only
+
+  // Auto-discover active calls silently in background
+  // Copied from test-agent-assist with exponential backoff
+  useEffect(() => {
+    const discoverActiveCalls = async () => {
+      // Check if URL has callId parameter - don't override it
+      const params = new URLSearchParams(window.location.search);
+      const urlCallId = params.get('callId');
+      const hasUrlCallId = urlCallId && urlCallId.trim().length > 0;
+      
+      // If URL has callId, skip auto-discovery (user explicitly set it)
+      if (hasUrlCallId) {
+        console.debug('[Live] URL parameter present, skipping auto-discovery');
+        discoveryRetryCountRef.current = 0;
+        isDiscoveryPausedRef.current = false;
+        return;
       }
-    });
 
-    optionalEnvVars.forEach(varName => {
-      const value = process.env[`NEXT_PUBLIC_${varName}`] || process.env[varName];
-      if (value) {
-        available.push(varName);
+      // If discovery is paused due to repeated failures, skip
+      if (isDiscoveryPausedRef.current) {
+        return;
       }
-    });
 
-    setEnvStatus({ missing, available });
-
-    // Also check via API endpoint
-    fetch('/api/debug/env')
-      .then(res => res.json())
-      .then(data => {
-        if (data.env) {
-          const serverMissing: string[] = [];
-        const serverAvailable: string[] = [];
+      // Comprehensive error handling with exponential backoff
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 5000);
         
-        requiredEnvVars.forEach(varName => {
-          if (data.env[varName] || data.env[`NEXT_PUBLIC_${varName}`]) {
-            serverAvailable.push(varName);
-          } else {
-            serverMissing.push(varName);
+        const response = await fetch('/api/calls/active?limit=10', {
+          signal: controller.signal,
+        });
+        
+        clearTimeout(timeoutId);
+        
+        // Reset retry count on success
+        discoveryRetryCountRef.current = 0;
+        isDiscoveryPausedRef.current = false;
+        lastSuccessTimeRef.current = Date.now();
+        
+        // Handle non-OK responses gracefully
+        if (!response.ok) {
+          if (response.status === 503) {
+            console.debug('[Live] Service unavailable (503), skipping auto-discovery');
+            return;
           }
-        });
-
-        setEnvStatus({
-          missing: serverMissing,
-          available: [...new Set([...available, ...serverAvailable])],
-        });
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+        
+        // Check if response has content before parsing
+        const text = await response.text();
+        if (!text || text.trim().length === 0) {
+          console.debug('[Live] Empty response from /api/calls/active');
+          return;
+        }
+        
+        let data;
+        try {
+          data = JSON.parse(text);
+        } catch (parseError) {
+          console.error('[Live] Failed to parse JSON response:', parseError);
+          return;
+        }
+        
+        if (data.ok && data.calls && data.calls.length > 0) {
+          const mostRecentCall = data.calls[0];
+          
+          if (mostRecentCall && mostRecentCall.interactionId) {
+            const interactionId = mostRecentCall.interactionId;
+            
+            // Use functional updates to avoid stale closures
+            setLastDiscoveredCallId(currentLast => {
+              if (interactionId !== currentLast) {
+                console.log('[Live] 🎯 Auto-discovered call:', {
+                  interactionId,
+                  status: mostRecentCall.status,
+                  lastActivity: new Date(mostRecentCall.lastActivity).toISOString(),
+                });
+                
+                setCallId(prevCallId => {
+                  if (prevCallId === interactionId) {
+                    return prevCallId; // No change needed
+                  }
+                  console.log('[Live] ✅ CallId updated - SSE will reconnect with new callId:', interactionId);
+                  return interactionId;
+                });
+                
+                return interactionId;
+              }
+              return currentLast;
+            });
+          } else if (data.latestCall && data.latestCall.trim && data.latestCall.trim().length > 0) {
+            setLastDiscoveredCallId(currentLast => {
+              if (data.latestCall !== currentLast) {
+                console.log('[Live] 🎯 Auto-discovered new call (via latestCall):', data.latestCall);
+                setCallId(data.latestCall);
+                return data.latestCall;
+              }
+              return currentLast;
+            });
+          }
+        } else {
+          console.debug('[Live] No active calls found, keeping current callId');
+        }
+      } catch (err: any) {
+        // Handle timeout and network errors with exponential backoff
+        if (err.name === 'AbortError' || err.name === 'TimeoutError') {
+          const newRetryCount = discoveryRetryCountRef.current + 1;
+          discoveryRetryCountRef.current = newRetryCount;
+          
+          if (newRetryCount >= 3) {
+            console.warn('[Live] Request timeout when fetching active calls (5s)', {
+              retryCount: newRetryCount,
+              note: newRetryCount >= 5 
+                ? 'Auto-discovery paused temporarily. Will retry with backoff.' 
+                : 'Auto-discovery will retry with backoff.',
+            });
+            
+            // Pause discovery for 30 seconds after 5 consecutive failures
+            if (newRetryCount >= 5) {
+              isDiscoveryPausedRef.current = true;
+              setTimeout(() => {
+                isDiscoveryPausedRef.current = false;
+                discoveryRetryCountRef.current = 0;
+                console.debug('[Live] Auto-discovery resumed after pause');
+              }, 30000);
+            }
+          } else {
+            console.debug('[Live] Request timeout, retrying...', { retryCount: newRetryCount });
+          }
+        } else {
+          console.error('[Live] Failed to discover active calls:', {
+            error: err.message || String(err),
+            errorName: err.name,
+          });
+        }
       }
-      })
-      .catch(err => {
-        console.error('[Live] Failed to check server env vars:', err);
-      });
-  }, []);
+    };
+
+    // Initial discovery
+    discoverActiveCalls();
+
+    // Dynamic polling with exponential backoff
+    let timeoutId: NodeJS.Timeout;
+    
+    const scheduleNextPoll = () => {
+      const baseInterval = 5000; // 5 seconds base
+      const retryCount = discoveryRetryCountRef.current;
+      
+      // Calculate backoff: 5s, 7.5s, 10s, 12.5s, 15s (max)
+      const backoffMultiplier = retryCount === 0 ? 1 : Math.min(1 + retryCount * 0.5, 3);
+      const pollInterval = baseInterval * backoffMultiplier;
+      
+      timeoutId = setTimeout(() => {
+        discoverActiveCalls();
+        scheduleNextPoll();
+      }, pollInterval);
+    };
+    
+    scheduleNextPoll();
+
+    return () => {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+    };
+  }, []); // Empty dependency array - use functional updates
 
   // Subscribe to transcripts when callId changes
   useEffect(() => {
@@ -130,7 +236,6 @@ export default function LivePage() {
     }
 
     console.log('[Live] Subscribing to transcripts for:', callId);
-    // Subscribe to transcripts for this interaction ID
     fetch('/api/transcripts/subscribe', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -148,6 +253,64 @@ export default function LivePage() {
         console.error('[Live] ❌ Error subscribing to transcripts:', err);
       });
   }, [callId]);
+
+  // CRITICAL: Single hook instance for all events (transcripts, call_end, intent_update)
+  // This ensures only ONE EventSource connection
+  const { 
+    transcripts, 
+    isConnected: transcriptConnected, 
+    error: transcriptError 
+  } = useRealtimeTranscript(
+    callId || null,
+    {
+      autoReconnect: true,
+      // Use refs pattern - callbacks won't cause reconnection loop
+      onCallEnd: async (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          console.log('[Live] 📞 Call ended event received', { callId });
+          
+          // Trigger disposition generation
+          await disposeCall();
+        } catch (err) {
+          console.error('[Live] Failed to handle call_end event', err);
+        }
+      },
+      onIntentUpdate: (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          console.log('[Live] 🎯 Intent update event received', { callId, intent: data.intent });
+          
+          // Update KB articles if provided
+          if (data.articles && Array.isArray(data.articles) && data.articles.length > 0) {
+            const articles: KBArticle[] = data.articles.map((article: any) => ({
+              id: article.id || article.code || String(Math.random()),
+              title: article.title || 'Untitled',
+              snippet: article.snippet || '',
+              url: article.url,
+              confidence: article.score || article.confidence || 0.8,
+              intent: data.intent,
+              intentConfidence: data.confidence,
+            }));
+            
+            // Update local state
+            setKbArticles(prev => {
+              const existingIds = new Set(prev.map(a => a.id));
+              const newArticles = articles.filter(a => !existingIds.has(a.id));
+              return [...newArticles, ...prev];
+            });
+            
+            // Update AgentAssistPanelV2 via window function (when useSse=false)
+            if (typeof window !== 'undefined' && (window as any).__updateKbArticles) {
+              (window as any).__updateKbArticles(articles, data.intent, data.confidence);
+            }
+          }
+        } catch (err) {
+          console.error('[Live] Failed to parse intent_update event', err);
+        }
+      },
+    }
+  );
 
   const disposeCall = async () => {
     if (!callId) return;
@@ -210,38 +373,19 @@ export default function LivePage() {
     }
   };
 
+  const handleClearCallId = () => {
+    setCallId('');
+    setLastDiscoveredCallId(null);
+    setIsAutoDiscovering(true);
+    // Clear URL parameter if present
+    const url = new URL(window.location.href);
+    url.searchParams.delete('callId');
+    window.history.replaceState({}, '', url.toString());
+  };
+
   return (
     <div className="min-h-screen bg-surface">
-      {/* Environment Validation Banner */}
-      {envStatus.missing.length > 0 && (
-        <div className="bg-yellow-50 border-l-4 border-yellow-400 p-4 mb-4">
-          <div className="flex">
-            <div className="flex-shrink-0">
-              <svg className="h-5 w-5 text-yellow-400" viewBox="0 0 20 20" fill="currentColor">
-                <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
-              </svg>
-            </div>
-            <div className="ml-3 flex-1">
-              <h3 className="text-sm font-medium text-yellow-800">
-                Missing Environment Variables
-              </h3>
-              <div className="mt-2 text-sm text-yellow-700">
-                <p>The following environment variables are required for Live mode:</p>
-                <ul className="list-disc list-inside mt-2 space-y-1">
-                  {envStatus.missing.map(varName => (
-                    <li key={varName} className="font-mono text-xs">{varName}</li>
-                  ))}
-                </ul>
-                <p className="mt-2">
-                  Please configure these in your deployment platform (Render) or set them in your <code className="font-mono text-xs">.env.local</code> file.
-                </p>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Call ID Input */}
+      {/* Call ID Input with Auto-Discovery Status */}
       <div className="bg-white border-b border-gray-200 p-4">
         <div className="flex items-center gap-4">
           <label htmlFor="callId" className="text-sm font-medium text-gray-700">
@@ -251,10 +395,27 @@ export default function LivePage() {
             id="callId"
             type="text"
             value={callId}
-            onChange={(e) => setCallId(e.target.value)}
-            placeholder="Enter interaction ID from ASR Worker logs"
+            onChange={(e) => {
+              const newCallId = e.target.value;
+              setCallId(newCallId);
+              if (newCallId.trim().length > 0) {
+                setIsAutoDiscovering(false);
+              } else {
+                setIsAutoDiscovering(true);
+              }
+            }}
+            placeholder={isAutoDiscovering ? "Auto-discovering active calls..." : "Enter interaction ID manually"}
             className="flex-1 px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
           />
+          {callId && (
+            <button
+              onClick={handleClearCallId}
+              className="px-3 py-2 bg-gray-200 text-gray-700 rounded-md text-sm font-medium hover:bg-gray-300"
+              title="Clear and resume auto-discovery"
+            >
+              Clear
+            </button>
+          )}
           <button
             onClick={disposeCall}
             disabled={!callId}
@@ -263,9 +424,20 @@ export default function LivePage() {
             📝 Dispose Call
           </button>
         </div>
-        <p className="mt-2 text-xs text-gray-500">
-          Enter the interaction_id from your ASR Worker logs (e.g., from Redis Streams topic: transcript.&lt;interaction_id&gt;)
-        </p>
+        <div className="mt-2 flex items-center gap-4">
+          <p className="text-xs text-gray-500">
+            {isAutoDiscovering 
+              ? '🔄 Auto-discovering active calls...' 
+              : callId 
+                ? `✅ Connected to: ${callId}` 
+                : 'Enter interaction ID manually or wait for auto-discovery'}
+          </p>
+          {lastDiscoveredCallId && (
+            <span className="text-xs text-green-600">
+              Last discovered: {lastDiscoveredCallId}
+            </span>
+          )}
+        </div>
       </div>
 
       {/* Main Layout */}
@@ -302,82 +474,89 @@ export default function LivePage() {
           </div>
         </div>
 
-        {/* Right Column: Agent Assist Panel V2 - Right-docked */}
+        {/* Right Column: Transcript Panel + Agent Assist Panel V2 */}
         {callId && viewMode === 'agent-assist' && (
-          <AgentAssistPanelV2
-            agentId="agent-live-123"
-            tenantId={tenantId}
-            interactionId={callId}
-            customer={mockCustomer}
-            callDuration="00:00"
-            isCallActive={true}
-            onTranscriptEvent={(event) => {
-              console.log('[Live] Transcript event:', event);
-              setTranscriptUtterances(prev => {
-                const existing = prev.find(u => u.utterance_id === event.utterance_id);
-                if (existing) {
-                  return prev.map(u => u.utterance_id === event.utterance_id ? event : u);
-                }
-                return [...prev, event];
-              });
-            }}
-            triggerKBSearch={async (query, context) => {
-              console.log('[Live] KB search triggered:', { query, context });
-              try {
-                const response = await fetch(`/api/kb/search?q=${encodeURIComponent(query)}&tenantId=${tenantId}&limit=10`);
-                const payload = await response.json();
-                
-                if (payload.ok && Array.isArray(payload.results)) {
-                  return payload.results.map((article: any) => ({
-                    id: article.id || article.code,
-                    title: article.title,
-                    snippet: article.snippet || '',
-                    confidence: article.score || 0.8,
-                    url: article.url,
-                  }));
-                }
-                
-                return [];
-              } catch (err) {
-                console.error('[Live] KB search failed', err);
-                return [];
-              }
-            }}
-            fetchDispositionSummary={async (interactionId) => {
-              console.log('[Live] Fetching disposition for:', interactionId);
-              // TODO: Replace with actual API call
-              try {
-                const response = await fetch(`/api/calls/summary`, {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ callId: interactionId, tenantId }),
-                });
-                const payload = await response.json();
-                return {
-                  dispositionId: payload.dispositions?.[0]?.mappedId || 'disposition-1',
-                  dispositionTitle: payload.dispositions?.[0]?.mappedTitle || 'General Inquiry',
-                  confidence: payload.dispositions?.[0]?.score || 0.5,
-                  subDispositions: payload.dispositions?.[0]?.subDisposition ? [{ id: 'sub-1', title: payload.dispositions[0].subDisposition }] : [],
-                  autoNotes: payload.summary ? Object.values(payload.summary).filter(Boolean).join('\n\n') : 'No notes generated.',
-                };
-              } catch (err) {
-                console.error('[Live] Failed to fetch disposition', err);
-                throw err;
-              }
-            }}
-            emitTelemetry={(eventName, payload) => {
-              console.log('[Live] Telemetry:', eventName, payload);
-              // TODO: Send to telemetry service
-            }}
-            onOpenCRM={() => {
-              console.log('[Live] Open CRM clicked');
-              window.open(`https://crm.example.com/customer/${mockCustomer.id}`, '_blank');
-            }}
-            onOpenCaseHistory={() => {
-              console.log('[Live] Open Case History clicked');
-              window.open(`https://crm.example.com/cases/${mockCustomer.id}`, '_blank');
-            }}
-          />
+          <div className="fixed right-0 top-[120px] bottom-0 w-[376px] bg-white border-l border-gray-200 flex flex-col">
+            {/* Transcript Panel - Receives transcripts from parent hook */}
+            <div className="flex-1 overflow-y-auto p-4 border-b border-gray-200">
+              <LiveTranscriptPanel 
+                transcripts={transcripts}
+                isConnected={transcriptConnected}
+                error={transcriptError}
+              />
+            </div>
+
+            {/* Agent Assist Panel V2 - KB Articles Only (useSse=false to prevent duplicate connections) */}
+            <div className="flex-1 overflow-y-auto">
+              <AgentAssistPanelV2
+                agentId="agent-live-123"
+                tenantId={tenantId}
+                interactionId={callId}
+                customer={mockCustomer}
+                callDuration="00:00"
+                isCallActive={true}
+                useSse={false} // CRITICAL: Disable SSE to prevent duplicate connections
+                directTranscripts={[]} // Disable transcript rendering (handled by LiveTranscriptPanel)
+                triggerKBSearch={async (query, context) => {
+                  console.log('[Live] KB search triggered:', { query, context });
+                  try {
+                    const response = await fetch(`/api/kb/search?q=${encodeURIComponent(query)}&tenantId=${tenantId}&limit=10`);
+                    const payload = await response.json();
+                    
+                    if (payload.ok && Array.isArray(payload.results)) {
+                      return payload.results.map((article: any) => ({
+                        id: article.id || article.code,
+                        title: article.title,
+                        snippet: article.snippet || '',
+                        confidence: article.score || 0.8,
+                        url: article.url,
+                      }));
+                    }
+                    
+                    return [];
+                  } catch (err) {
+                    console.error('[Live] KB search failed', err);
+                    return [];
+                  }
+                }}
+                fetchDispositionSummary={async (interactionId) => {
+                  console.log('[Live] Fetching disposition for:', interactionId);
+                  try {
+                    const response = await fetch(`/api/calls/summary`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ callId: interactionId, tenantId }),
+                    });
+                    const payload = await response.json();
+                    return {
+                      dispositionId: payload.dispositions?.[0]?.mappedId || 'disposition-1',
+                      dispositionTitle: payload.dispositions?.[0]?.mappedTitle || 'General Inquiry',
+                      confidence: payload.dispositions?.[0]?.score || 0.5,
+                      subDispositions: payload.dispositions?.[0]?.subDisposition ? [{ id: 'sub-1', title: payload.dispositions[0].subDisposition }] : [],
+                      autoNotes: payload.summary ? Object.values(payload.summary).filter(Boolean).join('\n\n') : 'No notes generated.',
+                    };
+                  } catch (err) {
+                    console.error('[Live] Failed to fetch disposition', err);
+                    throw err;
+                  }
+                }}
+                emitTelemetry={(eventName, payload) => {
+                  console.log('[Live] Telemetry:', eventName, payload);
+                }}
+                onOpenCRM={() => {
+                  console.log('[Live] Open CRM clicked');
+                  window.open(`https://crm.example.com/customer/${mockCustomer.id}`, '_blank');
+                }}
+                onOpenCaseHistory={() => {
+                  console.log('[Live] Open Case History clicked');
+                  window.open(`https://crm.example.com/cases/${mockCustomer.id}`, '_blank');
+                }}
+                onKbArticlesUpdate={(articles) => {
+                  setKbArticles(articles);
+                }}
+              />
+            </div>
+          </div>
         )}
       </div>
 
@@ -391,7 +570,6 @@ export default function LivePage() {
           }}
           onBack={() => {
             setViewMode('agent-assist');
-            // Keep modal open but hidden, so state is preserved
           }}
           callId={callId}
           tenantId={tenantId}

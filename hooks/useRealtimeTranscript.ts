@@ -35,6 +35,8 @@ export function useRealtimeTranscript(
   options?: {
     onTranscript?: (utterance: TranscriptUtterance) => void;
     onConnectionChange?: (connected: boolean) => void;
+    onCallEnd?: (event: MessageEvent) => void;
+    onIntentUpdate?: (event: MessageEvent) => void;
     autoReconnect?: boolean;
     reconnectDelay?: number;
   }
@@ -52,9 +54,26 @@ export function useRealtimeTranscript(
   const {
     onTranscript,
     onConnectionChange,
+    onCallEnd,
+    onIntentUpdate,
     autoReconnect = true,
     reconnectDelay = 2000,
   } = options || {};
+
+  // CRITICAL: Use refs for ALL callbacks to prevent infinite reconnection loop
+  // Callbacks are recreated on every render, so we use refs to avoid dependency issues
+  const onTranscriptRef = useRef(onTranscript);
+  const onConnectionChangeRef = useRef(onConnectionChange);
+  const onCallEndRef = useRef(onCallEnd);
+  const onIntentUpdateRef = useRef(onIntentUpdate);
+
+  // Update refs when callbacks change (without triggering reconnection)
+  useEffect(() => {
+    onTranscriptRef.current = onTranscript;
+    onConnectionChangeRef.current = onConnectionChange;
+    onCallEndRef.current = onCallEnd;
+    onIntentUpdateRef.current = onIntentUpdate;
+  });
 
   // Cleanup function
   const cleanup = useCallback(() => {
@@ -149,7 +168,7 @@ export function useRealtimeTranscript(
         
         setIsConnected(true);
         setError(null);
-        onConnectionChange?.(true);
+        onConnectionChangeRef.current?.(true);
       };
 
       // Connection error
@@ -164,7 +183,7 @@ export function useRealtimeTranscript(
         if (readyState === EventSource.CLOSED) {
           clearTimeout(connectionTimeoutRef.current);
           setIsConnected(false);
-          onConnectionChange?.(false);
+          onConnectionChangeRef.current?.(false);
           
           // EventSource will auto-reconnect, but we add manual retry as backup
           if (autoReconnect && shouldReconnectRef.current) {
@@ -181,7 +200,7 @@ export function useRealtimeTranscript(
           connectionTimeoutRef.current = undefined;
           setIsConnected(true);
           setError(null);
-          onConnectionChange?.(true); // CRITICAL: Notify that we're connected
+          onConnectionChangeRef.current?.(true); // CRITICAL: Notify that we're connected
         }
       };
 
@@ -288,8 +307,8 @@ export function useRealtimeTranscript(
             return [...prev, utterance];
           });
 
-          // Call callback if provided
-          onTranscript?.(utterance);
+          // Call callback if provided (via ref to avoid dependency issues)
+          onTranscriptRef.current?.(utterance);
         } catch (err) {
           console.error('[useRealtimeTranscript] Failed to parse transcript_line', err, event.data);
         }
@@ -310,12 +329,48 @@ export function useRealtimeTranscript(
             setIsConnected(true);
             setError(null);
             reconnectAttemptsRef.current = 0; // Reset attempts
-            onConnectionChange?.(true);
+            onConnectionChangeRef.current?.(true);
           }
         } catch (err) {
           // Ignore parse errors for non-JSON messages
         }
       });
+
+      // Listen for call_end events
+      if (onCallEndRef.current) {
+        eventSource.addEventListener('call_end', (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            const eventCallId = data.callId || data.interaction_id || data.interactionId;
+            
+            // Only process if callId matches or is missing (assume it's for this call)
+            if (!eventCallId || eventCallId === callId) {
+              console.log('[useRealtimeTranscript] 📞 Call ended event received', { callId, eventCallId });
+              onCallEndRef.current?.(event);
+            }
+          } catch (err) {
+            console.error('[useRealtimeTranscript] Failed to parse call_end event', err, event.data);
+          }
+        });
+      }
+
+      // Listen for intent_update events
+      if (onIntentUpdateRef.current) {
+        eventSource.addEventListener('intent_update', (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            const eventCallId = data.callId || data.interaction_id || data.interactionId;
+            
+            // Only process if callId matches or is missing (assume it's for this call)
+            if (!eventCallId || eventCallId === callId) {
+              console.log('[useRealtimeTranscript] 🎯 Intent update event received', { callId, eventCallId });
+              onIntentUpdateRef.current?.(event);
+            }
+          } catch (err) {
+            console.error('[useRealtimeTranscript] Failed to parse intent_update event', err, event.data);
+          }
+        });
+      }
     };
 
     // Initial connection
@@ -326,7 +381,7 @@ export function useRealtimeTranscript(
       shouldReconnectRef.current = false;
       cleanup();
     };
-  }, [callId, autoReconnect, reconnectDelay, onTranscript, onConnectionChange, cleanup]);
+  }, [callId, autoReconnect, reconnectDelay, cleanup]); // CRITICAL: No callbacks in dependency array - use refs instead
 
   return {
     transcripts,
