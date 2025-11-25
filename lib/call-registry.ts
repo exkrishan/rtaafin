@@ -89,9 +89,22 @@ class CallRegistry {
       });
 
       this.redis.on('error', (err: Error) => {
+        const errorCode = (err as any).code;
+        const errorMsg = err.message;
+        
+        // Handle EPIPE errors (connection closed unexpectedly) - prevent memory leaks
+        if (errorCode === 'EPIPE' || errorMsg.includes('EPIPE')) {
+          console.warn('[CallRegistry] ⚠️ Redis EPIPE error (connection closed) - will reconnect:', {
+            redisUrl: this.redisUrl.replace(/:[^:@]+@/, ':****@'), // Mask password
+          });
+          this.connectionStatus = 'disconnected';
+          // Don't set to 'error' - allow reconnection attempts
+          return;
+        }
+        
         console.error('[CallRegistry] ❌ Redis error:', {
-          error: err.message,
-          code: (err as any).code,
+          error: errorMsg,
+          code: errorCode,
           redisUrl: this.redisUrl.replace(/:[^:@]+@/, ':****@'), // Mask password
         });
         this.connectionStatus = 'error';
@@ -637,7 +650,7 @@ class CallRegistry {
       
       // Record success for circuit breaker
       this.recordSuccess();
-      
+
       // Return only the limit requested
       return result;
     } catch (error: any) {

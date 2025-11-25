@@ -236,11 +236,22 @@ export default function AgentAssistPanelV2({
             }));
           // Sort by timestamp (newest first), then merge with existing
           const allArticles = [...newArticles, ...prev];
-          return allArticles.sort((a, b) => {
+          const sorted = allArticles.sort((a, b) => {
             const aTime = (a as any).timestamp || 0;
             const bTime = (b as any).timestamp || 0;
             return bTime - aTime; // Newest first
           });
+          
+          // CRITICAL FIX: Limit KB articles to prevent memory leaks (max 50 articles)
+          const MAX_KB_ARTICLES = 50;
+          if (sorted.length > MAX_KB_ARTICLES) {
+            console.warn('[AgentAssistPanelV2] ⚠️ Pruning KB articles to prevent memory issues', {
+              before: sorted.length,
+              after: MAX_KB_ARTICLES,
+            });
+            return sorted.slice(0, MAX_KB_ARTICLES);
+          }
+          return sorted;
         });
         
         onKbArticlesUpdate(articles, intent, confidence);

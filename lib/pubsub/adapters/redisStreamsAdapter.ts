@@ -155,6 +155,24 @@ export class RedisStreamsAdapter implements PubSubAdapter {
 
     this.redis.on('error', (err: Error) => {
       const errorMsg = err instanceof Error ? err.message : String(err);
+      const errorCode = (err as any).code;
+      
+      // Handle EPIPE errors (connection closed unexpectedly)
+      if (errorCode === 'EPIPE' || errorMsg.includes('EPIPE')) {
+        console.warn('[RedisStreamsAdapter] ⚠️ Redis EPIPE error (connection closed) - cleaning up:', url);
+        // Remove from cache and close connection to prevent memory leaks
+        if (connectionCache.get(url) === this.redis) {
+          connectionCache.delete(url);
+          connectionRefCount.delete(url);
+        }
+        try {
+          this.redis.disconnect();
+        } catch (e) {
+          // Ignore disconnect errors
+        }
+        this.redis = null;
+        return;
+      }
       
       // If max clients error, mark it and stop retrying
       if (errorMsg.includes('max number of clients')) {
