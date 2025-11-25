@@ -28,7 +28,7 @@ const CALL_METADATA_KEY_PREFIX = 'call:metadata:';
 
 class CallRegistry {
   private redis: any;
-  private redisUrl: string;
+  private redisUrl: string = '';
   private connectionStatus: 'connected' | 'disconnected' | 'error' = 'disconnected';
 
   constructor() {
