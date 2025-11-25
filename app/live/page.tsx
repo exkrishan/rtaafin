@@ -44,7 +44,8 @@ function LivePageContent() {
 
   // Auto-discovery state (from test-agent-assist pattern)
   const [lastDiscoveredCallId, setLastDiscoveredCallId] = useState<string | null>(null);
-  const [isAutoDiscovering, setIsAutoDiscovering] = useState(!urlCallId); // Disable if URL has callId
+  // Auto-discovery is always enabled unless URL explicitly provides callId
+  const isAutoDiscovering = !urlCallId;
   
   // Retry state for exponential backoff
   const discoveryRetryCountRef = useRef(0);
@@ -52,15 +53,12 @@ function LivePageContent() {
   const lastSuccessTimeRef = useRef<number>(Date.now());
 
   // Update callId when URL parameter changes (matches simple UI pattern)
+  // If URL has callId, use it (for direct links). Otherwise, auto-discovery handles it.
   useEffect(() => {
     if (urlCallId && urlCallId !== callId) {
-      console.log('[Live] Updating callId from URL', { urlCallId, currentCallId: callId });
+      console.log('[Live] Updating callId from URL parameter', { urlCallId, currentCallId: callId });
       setCallId(urlCallId);
       setLastDiscoveredCallId(urlCallId);
-      setIsAutoDiscovering(false); // Disable auto-discovery when URL param is set
-    } else if (!urlCallId && callId) {
-      // URL param removed, enable auto-discovery
-      setIsAutoDiscovering(true);
     }
   }, [urlCallId, callId]);
 
@@ -366,71 +364,39 @@ function LivePageContent() {
     }
   };
 
-  const handleClearCallId = () => {
-    setCallId('');
-    setLastDiscoveredCallId(null);
-    setIsAutoDiscovering(true);
-    // Clear URL parameter if present
-    const url = new URL(window.location.href);
-    url.searchParams.delete('callId');
-    window.history.replaceState({}, '', url.toString());
-  };
+  // Auto-discovery is always enabled unless URL param is explicitly set
+  // No manual clearing needed - auto-discovery handles everything
 
   return (
     <div className="min-h-screen bg-surface">
-      {/* Call ID Input with Auto-Discovery Status */}
+      {/* Auto-Discovery Status Bar (No Manual Input) */}
       <div className="bg-white border-b border-gray-200 p-4">
-        <div className="flex items-center gap-4">
-          <label htmlFor="callId" className="text-sm font-medium text-gray-700">
-            Interaction ID:
-          </label>
-          <input
-            id="callId"
-            type="text"
-            value={callId}
-            onChange={(e) => {
-              const newCallId = e.target.value;
-              setCallId(newCallId);
-              if (newCallId.trim().length > 0) {
-                setIsAutoDiscovering(false);
-              } else {
-                setIsAutoDiscovering(true);
-              }
-            }}
-            placeholder={isAutoDiscovering ? "Auto-discovering active calls..." : "Enter interaction ID manually"}
-            className="flex-1 px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-          />
-          {callId && (
-            <button
-              onClick={handleClearCallId}
-              className="px-3 py-2 bg-gray-200 text-gray-700 rounded-md text-sm font-medium hover:bg-gray-300"
-              title="Clear and resume auto-discovery"
-            >
-              Clear
-            </button>
-          )}
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-4">
+            <p className="text-sm font-medium text-gray-700">
+              {callId 
+                ? `✅ Connected to: ${callId}` 
+                : '🔄 Auto-discovering active calls...'}
+            </p>
+            {lastDiscoveredCallId && callId === lastDiscoveredCallId && (
+              <span className="text-xs text-green-600">
+                Auto-detected
+              </span>
+            )}
+          </div>
           <button
             onClick={disposeCall}
             disabled={!callId}
             className="px-4 py-2 bg-blue-600 text-white rounded-md text-sm font-medium hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed"
           >
-            📝 Dispose Call
+            📝 End Call & Generate Disposition
           </button>
         </div>
-        <div className="mt-2 flex items-center gap-4">
-          <p className="text-xs text-gray-500">
-            {isAutoDiscovering 
-              ? '🔄 Auto-discovering active calls...' 
-              : callId 
-                ? `✅ Connected to: ${callId}` 
-                : 'Enter interaction ID manually or wait for auto-discovery'}
+        {!callId && (
+          <p className="mt-2 text-xs text-gray-500">
+            Waiting for active call from Exotel... The system will automatically connect when a call starts.
           </p>
-          {lastDiscoveredCallId && (
-            <span className="text-xs text-green-600">
-              Last discovered: {lastDiscoveredCallId}
-            </span>
-          )}
-        </div>
+        )}
       </div>
 
       {/* Main Layout */}
