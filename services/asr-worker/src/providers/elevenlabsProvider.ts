@@ -21,16 +21,40 @@ interface PendingSend {
   chunkSizeMs: number;
 }
 
+interface PendingResolver {
+  resolver: (transcript: Transcript) => void;
+  seq: number;
+  timestamp: number;
+}
+
+interface EventHandlers {
+  partial?: (data: any) => void;
+  committed?: (data: any) => void;
+  committedWithTimestamps?: (data: any) => void;
+  authError?: (error: any) => void;
+  error?: (error: any) => void;
+  quotaExceeded?: (error: any) => void;
+  transcriberError?: (error: any) => void;
+  inputError?: (error: any) => void;
+  close?: (event: any) => void;
+  rawMessageHandler?: (event: MessageEvent) => void;
+}
+
 interface ConnectionState {
   connection: any; // Scribe connection
   isReady: boolean;
   transcriptQueue: Transcript[];
-  pendingResolvers: Array<(transcript: Transcript) => void>;
+  pendingResolvers: PendingResolver[];
   lastTranscript: Transcript | null;
   pendingSends: PendingSend[];
   sampleRate: number;
   interactionId: string;
   streamStartTime: number;
+  eventHandlers?: EventHandlers; // Store handlers for cleanup
+  tokenCreatedAt?: number; // Track token creation time
+  tokenExpiresAt?: number; // Track token expiration time
+  bytesSent?: number; // Track bytes sent
+  transcriptCount?: number; // Track transcript count
 }
 
 interface ElevenLabsMetrics {
@@ -43,11 +67,17 @@ interface ElevenLabsMetrics {
   errors: number;
   averageLatencyMs: number;
   transcriptTimeoutCount: number;
+  totalBytesSent: number;
+  totalTranscriptsPerConnection: Map<string, number>;
+  averageConnectionDurationMs: number;
 }
 
 export class ElevenLabsProvider implements AsrProvider {
   private connections: Map<string, ConnectionState> = new Map();
   private connectionCreationLocks: Map<string, Promise<ConnectionState>> = new Map();
+  private reconnectAttempts: Map<string, number> = new Map();
+  private healthCheckIntervals: Map<string, NodeJS.Timeout> = new Map();
+  private readonly MAX_RECONNECT_ATTEMPTS = 3;
   private apiKey: string;
   private model: string;
   private languageCode: string;
@@ -63,6 +93,9 @@ export class ElevenLabsProvider implements AsrProvider {
     errors: 0,
     averageLatencyMs: 0,
     transcriptTimeoutCount: 0,
+    totalBytesSent: 0,
+    totalTranscriptsPerConnection: new Map(),
+    averageConnectionDurationMs: 0,
   };
 
   constructor(
@@ -145,14 +178,27 @@ export class ElevenLabsProvider implements AsrProvider {
     let state = this.connections.get(interactionId);
 
     if (state && state.isReady && state.connection) {
-      // CRITICAL: Check if sample rate matches - if not, recreate connection
-      if (state.sampleRate !== sampleRate) {
+      // CRITICAL FIX: Check for token expiration (tokens expire after 15 minutes)
+      const TOKEN_REFRESH_THRESHOLD_MS = 14 * 60 * 1000; // Refresh at 14 minutes
+      if (state.tokenCreatedAt && Date.now() - state.tokenCreatedAt > TOKEN_REFRESH_THRESHOLD_MS) {
+        console.info(`[ElevenLabsProvider] 🔄 Token expiring soon, refreshing connection for ${interactionId}`, {
+          interactionId,
+          tokenAge: Date.now() - state.tokenCreatedAt,
+          threshold: TOKEN_REFRESH_THRESHOLD_MS,
+        });
+        await this.closeConnection(interactionId);
+        state = undefined; // Force recreation
+      }
+      // CRITICAL FIX: Check for sample rate mismatch with better error handling
+      else if (state.sampleRate !== sampleRate) {
         console.warn(`[ElevenLabsProvider] ⚠️ Sample rate mismatch for ${interactionId}:`, {
           existingSampleRate: state.sampleRate,
           requestedSampleRate: sampleRate,
           action: 'Closing and recreating connection',
         });
         await this.closeConnection(interactionId);
+        // Wait for connection to fully close before creating new one
+        await new Promise(resolve => setTimeout(resolve, 100));
         state = undefined; // Force recreation
       } else {
         this.metrics.connectionsReused++;
@@ -163,19 +209,25 @@ export class ElevenLabsProvider implements AsrProvider {
       }
     }
 
-    // Check if another call is creating a connection
+    // CRITICAL FIX: Check if another call is creating a connection (with timeout to prevent deadlock)
     const existingLock = this.connectionCreationLocks.get(interactionId);
     if (existingLock) {
       console.debug(`[ElevenLabsProvider] Waiting for connection creation in progress for ${interactionId}`);
       try {
-        return await existingLock;
+        // Add timeout to prevent infinite wait
+        return await Promise.race([
+          existingLock,
+          new Promise<ConnectionState>((_, reject) => 
+            setTimeout(() => reject(new Error('Connection creation timeout')), 30000)
+          )
+        ]);
       } catch (error: any) {
-        // If the other call failed, try to create our own
+        // If the other call failed or timed out, try to create our own
         state = this.connections.get(interactionId);
         if (state && state.isReady) {
           return state;
         }
-        console.warn(`[ElevenLabsProvider] Previous connection creation failed for ${interactionId}, creating new one:`, error.message);
+        console.warn(`[ElevenLabsProvider] Previous connection creation failed/timed out for ${interactionId}, creating new one:`, error.message);
         this.connectionCreationLocks.delete(interactionId);
       }
     }
@@ -232,6 +284,11 @@ export class ElevenLabsProvider implements AsrProvider {
           sampleRate: sampleRate,
         });
         
+        // CRITICAL FIX: Add optional timestamps support (configurable via env var)
+        // Note: includeTimestamps is not a direct Scribe.connect() option, but we can still
+        // register the handler if timestamps are enabled - ElevenLabs may send them anyway
+        const includeTimestamps = process.env.ELEVENLABS_INCLUDE_TIMESTAMPS === 'true';
+        
         let connection;
         try {
           // Use single-use token (not API key) as per ElevenLabs documentation
@@ -253,7 +310,12 @@ export class ElevenLabsProvider implements AsrProvider {
           throw new Error(`Failed to create ElevenLabs connection: ${connectError.message}`);
         }
 
-        // Create connection state
+        // CRITICAL FIX: Track token creation time for expiration handling
+        const TOKEN_EXPIRY_MS = 15 * 60 * 1000; // 15 minutes
+        const tokenCreatedAt = Date.now();
+        const tokenExpiresAt = tokenCreatedAt + TOKEN_EXPIRY_MS;
+        
+        // Create connection state with metrics tracking
         const newState: ConnectionState = {
           connection,
           isReady: false,
@@ -264,9 +326,15 @@ export class ElevenLabsProvider implements AsrProvider {
           sampleRate,
           interactionId,
           streamStartTime: Date.now(),
+          eventHandlers: {}, // Store handlers for cleanup
+          tokenCreatedAt,
+          tokenExpiresAt,
+          bytesSent: 0,
+          transcriptCount: 0,
         };
 
-        // Set up event handlers
+        // CRITICAL FIX: Register ALL event handlers immediately after connection creation
+        // This ensures no events are missed, even if they fire before we wait for OPEN
         // ElevenLabs SDK uses RealtimeEvents constants
         const { RealtimeEvents } = require('@elevenlabs/client');
         
@@ -276,28 +344,8 @@ export class ElevenLabsProvider implements AsrProvider {
         );
         console.debug(`[ElevenLabsProvider] Available RealtimeEvents:`, allEventNames);
         
-        // Listen to all events for debugging
-        allEventNames.forEach(eventName => {
-          const eventValue = RealtimeEvents[eventName];
-          if (eventValue && eventValue !== RealtimeEvents.PARTIAL_TRANSCRIPT && 
-              eventValue !== RealtimeEvents.COMMITTED_TRANSCRIPT &&
-              eventValue !== RealtimeEvents.OPEN &&
-              eventValue !== RealtimeEvents.SESSION_STARTED &&
-              eventValue !== RealtimeEvents.AUTH_ERROR &&
-              eventValue !== RealtimeEvents.ERROR &&
-              eventValue !== RealtimeEvents.CLOSE) {
-            connection.on(eventValue, (data: any) => {
-              console.debug(`[ElevenLabsProvider] 🔔 Received ${eventName} event for ${interactionId}:`, {
-                event: eventName,
-                hasData: !!data,
-                dataType: typeof data,
-                dataKeys: data && typeof data === 'object' ? Object.keys(data) : [],
-              });
-            });
-          }
-        });
-        
         // Wait for WebSocket to open first, then wait for session to start
+        // These handlers must be registered first for the promises to work
         const connectionOpenedPromise = new Promise<void>((resolve) => {
           connection.on(RealtimeEvents.OPEN, () => {
             console.info(`[ElevenLabsProvider] ✅ Connection opened for ${interactionId}`);
@@ -320,7 +368,11 @@ export class ElevenLabsProvider implements AsrProvider {
           });
         });
         
-        connection.on(RealtimeEvents.PARTIAL_TRANSCRIPT, (data: any) => {
+        // CRITICAL FIX: Store event handlers for cleanup
+        const handlers: EventHandlers = {};
+        
+        // Register ALL other event handlers immediately (before waiting for OPEN)
+        handlers.partial = (data: any) => {
           console.info(`[ElevenLabsProvider] 📨 Received PARTIAL_TRANSCRIPT event for ${interactionId}:`, {
             hasTranscript: !!data.transcript,
             hasText: !!data.text, // Legacy support
@@ -330,9 +382,10 @@ export class ElevenLabsProvider implements AsrProvider {
             dataKeys: Object.keys(data),
           });
           this.handleTranscript(interactionId, { ...data, isFinal: false });
-        });
+        };
+        connection.on(RealtimeEvents.PARTIAL_TRANSCRIPT, handlers.partial);
 
-        connection.on(RealtimeEvents.COMMITTED_TRANSCRIPT, (data: any) => {
+        handlers.committed = (data: any) => {
           console.info(`[ElevenLabsProvider] 📨 Received COMMITTED_TRANSCRIPT event for ${interactionId}:`, {
             hasTranscript: !!data.transcript,
             hasText: !!data.text, // Legacy support
@@ -342,9 +395,24 @@ export class ElevenLabsProvider implements AsrProvider {
             dataKeys: Object.keys(data),
           });
           this.handleTranscript(interactionId, { ...data, isFinal: true });
-        });
+        };
+        connection.on(RealtimeEvents.COMMITTED_TRANSCRIPT, handlers.committed);
 
-        connection.on(RealtimeEvents.AUTH_ERROR, (error: any) => {
+        // CRITICAL FIX: Add timestamps handler if timestamps are enabled
+        if (includeTimestamps && RealtimeEvents.COMMITTED_TRANSCRIPT_WITH_TIMESTAMPS) {
+          handlers.committedWithTimestamps = (data: any) => {
+            console.info(`[ElevenLabsProvider] 📨 Received COMMITTED_TRANSCRIPT_WITH_TIMESTAMPS for ${interactionId}:`, {
+              text: data.text || data.transcript,
+              words: data.words,
+              hasWords: !!data.words,
+              wordCount: data.words?.length || 0,
+            });
+            this.handleTranscript(interactionId, { ...data, isFinal: true });
+          };
+          connection.on(RealtimeEvents.COMMITTED_TRANSCRIPT_WITH_TIMESTAMPS, handlers.committedWithTimestamps);
+        }
+
+        handlers.authError = (error: any) => {
           console.error(`[ElevenLabsProvider] ❌ Authentication error for ${interactionId}:`, error);
           console.error(`[ElevenLabsProvider] API Key (first 10 chars): ${this.apiKey.substring(0, 10)}...`);
           console.error(`[ElevenLabsProvider] Please verify:`);
@@ -359,9 +427,10 @@ export class ElevenLabsProvider implements AsrProvider {
           }
           
           this.handleConnectionError(interactionId, new Error(`Authentication failed: ${JSON.stringify(error)}`));
-        });
+        };
+        connection.on(RealtimeEvents.AUTH_ERROR, handlers.authError);
 
-        connection.on(RealtimeEvents.ERROR, (error: any) => {
+        handlers.error = (error: any) => {
           console.error(`[ElevenLabsProvider] Connection error for ${interactionId}:`, error);
           this.metrics.errors++;
           
@@ -372,15 +441,105 @@ export class ElevenLabsProvider implements AsrProvider {
           }
           
           this.handleConnectionError(interactionId, error instanceof Error ? error : new Error(String(error)));
-        });
+        };
+        connection.on(RealtimeEvents.ERROR, handlers.error);
 
-        connection.on(RealtimeEvents.CLOSE, (event: any) => {
+        // CRITICAL FIX: Add specific error event handlers if SDK provides them
+        // Check if SDK provides specific error event constants
+        if (RealtimeEvents.QUOTA_EXCEEDED) {
+          handlers.quotaExceeded = (error: any) => {
+            console.error(`[ElevenLabsProvider] ❌ Quota exceeded for ${interactionId}:`, error);
+            this.metrics.errors++;
+            
+            if (this.connectionHealthMonitor) {
+              this.connectionHealthMonitor.updateConnectionHealth(interactionId, false);
+            }
+            
+            this.handleConnectionError(interactionId, new Error(`Quota exceeded: ${JSON.stringify(error)}`));
+          };
+          connection.on(RealtimeEvents.QUOTA_EXCEEDED, handlers.quotaExceeded);
+        }
+
+        if (RealtimeEvents.TRANSCRIBER_ERROR) {
+          handlers.transcriberError = (error: any) => {
+            console.error(`[ElevenLabsProvider] ❌ Transcriber error for ${interactionId}:`, error);
+            this.metrics.errors++;
+            
+            if (this.connectionHealthMonitor) {
+              this.connectionHealthMonitor.updateConnectionHealth(interactionId, false);
+              this.connectionHealthMonitor.incrementReconnectAttempts(interactionId);
+            }
+            
+            this.handleConnectionError(interactionId, new Error(`Transcriber error: ${JSON.stringify(error)}`));
+          };
+          connection.on(RealtimeEvents.TRANSCRIBER_ERROR, handlers.transcriberError);
+        }
+
+        if (RealtimeEvents.INPUT_ERROR) {
+          handlers.inputError = (error: any) => {
+            console.error(`[ElevenLabsProvider] ❌ Input error for ${interactionId}:`, error);
+            this.metrics.errors++;
+            
+            // Input errors might be recoverable - don't close connection immediately
+            console.warn(`[ElevenLabsProvider] Input error may indicate invalid audio format or parameters`);
+            
+            if (this.connectionHealthMonitor) {
+              this.connectionHealthMonitor.updateConnectionHealth(interactionId, false);
+            }
+            
+            // Don't call handleConnectionError for input errors - they might be recoverable
+            // Just log and let the connection continue
+          };
+          connection.on(RealtimeEvents.INPUT_ERROR, handlers.inputError);
+        }
+
+        handlers.close = (event: any) => {
           console.info(`[ElevenLabsProvider] Connection closed for ${interactionId}`, {
             code: event?.code,
             reason: event?.reason,
             wasClean: event?.wasClean,
           });
+          
+          // CRITICAL FIX: Resolve all pending promises to prevent hangs
+          const state = this.connections.get(interactionId);
+          if (state) {
+            // Resolve all pending resolvers with empty transcript
+            while (state.pendingResolvers.length > 0) {
+              const pendingResolver = state.pendingResolvers.shift();
+              if (pendingResolver) {
+                pendingResolver.resolver({ type: 'partial', text: '', isFinal: false });
+              }
+            }
+            // Clear pending sends queue
+            state.pendingSends = [];
+          }
+          
           this.connections.delete(interactionId);
+        };
+        connection.on(RealtimeEvents.CLOSE, handlers.close);
+        
+        // Store handlers in state for cleanup
+        newState.eventHandlers = handlers;
+        
+        // Listen to all other events for debugging (after main handlers)
+        allEventNames.forEach(eventName => {
+          const eventValue = RealtimeEvents[eventName];
+          if (eventValue && eventValue !== RealtimeEvents.PARTIAL_TRANSCRIPT && 
+              eventValue !== RealtimeEvents.COMMITTED_TRANSCRIPT &&
+              eventValue !== RealtimeEvents.OPEN &&
+              eventValue !== RealtimeEvents.SESSION_STARTED &&
+              eventValue !== RealtimeEvents.AUTH_ERROR &&
+              eventValue !== RealtimeEvents.ERROR &&
+              eventValue !== RealtimeEvents.CLOSE) {
+            connection.on(eventValue, (data: any) => {
+              console.debug(`[ElevenLabsProvider] 🔔 Received ${eventName} event for ${interactionId}:`, {
+                event: eventName,
+                hasData: !!data,
+                dataType: typeof data,
+                dataKeys: data && typeof data === 'object' ? Object.keys(data) : [],
+              });
+            });
+          }
         });
 
         // CRITICAL DEBUG: Listen to ALL events via raw WebSocket messages to see what's actually being sent
@@ -388,7 +547,7 @@ export class ElevenLabsProvider implements AsrProvider {
         if (connection._websocket || (connection as any).websocket) {
           const ws = connection._websocket || (connection as any).websocket;
           if (ws && typeof ws.addEventListener === 'function') {
-            ws.addEventListener('message', (event: MessageEvent) => {
+            handlers.rawMessageHandler = (event: MessageEvent) => {
               try {
                 const data = JSON.parse(event.data);
                 console.info(`[ElevenLabsProvider] 🔍 RAW WebSocket message received for ${interactionId}:`, {
@@ -401,7 +560,8 @@ export class ElevenLabsProvider implements AsrProvider {
               } catch (e) {
                 console.debug(`[ElevenLabsProvider] Raw WebSocket message (non-JSON) for ${interactionId}:`, event.data?.substring?.(0, 100));
               }
-            });
+            };
+            ws.addEventListener('message', handlers.rawMessageHandler);
           }
         }
 
@@ -446,6 +606,9 @@ export class ElevenLabsProvider implements AsrProvider {
             console.debug(`[ElevenLabsProvider] 📡 Connection tracked in health monitor for ${interactionId}`);
           }
         }
+        
+        // CRITICAL FIX: Start health check monitoring
+        this.startHealthCheck(interactionId);
 
         console.info(`[ElevenLabsProvider] Connection ready for ${interactionId}`);
         return newState;
@@ -540,6 +703,13 @@ export class ElevenLabsProvider implements AsrProvider {
               isFinal: false,
             };
 
+        // CRITICAL FIX: Track transcript count for connection metrics
+        if (state.transcriptCount !== undefined) {
+          state.transcriptCount++;
+        } else {
+          state.transcriptCount = 1;
+        }
+
         console.info(`[ElevenLabsProvider] 📝 Transcript (${isFinal ? 'FINAL' : 'PARTIAL'}):`, {
           interactionId,
           text: transcriptText.trim(),
@@ -550,12 +720,26 @@ export class ElevenLabsProvider implements AsrProvider {
 
         state.lastTranscript = transcript;
 
-        // Resolve pending promises or queue transcript
-        if (state.pendingResolvers.length > 0) {
-          const resolver = state.pendingResolvers.shift();
-          if (resolver) {
-            resolver(transcript);
+        // CRITICAL FIX: Match transcript to correct pending resolver by sequence number
+        // Try to match by sequence number if available in data
+        const transcriptSeq = data.seq || data.sequence || null;
+        let matchedResolver: PendingResolver | null = null;
+        
+        if (transcriptSeq !== null && state.pendingResolvers.length > 0) {
+          // Try to find matching resolver by sequence number
+          const matchingIndex = state.pendingResolvers.findIndex(r => r.seq === transcriptSeq);
+          if (matchingIndex >= 0) {
+            matchedResolver = state.pendingResolvers.splice(matchingIndex, 1)[0];
           }
+        }
+        
+        // If no match by seq, use FIFO
+        if (!matchedResolver && state.pendingResolvers.length > 0) {
+          matchedResolver = state.pendingResolvers.shift() || null;
+        }
+        
+        if (matchedResolver) {
+          matchedResolver.resolver(transcript);
         } else {
           state.transcriptQueue.push(transcript);
         }
@@ -622,11 +806,23 @@ export class ElevenLabsProvider implements AsrProvider {
 
         state.lastTranscript = emptyTranscript;
 
-        if (state.pendingResolvers.length > 0) {
-          const resolver = state.pendingResolvers.shift();
-          if (resolver) {
-            resolver(emptyTranscript);
+        // CRITICAL FIX: Match by sequence number if available, otherwise use FIFO
+        const transcriptSeq = data.seq || data.sequence || null;
+        let matchedResolver: PendingResolver | null = null;
+        
+        if (transcriptSeq !== null && state.pendingResolvers.length > 0) {
+          const matchingIndex = state.pendingResolvers.findIndex(r => r.seq === transcriptSeq);
+          if (matchingIndex >= 0) {
+            matchedResolver = state.pendingResolvers.splice(matchingIndex, 1)[0];
           }
+        }
+        
+        if (!matchedResolver && state.pendingResolvers.length > 0) {
+          matchedResolver = state.pendingResolvers.shift() || null;
+        }
+        
+        if (matchedResolver) {
+          matchedResolver.resolver(emptyTranscript);
         }
       }
     } catch (error: any) {
@@ -635,12 +831,56 @@ export class ElevenLabsProvider implements AsrProvider {
     }
   }
 
-  private handleConnectionError(interactionId: string, error: Error): void {
+  private async handleConnectionError(interactionId: string, error: Error): Promise<void> {
     console.error(`[ElevenLabsProvider] Connection error for ${interactionId}:`, error.message);
-    // Close connection on error - it will be recreated on next send
-    this.closeConnection(interactionId).catch((e) => {
-      console.error(`[ElevenLabsProvider] Error closing connection after error:`, e);
-    });
+    
+    // CRITICAL FIX: Implement reconnection logic with exponential backoff
+    const attempts = this.reconnectAttempts.get(interactionId) || 0;
+    const isAuthError = error.message.includes('auth') || error.message.includes('Authentication');
+    
+    // Only retry on transient errors, not auth errors
+    if (attempts < this.MAX_RECONNECT_ATTEMPTS && !isAuthError) {
+      const backoffMs = Math.pow(2, attempts) * 1000; // 1s, 2s, 4s
+      this.reconnectAttempts.set(interactionId, attempts + 1);
+      
+      console.info(`[ElevenLabsProvider] 🔄 Reconnecting in ${backoffMs}ms (attempt ${attempts + 1}/${this.MAX_RECONNECT_ATTEMPTS})`, {
+        interactionId,
+        error: error.message,
+      });
+      
+      // Close existing connection
+      await this.closeConnection(interactionId).catch((e) => {
+        console.error(`[ElevenLabsProvider] Error closing connection before reconnect:`, e);
+      });
+      
+      // Wait for backoff period
+      await new Promise(resolve => setTimeout(resolve, backoffMs));
+      
+      // Try to recreate connection
+      try {
+        // Get sample rate from existing state if available
+        const existingState = this.connections.get(interactionId);
+        const sampleRate = existingState?.sampleRate || 16000; // Default to 16kHz
+        
+        await this.getOrCreateConnection(interactionId, sampleRate);
+        this.reconnectAttempts.delete(interactionId); // Reset on success
+        console.info(`[ElevenLabsProvider] ✅ Reconnection successful for ${interactionId}`);
+      } catch (reconnectError: any) {
+        console.error(`[ElevenLabsProvider] ❌ Reconnection failed for ${interactionId}:`, reconnectError);
+        // Will retry on next error if attempts < max
+      }
+    } else {
+      // Max attempts reached or auth error - close connection permanently
+      console.error(`[ElevenLabsProvider] ❌ Max reconnection attempts reached or auth error for ${interactionId}`, {
+        attempts,
+        maxAttempts: this.MAX_RECONNECT_ATTEMPTS,
+        isAuthError,
+      });
+      this.reconnectAttempts.delete(interactionId);
+      await this.closeConnection(interactionId).catch((e) => {
+        console.error(`[ElevenLabsProvider] Error closing connection after max attempts:`, e);
+      });
+    }
   }
 
   /**
@@ -853,8 +1093,9 @@ export class ElevenLabsProvider implements AsrProvider {
     // Testing showed 60-70% empty transcripts are normal, but we should still skip obvious silence
     // This prevents wasting API calls on chunks that will definitely return empty transcripts
     const isSilence = allZeros || (audioEnergy < SILENCE_THRESHOLD && maxAmplitude < MIN_AMPLITUDE);
-    // CRITICAL FIX: Skip sending silence to ElevenLabs - it will return empty transcripts
-    if (isSilence) {
+    // CRITICAL FIX: Don't skip silence for first 10 chunks (let ElevenLabs decide)
+    // Skip silence only after initial chunks to allow ElevenLabs to establish baseline
+    if (isSilence && seq > 10) {
       const logLevel = seq <= 5 ? 'warn' : 'debug';
       const logFn = logLevel === 'warn' ? console.warn : console.debug;
       logFn(`[ElevenLabsProvider] ⏸️ Skipping silence - not sending to ElevenLabs`, {
@@ -901,6 +1142,17 @@ export class ElevenLabsProvider implements AsrProvider {
       });
     }
 
+    // CRITICAL FIX: Limit pending sends queue size to prevent unbounded growth
+    const MAX_PENDING_SENDS = 100;
+    if (stateToUse.pendingSends.length >= MAX_PENDING_SENDS) {
+      const removed = stateToUse.pendingSends.shift(); // Remove oldest
+      console.warn(`[ElevenLabsProvider] ⚠️ Pending sends queue full (${MAX_PENDING_SENDS}), removed oldest entry`, {
+        interactionId,
+        removedSeq: removed?.seq,
+        currentSeq: seq,
+      });
+    }
+    
     // Track pending send
     const pendingSend: PendingSend = {
       seq,
@@ -979,8 +1231,43 @@ export class ElevenLabsProvider implements AsrProvider {
         throw new Error(`Missing sample_rate in send payload for ${interactionId}, seq ${seq}`);
       }
       
+      // CRITICAL FIX: Validate connection state before sending
+      const ws = stateToUse.connection._websocket || (stateToUse.connection as any).websocket;
+      if (ws && ws.readyState !== 1) { // 1 = OPEN
+        throw new Error(`WebSocket not open (readyState: ${ws.readyState}) for ${interactionId}`);
+      }
+      
       stateToUse.connection.send(sendPayload);
       this.metrics.audioChunksSent++;
+      
+      // CRITICAL FIX: Track bytes sent for connection metrics
+      if (stateToUse.bytesSent !== undefined) {
+        stateToUse.bytesSent += audio.length;
+      } else {
+        stateToUse.bytesSent = audio.length;
+      }
+      
+      // CRITICAL FIX: Add periodic manual commits (recommended every 20-30 seconds)
+      // Even with VAD strategy, periodic commits improve latency
+      const LAST_COMMIT_TIME_KEY = Symbol('lastCommitTime');
+      const COMMIT_INTERVAL_MS = parseInt(process.env.ELEVENLABS_COMMIT_INTERVAL_MS || '25000', 10);
+      
+      const lastCommitTime = (stateToUse as any)[LAST_COMMIT_TIME_KEY] || 0;
+      const timeSinceLastCommit = Date.now() - lastCommitTime;
+      
+      if (timeSinceLastCommit >= COMMIT_INTERVAL_MS) {
+        try {
+          stateToUse.connection.commit();
+          (stateToUse as any)[LAST_COMMIT_TIME_KEY] = Date.now();
+          console.debug(`[ElevenLabsProvider] 🔄 Periodic commit for ${interactionId}`, {
+            interactionId,
+            timeSinceLastCommit,
+            commitInterval: COMMIT_INTERVAL_MS,
+          });
+        } catch (e: any) {
+          console.warn(`[ElevenLabsProvider] ⚠️ Periodic commit failed for ${interactionId}:`, e.message);
+        }
+      }
 
       console.info(`[ElevenLabsProvider] 📤 Sent audio chunk to ElevenLabs:`, {
         interactionId,
@@ -1033,9 +1320,16 @@ export class ElevenLabsProvider implements AsrProvider {
       const timeout = setTimeout(() => {
         const currentState = this.connections.get(interactionId);
         if (currentState) {
-          const index = currentState.pendingResolvers.indexOf(resolve);
+          // CRITICAL FIX: Remove resolver by sequence number
+          const index = currentState.pendingResolvers.findIndex(r => r.seq === seq);
           if (index >= 0) {
             currentState.pendingResolvers.splice(index, 1);
+          }
+          
+          // CRITICAL FIX: Remove corresponding pending send to prevent queue growth
+          const sendIndex = currentState.pendingSends.findIndex(s => s.seq === seq);
+          if (sendIndex >= 0) {
+            currentState.pendingSends.splice(sendIndex, 1);
           }
         }
         this.metrics.transcriptTimeoutCount++;
@@ -1066,11 +1360,16 @@ export class ElevenLabsProvider implements AsrProvider {
         return;
       }
 
-      // Add resolver to pending list
-      stateToUse.pendingResolvers.push((transcript: Transcript) => {
-        clearTimeout(timeout);
-        resolve(transcript);
-      });
+      // CRITICAL FIX: Store resolver with sequence number for proper matching
+      const pendingResolver: PendingResolver = {
+        resolver: (transcript: Transcript) => {
+          clearTimeout(timeout);
+          resolve(transcript);
+        },
+        seq,
+        timestamp: Date.now(),
+      };
+      stateToUse.pendingResolvers.push(pendingResolver);
     });
   }
 
@@ -1084,6 +1383,49 @@ export class ElevenLabsProvider implements AsrProvider {
     // This ensures transcripts are published before connection is closed
 
     try {
+      // CRITICAL FIX: Clean up event handlers before closing
+      if (state.connection && state.eventHandlers) {
+        const { RealtimeEvents } = require('@elevenlabs/client');
+        const handlers = state.eventHandlers;
+        
+        // Remove event handlers if SDK supports it
+        if (typeof state.connection.off === 'function') {
+          if (handlers.partial) {
+            state.connection.off(RealtimeEvents.PARTIAL_TRANSCRIPT, handlers.partial);
+          }
+          if (handlers.committed) {
+            state.connection.off(RealtimeEvents.COMMITTED_TRANSCRIPT, handlers.committed);
+          }
+          if (handlers.committedWithTimestamps && RealtimeEvents.COMMITTED_TRANSCRIPT_WITH_TIMESTAMPS) {
+            state.connection.off(RealtimeEvents.COMMITTED_TRANSCRIPT_WITH_TIMESTAMPS, handlers.committedWithTimestamps);
+          }
+          if (handlers.authError) {
+            state.connection.off(RealtimeEvents.AUTH_ERROR, handlers.authError);
+          }
+          if (handlers.error) {
+            state.connection.off(RealtimeEvents.ERROR, handlers.error);
+          }
+          if (handlers.quotaExceeded && RealtimeEvents.QUOTA_EXCEEDED) {
+            state.connection.off(RealtimeEvents.QUOTA_EXCEEDED, handlers.quotaExceeded);
+          }
+          if (handlers.transcriberError && RealtimeEvents.TRANSCRIBER_ERROR) {
+            state.connection.off(RealtimeEvents.TRANSCRIBER_ERROR, handlers.transcriberError);
+          }
+          if (handlers.inputError && RealtimeEvents.INPUT_ERROR) {
+            state.connection.off(RealtimeEvents.INPUT_ERROR, handlers.inputError);
+          }
+          if (handlers.close) {
+            state.connection.off(RealtimeEvents.CLOSE, handlers.close);
+          }
+        }
+        
+        // Remove raw WebSocket listener
+        const ws = state.connection._websocket || (state.connection as any).websocket;
+        if (ws && handlers.rawMessageHandler && typeof ws.removeEventListener === 'function') {
+          ws.removeEventListener('message', handlers.rawMessageHandler);
+        }
+      }
+      
       if (state.connection) {
         // Close the connection
         if (typeof state.connection.close === 'function') {
@@ -1095,6 +1437,28 @@ export class ElevenLabsProvider implements AsrProvider {
     } catch (error: any) {
       console.error(`[ElevenLabsProvider] Error closing connection for ${interactionId}:`, error);
     } finally {
+      // CRITICAL FIX: Stop health check if running
+      this.stopHealthCheck(interactionId);
+      
+      // CRITICAL FIX: Update connection metrics before deleting
+      if (state) {
+        const connectionDuration = Date.now() - state.streamStartTime;
+        this.metrics.totalBytesSent += (state.bytesSent || 0);
+        this.metrics.totalTranscriptsPerConnection.set(interactionId, state.transcriptCount || 0);
+        
+        // Update average connection duration
+        const totalConnections = this.metrics.connectionsClosed + 1;
+        this.metrics.averageConnectionDurationMs = 
+          (this.metrics.averageConnectionDurationMs * (totalConnections - 1) + connectionDuration) / totalConnections;
+        
+        console.debug(`[ElevenLabsProvider] Connection metrics for ${interactionId}:`, {
+          interactionId,
+          duration: `${connectionDuration}ms`,
+          bytesSent: state.bytesSent || 0,
+          transcripts: state.transcriptCount || 0,
+        });
+      }
+      
       this.connections.delete(interactionId);
       this.metrics.connectionsClosed++;
       
@@ -1175,8 +1539,48 @@ export class ElevenLabsProvider implements AsrProvider {
     return flushedCount;
   }
 
+  // CRITICAL FIX: Add connection health monitoring
+  private startHealthCheck(interactionId: string): void {
+    // Clear any existing health check
+    this.stopHealthCheck(interactionId);
+    
+    const interval = setInterval(() => {
+      const state = this.connections.get(interactionId);
+      if (!state) {
+        clearInterval(interval);
+        this.healthCheckIntervals.delete(interactionId);
+        return;
+      }
+      
+      const ws = state.connection._websocket || (state.connection as any).websocket;
+      if (ws && ws.readyState !== 1) { // 1 = OPEN
+        console.warn(`[ElevenLabsProvider] ⚠️ Connection health check failed for ${interactionId} (readyState: ${ws.readyState})`, {
+          interactionId,
+          readyState: ws.readyState,
+          readyStateNames: ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED'],
+        });
+      }
+    }, 30000); // Every 30 seconds
+    
+    this.healthCheckIntervals.set(interactionId, interval);
+  }
+
+  private stopHealthCheck(interactionId: string): void {
+    const interval = this.healthCheckIntervals.get(interactionId);
+    if (interval) {
+      clearInterval(interval);
+      this.healthCheckIntervals.delete(interactionId);
+    }
+  }
+
   async close(): Promise<void> {
     console.info('[ElevenLabsProvider] Closing all connections...');
+    
+    // Stop all health checks
+    for (const interactionId of this.healthCheckIntervals.keys()) {
+      this.stopHealthCheck(interactionId);
+    }
+    
     const interactionIds = Array.from(this.connections.keys());
     await Promise.all(interactionIds.map((id) => this.closeConnection(id)));
 
