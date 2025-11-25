@@ -20,18 +20,18 @@ export async function GET(req: Request) {
 
     const callRegistry = getCallRegistry();
     
-    // Fix 2.1: Wrap getActiveCalls() in Promise.race with 4-second timeout
-    const activeCallsPromise = callRegistry.getActiveCalls(limit);
-    const timeoutPromise = new Promise<typeof activeCallsPromise>((_, reject) => 
-      setTimeout(() => reject(new Error('getActiveCalls timeout after 4 seconds')), 4000)
-    );
+        // Fix 2.1: Wrap getActiveCalls() in Promise.race with 6-second timeout (increased for slow Redis)
+        const activeCallsPromise = callRegistry.getActiveCalls(limit);
+        const timeoutPromise = new Promise<typeof activeCallsPromise>((_, reject) => 
+          setTimeout(() => reject(new Error('getActiveCalls timeout after 6 seconds')), 6000)
+        );
     
     let activeCalls;
     try {
       activeCalls = await Promise.race([activeCallsPromise, timeoutPromise]);
     } catch (error: any) {
       if (error.message?.includes('timeout')) {
-        console.error('[active-calls] ⚠️ getActiveCalls() timed out after 4 seconds', {
+        console.error('[active-calls] ⚠️ getActiveCalls() timed out after 6 seconds', {
           limit,
           duration: Date.now() - requestStartTime,
           timestamp: new Date().toISOString(),

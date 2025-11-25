@@ -278,10 +278,12 @@ class CallRegistry {
         timestamp: new Date().toISOString(),
       });
       
-      // Fix 2.2: Use SCAN instead of KEYS to avoid blocking
+      // Optimized: Use SCAN with early exit and pipeline GET operations
       let cursor = '0';
       const keys: string[] = [];
-      const maxKeys = limit * 2; // Get more keys to filter
+      const maxKeys = Math.min(limit * 3, 50); // Limit to 50 keys max for performance
+      const maxScanIterations = 5; // Limit SCAN iterations to prevent timeout
+      let scanIterations = 0;
       
       do {
         try {
@@ -290,13 +292,23 @@ class CallRegistry {
             'MATCH',
             pattern,
             'COUNT',
-            100 // Scan 100 keys at a time
+            50 // Reduced from 100 to 50 for faster scans
           );
           keys.push(...batch);
           cursor = nextCursor;
+          scanIterations++;
           
-          // Stop if we have enough keys or cursor is back to 0
-          if (keys.length >= maxKeys || cursor === '0') {
+          // Early exit conditions
+          if (keys.length >= maxKeys || cursor === '0' || scanIterations >= maxScanIterations) {
+            break;
+          }
+          
+          // Timeout protection: if scan is taking too long, exit early
+          if (Date.now() - startTime > 2000) {
+            console.warn('[CallRegistry] ⚠️ SCAN taking too long, exiting early', {
+              keysFound: keys.length,
+              iterations: scanIterations,
+            });
             break;
           }
         } catch (scanError: any) {
@@ -307,20 +319,21 @@ class CallRegistry {
           });
           break; // Exit loop on error
         }
-      } while (cursor !== '0' && keys.length < maxKeys);
+      } while (cursor !== '0' && keys.length < maxKeys && scanIterations < maxScanIterations);
       
       // Fix 2.2: Log performance metrics
       const scanDuration = Date.now() - startTime;
       console.log('[DEBUG] Redis SCAN performance metrics', {
         duration: `${scanDuration}ms`,
         keysReturned: keys.length,
+        iterations: scanIterations,
         pattern,
-        exceeds5Seconds: scanDuration > 5000,
+        exceeds2Seconds: scanDuration > 2000,
         timestamp: new Date().toISOString(),
       });
       
-      if (scanDuration > 5000) {
-        console.warn('[CallRegistry] ⚠️ redis.scan() took longer than 5 seconds', {
+      if (scanDuration > 2000) {
+        console.warn('[CallRegistry] ⚠️ redis.scan() took longer than 2 seconds', {
           duration: `${scanDuration}ms`,
           keysReturned: keys.length,
         });
@@ -330,26 +343,82 @@ class CallRegistry {
       const now = Date.now();
       const RECENTLY_ENDED_GRACE_PERIOD_MS = 60000; // 60 seconds - enough for UI to discover
 
-      // Get more keys to filter (we'll filter by status and time)
+      // Optimized: Use pipeline for batch GET operations (much faster than individual GETs)
       const processStartTime = Date.now();
-      for (const key of keys.slice(0, limit * 2)) {
+      const keysToProcess = keys.slice(0, Math.min(keys.length, limit * 3));
+      
+      if (keysToProcess.length > 0) {
         try {
-          const data = await this.redis.get(key);
-          if (data) {
-            const metadata = JSON.parse(data) as CallMetadata;
-            const isActive = metadata.status === 'active';
-            const isRecentlyEnded = metadata.status === 'ended' && 
-                                   (now - metadata.lastActivity) < RECENTLY_ENDED_GRACE_PERIOD_MS;
+          // Use pipeline to batch all GET operations
+          const pipeline = this.redis.pipeline();
+          keysToProcess.forEach((key: string) => {
+            pipeline.get(key);
+          });
+          
+          const results = await pipeline.exec();
+          
+          // Process results
+          for (let i = 0; i < results.length; i++) {
+            const [err, data] = results[i];
+            if (err) {
+              console.debug('[CallRegistry] Pipeline GET error', { key: keysToProcess[i], error: err.message });
+              continue;
+            }
             
-            // Include active calls OR recently ended calls (for real-time transcription)
-            if (isActive || isRecentlyEnded) {
-              calls.push(metadata);
+            if (data) {
+              try {
+                const metadata = JSON.parse(data) as CallMetadata;
+                const isActive = metadata.status === 'active';
+                const isRecentlyEnded = metadata.status === 'ended' && 
+                                       (now - metadata.lastActivity) < RECENTLY_ENDED_GRACE_PERIOD_MS;
+                
+                // Include active calls OR recently ended calls (for real-time transcription)
+                if (isActive || isRecentlyEnded) {
+                  calls.push(metadata);
+                  
+                  // Early exit: if we have enough active calls, stop processing
+                  if (calls.length >= limit * 2) {
+                    break;
+                  }
+                }
+              } catch (parseErr) {
+                console.debug('[CallRegistry] Skipping invalid call metadata', { key: keysToProcess[i] });
+              }
             }
           }
-        } catch (err) {
-          // Skip invalid entries
-          console.debug('[CallRegistry] Skipping invalid call metadata', { key });
+        } catch (pipelineError: any) {
+          console.error('[CallRegistry] Pipeline execution error', {
+            error: pipelineError.message,
+            keysCount: keysToProcess.length,
+          });
+          // Fallback to individual GETs if pipeline fails
+          for (const key of keysToProcess.slice(0, limit * 2)) {
+            try {
+              const data = await this.redis.get(key);
+              if (data) {
+                const metadata = JSON.parse(data) as CallMetadata;
+                const isActive = metadata.status === 'active';
+                const isRecentlyEnded = metadata.status === 'ended' && 
+                                       (now - metadata.lastActivity) < RECENTLY_ENDED_GRACE_PERIOD_MS;
+                
+                if (isActive || isRecentlyEnded) {
+                  calls.push(metadata);
+                  if (calls.length >= limit) break;
+                }
+              }
+            } catch (err) {
+              console.debug('[CallRegistry] Skipping invalid call metadata', { key });
+            }
+          }
         }
+      }
+      
+      const processDuration = Date.now() - processStartTime;
+      if (processDuration > 1000) {
+        console.warn('[CallRegistry] ⚠️ Processing calls took longer than 1 second', {
+          duration: `${processDuration}ms`,
+          callsFound: calls.length,
+        });
       }
 
       // Sort by last activity (most recent first)
