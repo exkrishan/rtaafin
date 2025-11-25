@@ -1,6 +1,7 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, Suspense } from 'react';
+import { useSearchParams } from 'next/navigation';
 import AutoDispositionModal, { Suggestion } from '@/components/AutoDispositionModal';
 import AgentAssistPanelV2, { KBArticle, DispositionData } from '@/components/AgentAssistPanelV2';
 import { Customer } from '@/components/CustomerDetailsHeader';
@@ -25,8 +26,13 @@ const mockCustomer: Customer = {
   ],
 };
 
-export default function LivePage() {
-  const [callId, setCallId] = useState<string>('');
+// Inner component that uses useSearchParams (must be wrapped in Suspense)
+function LivePageContent() {
+  const searchParams = useSearchParams();
+  // CRITICAL: Read callId from URL parameter immediately (synchronously) - matches simple UI pattern
+  const urlCallId = searchParams.get('callId');
+  const [callId, setCallId] = useState<string>(urlCallId || '');
+  
   const [tenantId] = useState('default');
   const [viewMode, setViewMode] = useState<'agent-assist' | 'disposition'>('agent-assist');
   const [dispositionOpen, setDispositionOpen] = useState(false);
@@ -38,30 +44,25 @@ export default function LivePage() {
 
   // Auto-discovery state (from test-agent-assist pattern)
   const [lastDiscoveredCallId, setLastDiscoveredCallId] = useState<string | null>(null);
-  const [isAutoDiscovering, setIsAutoDiscovering] = useState(true);
+  const [isAutoDiscovering, setIsAutoDiscovering] = useState(!urlCallId); // Disable if URL has callId
   
   // Retry state for exponential backoff
   const discoveryRetryCountRef = useRef(0);
   const isDiscoveryPausedRef = useRef(false);
   const lastSuccessTimeRef = useRef<number>(Date.now());
 
-  // CRITICAL: Read callId from URL parameter FIRST (before auto-discovery)
-  // This ensures manual callId from URL takes precedence over auto-discovery
+  // Update callId when URL parameter changes (matches simple UI pattern)
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const urlCallId = params.get('callId');
-    
-    if (urlCallId && urlCallId.trim().length > 0) {
-      const trimmedCallId = urlCallId.trim();
-      console.log('[Live] 🎯 Using callId from URL parameter:', trimmedCallId);
-      setCallId(trimmedCallId);
-      setLastDiscoveredCallId(trimmedCallId);
+    if (urlCallId && urlCallId !== callId) {
+      console.log('[Live] Updating callId from URL', { urlCallId, currentCallId: callId });
+      setCallId(urlCallId);
+      setLastDiscoveredCallId(urlCallId);
       setIsAutoDiscovering(false); // Disable auto-discovery when URL param is set
-    } else {
-      console.log('[Live] No URL parameter provided, will use auto-discovery');
+    } else if (!urlCallId && callId) {
+      // URL param removed, enable auto-discovery
       setIsAutoDiscovering(true);
     }
-  }, []); // Run once on mount only
+  }, [urlCallId, callId]);
 
   // Auto-discover active calls silently in background
   // Copied from test-agent-assist with exponential backoff
@@ -544,5 +545,21 @@ export default function LivePage() {
       {/* Toast Container */}
       <ToastContainer />
     </div>
+  );
+}
+
+// Export with Suspense wrapper (matches simple UI pattern)
+export default function LivePage() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen bg-surface flex items-center justify-center">
+        <div className="text-center">
+          <h1 className="text-2xl font-semibold mb-4">Loading Live UI...</h1>
+          <div className="text-gray-500">Initializing...</div>
+        </div>
+      </div>
+    }>
+      <LivePageContent />
+    </Suspense>
   );
 }
