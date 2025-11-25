@@ -498,7 +498,33 @@ export default function AgentAssistPanelV2({
     eventSource.addEventListener('intent_update', (event) => {
       try {
         const data = JSON.parse(event.data);
-        if (data.articles && Array.isArray(data.articles)) {
+        const eventCallId = data.callId || data.interaction_id || data.interactionId;
+        
+        // CRITICAL FIX: Check callId match before processing (same as transcript_line)
+        const callIdMatches = !eventCallId || eventCallId === interactionId;
+        
+        if (!callIdMatches) {
+          console.warn('[AgentAssistPanel] ⚠️ Intent update callId mismatch - skipping', {
+            eventCallId,
+            expectedCallId: interactionId,
+            intent: data.intent,
+            articlesCount: data.articles?.length || 0,
+            suggestion: 'Check if UI is connected with the correct callId. Update interactionId prop or wait for auto-discovery.',
+          });
+          return;
+        }
+        
+        console.log('[AgentAssistPanel] 📥 Received intent_update event', {
+          eventCallId,
+          expectedCallId: interactionId,
+          matches: callIdMatches,
+          intent: data.intent,
+          confidence: data.confidence,
+          articlesCount: data.articles?.length || 0,
+          timestamp: new Date().toISOString(),
+        });
+        
+        if (callIdMatches && data.articles && Array.isArray(data.articles)) {
           // Attach intent information to articles
           const articlesWithIntent = data.articles.map((article: KBArticle) => ({
             ...article,

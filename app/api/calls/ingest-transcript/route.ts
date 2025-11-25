@@ -357,23 +357,42 @@ export async function POST(req: Request) {
 
       // Phase 3: Broadcast intent update to real-time listeners
       try {
-        broadcastEvent({
-          type: 'intent_update',
+        const intentUpdatePayload = {
+          type: 'intent_update' as const,
           callId: body.callId,
           seq: body.seq,
           intent,
           confidence,
           articles,
-        });
-        console.info('[realtime] Broadcast intent_update', {
+        };
+        
+        console.info('[ingest-transcript] 📤 Broadcasting intent_update', {
           callId: body.callId,
           seq: body.seq,
           intent,
           confidence,
           articlesCount: articles.length,
+          timestamp: new Date().toISOString(),
+          note: 'UI should be connected with this exact callId to receive this event',
+        });
+        
+        broadcastEvent(intentUpdatePayload);
+        
+        console.info('[realtime] ✅ Broadcast intent_update', {
+          callId: body.callId,
+          seq: body.seq,
+          intent,
+          confidence,
+          articlesCount: articles.length,
+          timestamp: new Date().toISOString(),
         });
       } catch (broadcastErr) {
-        console.error('[realtime] Failed to broadcast intent_update:', broadcastErr);
+        console.error('[realtime] ❌ Failed to broadcast intent_update:', {
+          error: broadcastErr,
+          callId: body.callId,
+          seq: body.seq,
+          timestamp: new Date().toISOString(),
+        });
         // Don't fail the request
       }
     } catch (intentErr) {

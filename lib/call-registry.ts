@@ -28,20 +28,29 @@ const CALL_METADATA_KEY_PREFIX = 'call:metadata:';
 
 class CallRegistry {
   private redis: any;
+  private redisUrl: string;
+  private connectionStatus: 'connected' | 'disconnected' | 'error' = 'disconnected';
 
   constructor() {
     // Create dedicated Redis connection for key-value operations
     if (!ioredis) {
-      console.warn('[CallRegistry] ioredis not available, call registry will not work');
+      console.warn('[CallRegistry] ⚠️ ioredis not available, call registry will not work');
+      this.connectionStatus = 'error';
       return;
     }
 
-    const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
+    this.redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
     try {
-      this.redis = new ioredis(redisUrl, {
+      this.redis = new ioredis(this.redisUrl, {
         retryStrategy: (times: number) => {
-          if (times > 10) return null;
-          return Math.min(times * 50, 2000);
+          if (times > 10) {
+            console.error('[CallRegistry] ❌ Max Redis retries reached, giving up');
+            this.connectionStatus = 'error';
+            return null;
+          }
+          const delay = Math.min(times * 50, 2000);
+          console.warn(`[CallRegistry] ⚠️ Redis connection retry ${times}/10 in ${delay}ms`);
+          return delay;
         },
         maxRetriesPerRequest: null,
         enableReadyCheck: true,
@@ -49,16 +58,84 @@ class CallRegistry {
       });
 
       this.redis.on('error', (err: Error) => {
-        console.error('[CallRegistry] Redis error:', err);
+        console.error('[CallRegistry] ❌ Redis error:', {
+          error: err.message,
+          code: (err as any).code,
+          redisUrl: this.redisUrl.replace(/:[^:@]+@/, ':****@'), // Mask password
+        });
+        this.connectionStatus = 'error';
       });
 
       this.redis.on('connect', () => {
-        console.info('[CallRegistry] Connected to Redis for call registry');
+        console.info('[CallRegistry] ✅ Connected to Redis for call registry', {
+          redisUrl: this.redisUrl.replace(/:[^:@]+@/, ':****@'), // Mask password
+        });
+        this.connectionStatus = 'connected';
+      });
+
+      this.redis.on('close', () => {
+        console.warn('[CallRegistry] ⚠️ Redis connection closed');
+        this.connectionStatus = 'disconnected';
+      });
+
+      this.redis.on('ready', () => {
+        console.info('[CallRegistry] ✅ Redis connection ready');
+        this.connectionStatus = 'connected';
       });
     } catch (error: any) {
-      console.error('[CallRegistry] Failed to create Redis connection', {
+      console.error('[CallRegistry] ❌ Failed to create Redis connection', {
         error: error.message,
+        redisUrl: this.redisUrl.replace(/:[^:@]+@/, ':****@'), // Mask password
       });
+      this.connectionStatus = 'error';
+    }
+  }
+
+  /**
+   * Check Redis connection health
+   */
+  async checkHealth(): Promise<{ accessible: boolean; error?: string; status?: string }> {
+    if (!this.redis) {
+      return { 
+        accessible: false, 
+        error: 'Redis client not initialized (ioredis not available)',
+        status: this.connectionStatus,
+      };
+    }
+
+    try {
+      // Check connection status
+      if (this.connectionStatus === 'error') {
+        return { 
+          accessible: false, 
+          error: 'Redis connection in error state',
+          status: this.connectionStatus,
+        };
+      }
+
+      // Try a simple PING command
+      const result = await Promise.race([
+        this.redis.ping(),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('PING timeout')), 2000)
+        ),
+      ]);
+
+      if (result === 'PONG') {
+        return { accessible: true, status: 'connected' };
+      }
+
+      return { 
+        accessible: false, 
+        error: 'PING did not return PONG',
+        status: this.connectionStatus,
+      };
+    } catch (error: any) {
+      return { 
+        accessible: false, 
+        error: error.message || String(error),
+        status: this.connectionStatus,
+      };
     }
   }
 
@@ -67,7 +144,21 @@ class CallRegistry {
    */
   async registerCall(metadata: CallMetadata): Promise<void> {
     if (!this.redis) {
-      console.warn('[CallRegistry] Redis not available, skipping call registration');
+      console.warn('[CallRegistry] ⚠️ Redis not available, skipping call registration', {
+        interactionId: metadata.interactionId,
+        callSid: metadata.callSid,
+        reason: 'Redis client not initialized',
+      });
+      return;
+    }
+
+    // Check connection status before attempting registration
+    if (this.connectionStatus === 'error') {
+      console.error('[CallRegistry] ❌ Cannot register call - Redis connection in error state', {
+        interactionId: metadata.interactionId,
+        callSid: metadata.callSid,
+        connectionStatus: this.connectionStatus,
+      });
       return;
     }
 
@@ -84,12 +175,22 @@ class CallRegistry {
         from: metadata.from,
         to: metadata.to,
         tenantId: metadata.tenantId,
+        ttl: CALL_METADATA_TTL_SECONDS,
       });
     } catch (error: any) {
-      console.error('[CallRegistry] Failed to register call', {
+      console.error('[CallRegistry] ❌ Failed to register call', {
         error: error.message,
+        errorCode: (error as any).code,
         interactionId: metadata.interactionId,
+        callSid: metadata.callSid,
+        connectionStatus: this.connectionStatus,
       });
+      // Update connection status on error
+      if (error.message?.includes('ECONNREFUSED') || 
+          error.message?.includes('Connection') ||
+          (error as any).code === 'ECONNREFUSED') {
+        this.connectionStatus = 'error';
+      }
     }
   }
 

@@ -267,6 +267,21 @@ class TranscriptConsumer {
           const errorText = await response.text();
           lastError = new Error(`HTTP ${response.status}: ${errorText}`);
           
+          // Enhanced logging for 404 errors (API endpoint not found)
+          if (response.status === 404) {
+            console.error('[TranscriptConsumer] ❌ API endpoint not found (404)', {
+              interaction_id: interactionId,
+              callId,
+              seq: msg.seq,
+              apiUrl: this.nextJsApiUrl,
+              baseUrl: this.baseUrl,
+              status: response.status,
+              error: errorText,
+              attempt,
+              suggestion: 'Check if /api/calls/ingest-transcript route exists and baseUrl is correctly configured',
+            });
+          }
+          
           // Don't retry on client errors (4xx), only on server errors (5xx) and network errors
           if (response.status >= 400 && response.status < 500) {
             console.error('[TranscriptConsumer] Client error (not retrying)', {
@@ -274,7 +289,9 @@ class TranscriptConsumer {
               callId,
               seq: msg.seq,
               status: response.status,
+              statusText: response.statusText,
               error: errorText,
+              apiUrl: this.nextJsApiUrl,
               attempt,
             });
             break; // Don't retry client errors

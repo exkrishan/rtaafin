@@ -6,6 +6,7 @@ import {
   triggerStreamDiscovery,
   getTranscriptConsumer 
 } from '@/lib/transcript-consumer';
+import { getCallRegistry } from '@/lib/call-registry';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -58,6 +59,23 @@ export async function GET(req: Request) {
       }
     }
     
+    // P2 FIX: Check call registry health (with timeout)
+    let callRegistryHealth: any = null;
+    try {
+      const callRegistry = getCallRegistry();
+      if (callRegistry && typeof (callRegistry as any).checkHealth === 'function') {
+        const registryHealthPromise = (callRegistry as any).checkHealth();
+        const registryTimeoutPromise = new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Call registry health check timeout')), 1000)
+        );
+        callRegistryHealth = await Promise.race([registryHealthPromise, registryTimeoutPromise]);
+      }
+    } catch (error: any) {
+      if (error.message !== 'Call registry health check timeout') {
+        console.warn('[health] Failed to get call registry health:', error.message);
+      }
+    }
+    
     // Determine overall health status
     let overallStatus = 'healthy';
     if (!updatedStatus.isRunning) {
@@ -69,6 +87,11 @@ export async function GET(req: Request) {
       if (healthStatus.deadLetterQueue.size > 100) {
         overallStatus = 'degraded'; // Too many failed transcripts
       }
+    }
+    
+    // Check call registry health
+    if (callRegistryHealth && !callRegistryHealth.accessible) {
+      overallStatus = 'degraded';
     }
     
     return NextResponse.json({
@@ -83,6 +106,8 @@ export async function GET(req: Request) {
         baseUrl: healthStatus.baseUrl,
         apiUrl: healthStatus.apiUrl,
       } : null,
+      // P2 FIX: Include call registry health status
+      callRegistry: callRegistryHealth,
       timestamp: new Date().toISOString(),
     });
   } catch (error: any) {
