@@ -7,6 +7,7 @@
 
 import { createPubSubAdapterFromEnv } from './pubsub';
 import { transcriptTopic, parseTopic } from './pubsub/topics';
+import { ingestTranscriptCore } from './ingest-transcript-core';
 
 // Load environment variables
 require('dotenv').config({ path: require('path').join(__dirname, '../.env.local') });
@@ -224,168 +225,75 @@ class TranscriptConsumer {
       });
     }
 
-    // Forward to ingest-transcript API
-    // This will trigger intent detection and SSE broadcast
-    // At this point, we know msg.text exists and is not empty (checked above)
+    // Forward to ingest-transcript core function
+    // CRITICAL FIX: Use direct function call instead of HTTP fetch to avoid network issues
+    // This is more efficient and reliable when calling from within the same Next.js process
     const text = msg.text || ''; // Type guard - we know it exists from check above
     
-    // Retry logic for failed API calls
-    const MAX_RETRIES = 3;
-    const RETRY_DELAY_MS = 1000; // 1 second
-    let lastError: any = null;
-    
-    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-      try {
-        console.debug('[TranscriptConsumer] Forwarding transcript to ingest API', {
-          interactionId,
+    try {
+      console.debug('[TranscriptConsumer] Processing transcript via direct function call', {
+        interactionId,
+        callId,
+        seq: msg.seq,
+        textLength: text.length,
+        textPreview: text.substring(0, 50),
+        method: 'direct_function_call',
+        note: 'Using ingestTranscriptCore() directly instead of HTTP fetch for better reliability',
+      });
+
+      // Call the core function directly (no HTTP overhead, more reliable)
+      const result = await ingestTranscriptCore({
+        callId,
+        seq: msg.seq,
+        ts: new Date(msg.timestamp_ms).toISOString(),
+        text: text,
+        tenantId: msg.tenant_id || 'default',
+      });
+
+      if (result.ok) {
+        console.info('[TranscriptConsumer] ✅ Processed transcript successfully', {
+          interaction_id: interactionId,
           callId,
           seq: msg.seq,
-          textLength: text.length,
-          textPreview: text.substring(0, 50),
-          attempt,
-          maxRetries: MAX_RETRIES,
-          apiUrl: this.nextJsApiUrl,
+          intent: result.intent,
+          articlesCount: result.articles?.length || 0,
+          method: 'direct_function_call',
         });
-
-        const response = await fetch(this.nextJsApiUrl, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-tenant-id': msg.tenant_id || 'default',
-          },
-          body: JSON.stringify({
-            callId,
-            seq: msg.seq,
-            ts: new Date(msg.timestamp_ms).toISOString(),
-            text: text, // Use the type-guarded text variable
-          }),
-          // Add timeout to prevent hanging
-          signal: AbortSignal.timeout(10000), // 10 second timeout
+      } else {
+        console.error('[TranscriptConsumer] ❌ Failed to process transcript', {
+          interaction_id: interactionId,
+          callId,
+          seq: msg.seq,
+          error: result.error,
+          method: 'direct_function_call',
         });
-
-        if (!response.ok) {
-          const errorText = await response.text();
-          lastError = new Error(`HTTP ${response.status}: ${errorText}`);
-          
-          // Enhanced logging for 404 errors (API endpoint not found)
-          if (response.status === 404) {
-            console.error('[TranscriptConsumer] ❌ API endpoint not found (404)', {
-              interaction_id: interactionId,
-              callId,
-              seq: msg.seq,
-              apiUrl: this.nextJsApiUrl,
-              baseUrl: this.baseUrl,
-              status: response.status,
-              error: errorText,
-              attempt,
-              suggestion: 'Check if /api/calls/ingest-transcript route exists and baseUrl is correctly configured',
-            });
-          }
-          
-          // Don't retry on client errors (4xx), only on server errors (5xx) and network errors
-          if (response.status >= 400 && response.status < 500) {
-            console.error('[TranscriptConsumer] Client error (not retrying)', {
-              interaction_id: interactionId,
-              callId,
-              seq: msg.seq,
-              status: response.status,
-              statusText: response.statusText,
-              error: errorText,
-              apiUrl: this.nextJsApiUrl,
-              attempt,
-            });
-            break; // Don't retry client errors
-          }
-          
-          // Retry on server errors
-          if (attempt < MAX_RETRIES) {
-            console.warn('[TranscriptConsumer] Server error, retrying...', {
-              interaction_id: interactionId,
-              callId,
-              seq: msg.seq,
-              status: response.status,
-              attempt,
-              nextRetryIn: `${RETRY_DELAY_MS}ms`,
-            });
-            await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS * attempt)); // Exponential backoff
-            continue;
-          } else {
-            console.error('[TranscriptConsumer] Failed to forward transcript after all retries', {
-              interaction_id: interactionId,
-              callId,
-              seq: msg.seq,
-              status: response.status,
-              error: errorText,
-              attempts: MAX_RETRIES,
-            });
-          }
-        } else {
-          // Success!
-          const result = await response.json();
-          console.info('[TranscriptConsumer] ✅ Forwarded transcript successfully', {
-            interaction_id: interactionId,
-            callId,
-            seq: msg.seq,
-            intent: result.intent,
-            articlesCount: result.articles?.length || 0,
-            attempt,
-          });
-          lastError = null; // Clear error on success
-          break; // Exit retry loop on success
-        }
-      } catch (error: any) {
-        lastError = error;
         
-        // Check if it's a timeout or network error (retry these)
-        const isRetryable = error.name === 'AbortError' || 
-                           error.message?.includes('fetch failed') ||
-                           error.message?.includes('ECONNREFUSED') ||
-                           error.message?.includes('ETIMEDOUT');
-        
-        if (isRetryable && attempt < MAX_RETRIES) {
-          console.warn('[TranscriptConsumer] Network error, retrying...', {
-            interaction_id: interactionId,
-            callId,
-            seq: msg.seq,
-            error: error.message || String(error),
-            attempt,
-            nextRetryIn: `${RETRY_DELAY_MS * attempt}ms`,
-          });
-          await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS * attempt)); // Exponential backoff
-          continue;
-        } else {
-          // Non-retryable error or max retries reached
-          console.error('[TranscriptConsumer] Error forwarding transcript', {
-            interaction_id: interactionId,
-            callId,
-            seq: msg.seq,
-            error: error.message || String(error),
-            errorName: error.name,
-            isRetryable,
-            attempt,
-            maxRetries: MAX_RETRIES,
-            apiUrl: this.nextJsApiUrl,
-            note: isRetryable && attempt >= MAX_RETRIES 
-              ? 'Max retries reached' 
-              : 'Non-retryable error',
-          });
-          break; // Exit retry loop
-        }
+        // Add to dead-letter queue for retry
+        this.addToDeadLetterQueue({
+          interaction_id: interactionId,
+          tenant_id: msg.tenant_id,
+          seq: msg.seq,
+          type: msg.type,
+          text: text,
+          confidence: msg.confidence,
+          timestamp_ms: msg.timestamp_ms,
+          callId,
+          error: result.error || 'Unknown error',
+          failedAt: Date.now(),
+          retryCount: 0,
+        });
       }
-    }
-    
-    // Log final error if all retries failed
-    if (lastError) {
-      console.error('[TranscriptConsumer] ❌ Failed to forward transcript after all attempts', {
+    } catch (error: any) {
+      console.error('[TranscriptConsumer] ❌ Error processing transcript', {
         interaction_id: interactionId,
         callId,
         seq: msg.seq,
-        finalError: lastError.message || String(lastError),
-        apiUrl: this.nextJsApiUrl,
-        suggestion: 'Check if ingest API is accessible and baseUrl is correctly configured',
+        error: error.message || String(error),
+        errorName: error.name,
+        method: 'direct_function_call',
       });
       
-      // P2 FIX: Add to dead-letter queue instead of silently dropping
+      // Add to dead-letter queue for retry
       this.addToDeadLetterQueue({
         interaction_id: interactionId,
         tenant_id: msg.tenant_id,
@@ -395,9 +303,9 @@ class TranscriptConsumer {
         confidence: msg.confidence,
         timestamp_ms: msg.timestamp_ms,
         callId,
-        error: lastError.message || String(lastError),
+        error: error.message || String(error),
         failedAt: Date.now(),
-        retryCount: MAX_RETRIES,
+        retryCount: 0,
       });
     }
     // Don't throw - continue processing other transcripts
@@ -471,26 +379,21 @@ class TranscriptConsumer {
         }
         
         try {
-          // Try to forward again
-          const response = await fetch(this.nextJsApiUrl, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'x-tenant-id': failed.tenant_id || 'default',
-            },
-            body: JSON.stringify({
-              callId: failed.callId,
-              seq: failed.seq,
-              ts: new Date(failed.timestamp_ms).toISOString(),
-              text: failed.text,
-            }),
-            signal: AbortSignal.timeout(10000),
+          // Try to process again using direct function call
+          const result = await ingestTranscriptCore({
+            callId: failed.callId,
+            seq: failed.seq,
+            ts: new Date(failed.timestamp_ms).toISOString(),
+            text: failed.text,
+            tenantId: failed.tenant_id || 'default',
           });
           
-          if (response.ok) {
+          if (result.ok) {
             console.info('[TranscriptConsumer] ✅ Successfully retried dead-letter transcript', {
               interaction_id: failed.interaction_id,
               seq: failed.seq,
+              intent: result.intent,
+              articlesCount: result.articles?.length || 0,
             });
             // Success - don't add back to queue
           } else {
@@ -501,11 +404,11 @@ class TranscriptConsumer {
               interaction_id: failed.interaction_id,
               seq: failed.seq,
               retryCount: failed.retryCount,
-              status: response.status,
+              error: result.error,
             });
           }
         } catch (error: any) {
-          // Network error - add back with incremented retry count
+          // Error - add back with incremented retry count
           failed.retryCount++;
           this.deadLetterQueue.push(failed);
           console.warn('[TranscriptConsumer] Dead-letter retry error, will retry again', {
