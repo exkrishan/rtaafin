@@ -7,9 +7,7 @@ import AgentAssistPanelV2, { KBArticle, DispositionData } from '@/components/Age
 import { Customer } from '@/components/CustomerDetailsHeader';
 import CentralCallView from '@/components/CentralCallView';
 import LeftSidebar from '@/components/LeftSidebar';
-import LiveTranscriptPanel from '@/components/LiveTranscriptPanel';
 import ToastContainer from '@/components/ToastContainer';
-import { useRealtimeTranscript } from '@/hooks/useRealtimeTranscript';
 
 // Mock customer data for live (would come from API in production)
 const mockCustomer: Customer = {
@@ -34,7 +32,6 @@ function LivePageContent() {
   const [callId, setCallId] = useState<string>(urlCallId || '');
   
   const [tenantId] = useState('default');
-  const [viewMode, setViewMode] = useState<'agent-assist' | 'disposition'>('agent-assist');
   const [dispositionOpen, setDispositionOpen] = useState(false);
   const [dispositionData, setDispositionData] = useState<{
     suggested: Suggestion[];
@@ -42,10 +39,8 @@ function LivePageContent() {
   } | null>(null);
   const [kbArticles, setKbArticles] = useState<KBArticle[]>([]);
 
-  // Auto-discovery state (from test-agent-assist pattern)
+  // Auto-discovery state (silent, always enabled)
   const [lastDiscoveredCallId, setLastDiscoveredCallId] = useState<string | null>(null);
-  // Auto-discovery is always enabled unless URL explicitly provides callId
-  const isAutoDiscovering = !urlCallId;
   
   // Retry state for exponential backoff
   const discoveryRetryCountRef = useRef(0);
@@ -253,55 +248,6 @@ function LivePageContent() {
       });
   }, [callId]);
 
-  // Wake up Render.com service before connecting to SSE (free tier takes 50s+ to wake up)
-  useEffect(() => {
-    if (!callId || callId.trim().length === 0) {
-      return;
-    }
-
-    // Make a quick request to wake up the service (don't wait for response)
-    // This helps reduce the initial connection delay
-    const wakeUpController = new AbortController();
-    const wakeUpTimeout = setTimeout(() => wakeUpController.abort(), 5000); // 5s timeout
-    
-    fetch('/api/health', { 
-      method: 'HEAD', 
-      cache: 'no-cache',
-      signal: wakeUpController.signal,
-    })
-      .then(() => {
-        console.log('[Live] ✅ Service wake-up request completed');
-      })
-      .catch(() => {
-        // Ignore errors - just trying to wake up the service
-        console.log('[Live] Service wake-up request (expected to timeout/error on free tier)');
-      })
-      .finally(() => {
-        clearTimeout(wakeUpTimeout);
-      });
-  }, [callId]);
-
-  // CRITICAL: Use hook EXACTLY like simple UI - NO CALLBACKS
-  // This matches the working pattern from test-simple-transcript
-  // Note: Connection timeout is now 60s to handle Render.com free tier wake-up delay
-  const { 
-    transcripts, 
-    isConnected: transcriptConnected, 
-    error: transcriptError 
-  } = useRealtimeTranscript(callId || null, {
-    autoReconnect: true,
-  });
-
-  // Debug: Log hook state to verify transcripts are being received
-  useEffect(() => {
-    console.log('[Live] 🔍 Hook State:', {
-      callId,
-      transcriptsCount: transcripts.length,
-      isConnected: transcriptConnected,
-      error: transcriptError,
-      firstTranscript: transcripts[0]?.text?.substring(0, 50) || 'none',
-    });
-  }, [callId, transcripts.length, transcriptConnected, transcriptError]);
 
   const disposeCall = async () => {
     if (!callId) return;
@@ -367,49 +313,119 @@ function LivePageContent() {
   // Auto-discovery is always enabled unless URL param is explicitly set
   // No manual clearing needed - auto-discovery handles everything
 
+  // Handle KB search
+  const handleKBSearch = async (query: string, context: { interactionId: string; recentUtterance?: string }): Promise<KBArticle[]> => {
+    try {
+      const response = await fetch(`/api/kb/search?q=${encodeURIComponent(query)}&tenantId=${tenantId}&limit=10`);
+      const payload = await response.json();
+      
+      if (payload.ok && Array.isArray(payload.results)) {
+        return payload.results.map((article: any) => ({
+          id: article.id || article.code,
+          title: article.title,
+          snippet: article.snippet || '',
+          confidence: article.score || 0.8,
+          url: article.url,
+        }));
+      }
+      
+      return [];
+    } catch (err) {
+      console.error('[Live] KB search API error:', err);
+      return [];
+    }
+  };
+
+  // Handle disposition summary fetch
+  const handleDispositionSummary = async (interactionId: string): Promise<DispositionData> => {
+    try {
+      const response = await fetch('/api/calls/summary', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ callId: interactionId, tenantId }),
+      });
+
+      const payload = await response.json();
+
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload?.error || 'Failed to generate summary');
+      }
+
+      const suggested = (payload.dispositions || []).map((item: any) => ({
+        code: item.mappedCode || item.code || 'GENERAL_INQUIRY',
+        title: item.mappedTitle || item.title || 'General Inquiry',
+        score: typeof item.score === 'number' ? item.score : 0.5,
+        id: typeof item.mappedId === 'number' ? item.mappedId : undefined,
+        subDisposition: item.subDisposition || item.sub_disposition || undefined,
+        subDispositionId: typeof item.subDispositionId === 'number' ? item.subDispositionId : undefined,
+      }));
+
+      const summary = payload.summary || {};
+      const autoNotes = [
+        summary.issue,
+        summary.resolution,
+        summary.next_steps,
+      ]
+        .filter((section: string | undefined) => section && section.trim().length > 0)
+        .join('\n\n');
+
+      // Update disposition data for modal
+      setDispositionData({
+        suggested: suggested.length > 0 
+          ? suggested 
+          : [{ code: 'GENERAL_INQUIRY', title: 'General Inquiry', score: 0.1 }],
+        autoNotes: autoNotes || 'No notes generated.',
+      });
+
+      return {
+        dispositionId: suggested[0]?.id?.toString() || 'disposition-1',
+        dispositionTitle: suggested[0]?.title || 'General Inquiry',
+        confidence: suggested[0]?.score || 0.5,
+        subDispositions: suggested[0]?.subDisposition ? [
+          { id: suggested[0].subDispositionId?.toString() || 'sub-1', title: suggested[0].subDisposition }
+        ] : [],
+        autoNotes: autoNotes || 'No notes generated.',
+      };
+    } catch (err: any) {
+      console.error('[Live] Failed to fetch disposition summary:', err);
+      return {
+        dispositionId: 'disposition-1',
+        dispositionTitle: 'General Inquiry',
+        confidence: 0.5,
+        subDispositions: [],
+        autoNotes: 'Failed to generate notes. Please try again.',
+      };
+    }
+  };
+
+  // Handle KB articles update
+  const handleKbArticlesUpdate = (articles: KBArticle[], intent?: string, confidence?: number) => {
+    console.log('[Live] KB articles update:', { articlesCount: articles.length, intent, confidence });
+    setKbArticles(articles);
+  };
+
+  // Handle transcript events
+  const handleTranscriptEvent = (event: any) => {
+    console.log('[Live] Transcript event:', event);
+  };
+
   return (
     <div className="min-h-screen bg-surface">
-      {/* Auto-Discovery Status Bar (No Manual Input) */}
-      <div className="bg-white border-b border-gray-200 p-4">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <p className="text-sm font-medium text-gray-700">
-              {callId 
-                ? `✅ Connected to: ${callId}` 
-                : '🔄 Auto-discovering active calls...'}
-            </p>
-            {lastDiscoveredCallId && callId === lastDiscoveredCallId && (
-              <span className="text-xs text-green-600">
-                Auto-detected
-              </span>
-            )}
-          </div>
-          <button
-            onClick={disposeCall}
-            disabled={!callId}
-            className="px-4 py-2 bg-blue-600 text-white rounded-md text-sm font-medium hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed"
-          >
-            📝 End Call & Generate Disposition
-          </button>
-        </div>
-        {!callId && (
-          <p className="mt-2 text-xs text-gray-500">
-            Waiting for active call from Exotel... The system will automatically connect when a call starts.
-          </p>
-        )}
-      </div>
-
-      {/* Main Layout */}
-      <div className="flex h-[calc(100vh-120px)]">
+      {/* Main Layout - Matching test-agent-assist exactly */}
+      <div className="flex h-screen">
         {/* Left Sidebar */}
-        <LeftSidebar />
+        <LeftSidebar 
+          isCallActive={!!callId}
+          isPaused={false}
+          callEnded={false}
+        />
 
         {/* Main Content Area */}
         <div className="flex-1 flex flex-col pr-[376px]">
           {/* Center Column: Unified Call View */}
           <div className="flex-1 overflow-y-auto p-6">
             <CentralCallView
-              customer={callId ? mockCustomer : null}
+              customer={mockCustomer}
               callDuration="00:00"
               callId={callId || undefined}
               isCallActive={!!callId}
@@ -419,104 +435,51 @@ function LivePageContent() {
               onConference={() => console.log('[Live] Conference clicked')}
               onKeypad={() => console.log('[Live] Keypad clicked')}
               onRecord={() => console.log('[Live] Record clicked')}
-              onComplete={() => console.log('[Live] Complete clicked')}
+              onComplete={() => {
+                console.log('[Live] Complete clicked');
+                // Trigger disposition summary fetch
+                handleDispositionSummary(callId).then(() => {
+                  setDispositionOpen(true);
+                });
+              }}
               onEndCall={() => console.log('[Live] End call clicked')}
               onOpenCRM={() => {
                 console.log('[Live] Open CRM clicked');
-                window.open(`https://crm.example.com/customer/${mockCustomer.id}`, '_blank');
+                window.open('https://crm.example.com/customer/cust-789', '_blank');
               }}
               onOpenCaseHistory={() => {
                 console.log('[Live] Open Case History clicked');
-                window.open(`https://crm.example.com/cases/${mockCustomer.id}`, '_blank');
+                window.open('https://crm.example.com/cases/cust-789', '_blank');
               }}
             />
           </div>
         </div>
 
-        {/* Right Column: Transcript Panel + Agent Assist Panel V2 */}
-        {callId && viewMode === 'agent-assist' && (
-          <div className="fixed right-0 top-[120px] bottom-0 w-[376px] bg-white border-l border-gray-200 flex flex-col">
-            {/* Transcript Panel - Receives transcripts from parent hook */}
-            <div className="flex-1 overflow-y-auto p-4 border-b border-gray-200">
-              <LiveTranscriptPanel 
-                transcripts={transcripts}
-                isConnected={transcriptConnected}
-                error={transcriptError}
-              />
-            </div>
-
-            {/* Agent Assist Panel V2 - KB Articles Only (useSse=false to prevent duplicate connections) */}
-            <div className="flex-1 overflow-y-auto">
-              <AgentAssistPanelV2
-                agentId="agent-live-123"
-                tenantId={tenantId}
-                interactionId={callId}
-                customer={mockCustomer}
-                callDuration="00:00"
-                isCallActive={true}
-                useSse={false} // CRITICAL: Disable SSE to prevent duplicate connections
-                directTranscripts={[]} // Disable transcript rendering (handled by LiveTranscriptPanel)
-                triggerKBSearch={async (query, context) => {
-                  console.log('[Live] KB search triggered:', { query, context });
-                  try {
-                    const response = await fetch(`/api/kb/search?q=${encodeURIComponent(query)}&tenantId=${tenantId}&limit=10`);
-                    const payload = await response.json();
-                    
-                    if (payload.ok && Array.isArray(payload.results)) {
-                      return payload.results.map((article: any) => ({
-                        id: article.id || article.code,
-                        title: article.title,
-                        snippet: article.snippet || '',
-                        confidence: article.score || 0.8,
-                        url: article.url,
-                      }));
-                    }
-                    
-                    return [];
-                  } catch (err) {
-                    console.error('[Live] KB search failed', err);
-                    return [];
-                  }
-                }}
-                fetchDispositionSummary={async (interactionId) => {
-                  console.log('[Live] Fetching disposition for:', interactionId);
-                  try {
-                    const response = await fetch(`/api/calls/summary`, {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ callId: interactionId, tenantId }),
-                    });
-                    const payload = await response.json();
-                    return {
-                      dispositionId: payload.dispositions?.[0]?.mappedId || 'disposition-1',
-                      dispositionTitle: payload.dispositions?.[0]?.mappedTitle || 'General Inquiry',
-                      confidence: payload.dispositions?.[0]?.score || 0.5,
-                      subDispositions: payload.dispositions?.[0]?.subDisposition ? [{ id: 'sub-1', title: payload.dispositions[0].subDisposition }] : [],
-                      autoNotes: payload.summary ? Object.values(payload.summary).filter(Boolean).join('\n\n') : 'No notes generated.',
-                    };
-                  } catch (err) {
-                    console.error('[Live] Failed to fetch disposition', err);
-                    throw err;
-                  }
-                }}
-                emitTelemetry={(eventName, payload) => {
-                  console.log('[Live] Telemetry:', eventName, payload);
-                }}
-                onOpenCRM={() => {
-                  console.log('[Live] Open CRM clicked');
-                  window.open(`https://crm.example.com/customer/${mockCustomer.id}`, '_blank');
-                }}
-                onOpenCaseHistory={() => {
-                  console.log('[Live] Open Case History clicked');
-                  window.open(`https://crm.example.com/cases/${mockCustomer.id}`, '_blank');
-                }}
-                onKbArticlesUpdate={(articles) => {
-                  setKbArticles(articles);
-                }}
-              />
-            </div>
-          </div>
-        )}
+        {/* Right Column: Agent Assist Panel V2 - Right-docked (matching test-agent-assist) */}
+        <AgentAssistPanelV2
+          agentId="agent-live-123"
+          tenantId={tenantId}
+          interactionId={callId || ''}
+          customer={mockCustomer}
+          callDuration="00:00"
+          isCallActive={!!callId}
+          useSse={!!callId} // Only enable SSE when callId is available
+          onKbArticlesUpdate={handleKbArticlesUpdate}
+          onTranscriptEvent={handleTranscriptEvent}
+          triggerKBSearch={handleKBSearch}
+          fetchDispositionSummary={handleDispositionSummary}
+          emitTelemetry={(eventName, payload) => {
+            console.log('[Live] Telemetry:', eventName, payload);
+          }}
+          onOpenCRM={() => {
+            console.log('[Live] Open CRM clicked');
+            window.open('https://crm.example.com/customer/cust-789', '_blank');
+          }}
+          onOpenCaseHistory={() => {
+            console.log('[Live] Open Case History clicked');
+            window.open('https://crm.example.com/cases/cust-789', '_blank');
+          }}
+        />
       </div>
 
       {/* Disposition Modal */}
@@ -525,10 +488,6 @@ function LivePageContent() {
           open={dispositionOpen}
           onClose={() => {
             setDispositionOpen(false);
-            setViewMode('agent-assist');
-          }}
-          onBack={() => {
-            setViewMode('agent-assist');
           }}
           callId={callId}
           tenantId={tenantId}
