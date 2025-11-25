@@ -195,18 +195,44 @@ export function broadcastEvent(event: RealtimeEvent): void {
   const targetCallId = event.callId;
   let sentCount = 0;
   
-  // Collect all client callIds for debugging
+  // Task 1.4: Collect all client callIds for detailed debugging
   const allClientCallIds = Array.from(clients.values()).map(c => c.callId);
+  const clientDetails = Array.from(clients.entries()).map(([id, client]) => ({
+    clientId: id,
+    callId: client.callId,
+    createdAt: client.createdAt.toISOString(),
+  }));
+
+  // Task 1.4: Log detailed matching information
+  console.log('[DEBUG] Real-time broadcast matching:', {
+    targetCallId,
+    targetCallIdType: typeof targetCallId,
+    totalClients: clients.size,
+    allClientCallIds,
+    clientDetails,
+    eventType: event.type,
+    timestamp: new Date().toISOString(),
+  });
 
   for (const [clientId, client] of clients.entries()) {
     // CRITICAL FIX: Use exact matching only - partial matching causes incorrect delivery
     // Send to global subscribers (callId === null) or exact callId match
     const matches = client.callId === null || client.callId === targetCallId;
     
+    // Task 1.4: Log match result for each client
+    console.log('[DEBUG] Client match check:', {
+      clientId,
+      clientCallId: client.callId,
+      targetCallId,
+      matches,
+      matchType: client.callId === null ? 'global' : client.callId === targetCallId ? 'exact' : 'no-match',
+    });
+    
     if (matches) {
       try {
         sendEvent(client.res, event);
         sentCount++;
+        console.log('[DEBUG] Event sent to client:', { clientId, clientCallId: client.callId });
       } catch (err) {
         console.error('[realtime] Failed to send to client', { clientId, error: err });
         // Remove failed client

@@ -211,18 +211,32 @@ class TranscriptConsumer {
       textPreview: msg.text?.substring(0, 50) || '',
     });
 
-    // Map interaction_id to callId
+    // Fix 1.1: Map interaction_id to callId with validation
     // CRITICAL: Ensure callId = interactionId for consistency
     // This must match the callId used in Exotel start event (callSid)
-    const callId = interactionId;
-
+    let callId = interactionId;
+    
+    // Fix 1.1: Validate callId is not empty
+    if (!callId || (typeof callId === 'string' && callId.trim().length === 0)) {
+      console.error('[TranscriptConsumer] ❌ Invalid interactionId/callId detected!', {
+        interactionId,
+        seq: msg.seq,
+        note: 'interactionId cannot be null, undefined, or empty. Skipping transcript.',
+      });
+      return; // Skip processing if callId is invalid
+    }
+    
+    // Fix 1.1: Ensure callId is trimmed and consistent
+    callId = String(callId).trim();
+    
     // Log callId mapping for debugging
     if (callId !== interactionId) {
       console.warn('[TranscriptConsumer] ⚠️ CallId mismatch detected!', {
         interactionId,
         callId,
-        note: 'callId should equal interactionId for proper SSE matching',
+        note: 'callId should equal interactionId for proper SSE matching. Using interactionId.',
       });
+      callId = String(interactionId).trim(); // Force consistency
     }
 
     // Forward to ingest-transcript core function
@@ -231,6 +245,17 @@ class TranscriptConsumer {
     const text = msg.text || ''; // Type guard - we know it exists from check above
     
     try {
+      // Task 1.3: Enhanced logging for callId flow tracing
+      console.log('[DEBUG] CallId flow trace:', {
+        step: 'transcript-consumer',
+        redisInteractionId: interactionId,
+        extractedCallId: callId,
+        match: interactionId === callId,
+        seq: msg.seq,
+        textLength: text.length,
+        timestamp: new Date().toISOString(),
+      });
+      
       console.debug('[TranscriptConsumer] Processing transcript via direct function call', {
         interactionId,
         callId,
@@ -242,6 +267,14 @@ class TranscriptConsumer {
       });
 
       // Call the core function directly (no HTTP overhead, more reliable)
+      // Task 1.3: Log callId being passed to core function
+      console.log('[DEBUG] Passing callId to ingestTranscriptCore:', {
+        callId,
+        callIdType: typeof callId,
+        isEmpty: !callId || callId.trim().length === 0,
+        seq: msg.seq,
+      });
+      
       const result = await ingestTranscriptCore({
         callId,
         seq: msg.seq,

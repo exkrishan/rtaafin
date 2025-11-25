@@ -248,18 +248,90 @@ class CallRegistry {
    * so the UI can still discover and connect to them even if the test script sent a stop event.
    */
   async getActiveCalls(limit: number = 10): Promise<CallMetadata[]> {
+    // Task 2.2: Check Redis connection health before operation
     if (!this.redis) {
+      console.warn('[CallRegistry] ⚠️ Redis client not available', {
+        connectionStatus: this.connectionStatus,
+        timestamp: new Date().toISOString(),
+      });
+      return [];
+    }
+    
+    // Task 2.2: Verify connection status
+    if (this.connectionStatus === 'error') {
+      console.error('[CallRegistry] ❌ Redis connection in error state', {
+        connectionStatus: this.connectionStatus,
+        timestamp: new Date().toISOString(),
+      });
       return [];
     }
 
     try {
+      // Fix 2.2: Use SCAN instead of KEYS for better performance
+      const startTime = Date.now();
       const pattern = `${CALL_METADATA_KEY_PREFIX}*`;
-      const keys = await this.redis.keys(pattern);
+      
+      console.log('[DEBUG] Starting Redis SCAN operation (replacing KEYS)', {
+        pattern,
+        limit,
+        connectionStatus: this.connectionStatus,
+        timestamp: new Date().toISOString(),
+      });
+      
+      // Fix 2.2: Use SCAN instead of KEYS to avoid blocking
+      let cursor = '0';
+      const keys: string[] = [];
+      const maxKeys = limit * 2; // Get more keys to filter
+      
+      do {
+        try {
+          const [nextCursor, batch] = await this.redis.scan(
+            cursor,
+            'MATCH',
+            pattern,
+            'COUNT',
+            100 // Scan 100 keys at a time
+          );
+          keys.push(...batch);
+          cursor = nextCursor;
+          
+          // Stop if we have enough keys or cursor is back to 0
+          if (keys.length >= maxKeys || cursor === '0') {
+            break;
+          }
+        } catch (scanError: any) {
+          console.error('[CallRegistry] SCAN operation error', {
+            error: scanError.message,
+            cursor,
+            keysFound: keys.length,
+          });
+          break; // Exit loop on error
+        }
+      } while (cursor !== '0' && keys.length < maxKeys);
+      
+      // Fix 2.2: Log performance metrics
+      const scanDuration = Date.now() - startTime;
+      console.log('[DEBUG] Redis SCAN performance metrics', {
+        duration: `${scanDuration}ms`,
+        keysReturned: keys.length,
+        pattern,
+        exceeds5Seconds: scanDuration > 5000,
+        timestamp: new Date().toISOString(),
+      });
+      
+      if (scanDuration > 5000) {
+        console.warn('[CallRegistry] ⚠️ redis.scan() took longer than 5 seconds', {
+          duration: `${scanDuration}ms`,
+          keysReturned: keys.length,
+        });
+      }
+      
       const calls: CallMetadata[] = [];
       const now = Date.now();
       const RECENTLY_ENDED_GRACE_PERIOD_MS = 60000; // 60 seconds - enough for UI to discover
 
       // Get more keys to filter (we'll filter by status and time)
+      const processStartTime = Date.now();
       for (const key of keys.slice(0, limit * 2)) {
         try {
           const data = await this.redis.get(key);

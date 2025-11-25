@@ -45,9 +45,43 @@ export default function TestAgentAssistPage() {
   // Includes recently ended calls (within 60 seconds) for real-time transcription
   useEffect(() => {
     const discoverActiveCalls = async () => {
+      // Fix 2.3: Add comprehensive error handling
       try {
-        const response = await fetch('/api/calls/active?limit=10');
-        const data = await response.json();
+        // Fix 2.3: Add timeout to fetch request (5 seconds)
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 5000);
+        
+        const response = await fetch('/api/calls/active?limit=10', {
+          signal: controller.signal,
+        });
+        
+        clearTimeout(timeoutId);
+        
+        // Fix 2.3: Handle non-OK responses gracefully
+        if (!response.ok) {
+          // Fix 2.3: Handle 503 errors gracefully (return empty array)
+          if (response.status === 503) {
+            console.warn('[Test] Service unavailable (503), returning empty calls');
+            return [];
+          }
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+        
+        // Fix 2.3: Check if response has content before parsing
+        const text = await response.text();
+        if (!text || text.trim().length === 0) {
+          console.warn('[Test] Empty response from /api/calls/active');
+          return [];
+        }
+        
+        let data;
+        try {
+          data = JSON.parse(text);
+        } catch (parseError) {
+          // Fix 2.3: Handle JSON parse errors
+          console.error('[Test] Failed to parse JSON response:', parseError);
+          return [];
+        }
         
         if (data.ok && data.calls && data.calls.length > 0) {
           // Use the most recent call from the array (already sorted by lastActivity)
@@ -57,34 +91,70 @@ export default function TestAgentAssistPage() {
           
           if (mostRecentCall && mostRecentCall.interactionId) {
             const interactionId = mostRecentCall.interactionId;
-            if (interactionId !== lastDiscoveredCallId) {
+            // Fix 1.2: Only update if it's a different call AND not the default test call
+            // This prevents SSE connection with default 'test-call-123' when real call exists
+            if (interactionId !== lastDiscoveredCallId && interactionId !== 'test-call-123') {
               console.log('[Test] 🎯 Auto-discovered call:', {
                 interactionId,
                 status: mostRecentCall.status,
                 lastActivity: new Date(mostRecentCall.lastActivity).toISOString(),
+                previousCallId: callId,
                 note: mostRecentCall.status === 'ended' ? 'Recently ended (within 60s) - still discoverable for real-time transcription' : 'Active call',
               });
+              // Fix 1.2: Set callId before SSE connection is established
+              // This ensures SSE uses discovered callId
               setCallId(interactionId);
               setLastDiscoveredCallId(interactionId);
+              console.log('[Test] ✅ CallId updated - SSE will reconnect with new callId:', interactionId);
             }
           } else if (data.latestCall) {
             // Fallback to latestCall if calls array structure is different
-            if (data.latestCall.trim && data.latestCall.trim().length > 0) {
+            // Fix 1.2: Only use if not default test call
+            if (data.latestCall.trim && data.latestCall.trim().length > 0 && data.latestCall !== 'test-call-123') {
               if (data.latestCall !== lastDiscoveredCallId) {
                 console.log('[Test] 🎯 Auto-discovered new call (via latestCall):', data.latestCall);
                 setCallId(data.latestCall);
                 setLastDiscoveredCallId(data.latestCall);
+                console.log('[Test] ✅ CallId updated - SSE will reconnect with new callId:', data.latestCall);
               }
             }
           }
         } else {
           // No calls found - keep current callId (don't reset to test-call-123)
           // This allows UI to stay connected to the last discovered call even if it's ended
-          console.debug('[Test] No active calls found, keeping current callId:', callId);
+          // Fix 1.2: Only keep if it's not the default test call
+          if (callId === 'test-call-123') {
+            console.debug('[Test] No active calls found and using default test callId');
+          } else {
+            console.debug('[Test] No active calls found, keeping current callId:', callId);
+          }
         }
       } catch (err: any) {
-        console.error('[Test] Failed to discover active calls:', err);
+        // Fix 2.3: Handle timeout, network errors, and JSON parse errors gracefully
+        if (err.name === 'AbortError' || err.name === 'TimeoutError') {
+          console.warn('[Test] Request timeout when fetching active calls (5s)', {
+            error: err.message,
+            note: 'Returning empty array to prevent UI errors',
+          });
+        } else if (err instanceof SyntaxError) {
+          console.error('[Test] Failed to parse JSON response:', {
+            error: err.message,
+            note: 'Response may be empty or invalid JSON',
+          });
+        } else {
+          console.error('[Test] Failed to discover active calls:', {
+            error: err.message || String(err),
+            errorName: err.name,
+            note: 'Returning empty array to prevent UI errors',
+          });
+        }
         // On error, keep current callId (don't reset)
+        // Fix 1.2: But log if we're using default test call
+        if (callId === 'test-call-123') {
+          console.warn('[Test] ⚠️ Using default test callId due to discovery error');
+        }
+        // Fix 2.3: Return empty array instead of throwing
+        return [];
       }
     };
 

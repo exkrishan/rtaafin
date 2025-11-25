@@ -209,12 +209,21 @@ export default function AgentAssistPanelV2({
     // Store eventSource in a ref to prevent recreation on every render
     let eventSource: EventSource | null = null;
 
+    // Task 1.1: Enhanced logging for SSE connection callId
     console.log('[AgentAssistPanel] Starting SSE connection', { 
       interactionId, 
       isCollapsed,
       timestamp: new Date().toISOString()
     });
+    console.log('[DEBUG] SSE connection established with callId:', interactionId, {
+      callIdType: typeof interactionId,
+      callIdLength: interactionId?.length || 0,
+      isEmpty: !interactionId || interactionId.trim().length === 0,
+      isDefault: interactionId === 'test-call-123',
+      timestamp: new Date().toISOString(),
+    });
     const url = `/api/events/stream?callId=${encodeURIComponent(interactionId)}`;
+    console.log('[DEBUG] SSE URL:', url);
     eventSource = new EventSource(url);
 
     eventSource.onopen = () => {
@@ -314,13 +323,46 @@ export default function AgentAssistPanelV2({
           return;
         }
         
+        // Fix 1.3: Enhanced callId matching with fallbacks
         // Match callId - must match exactly or be missing (assume it's for this interaction)
-        const callIdMatches = !eventCallId || eventCallId === interactionId;
+        let callIdMatches = !eventCallId || eventCallId === interactionId;
+        
+        // Fix 1.3: Fallback matching - try case-insensitive and trimmed comparison
+        if (!callIdMatches && eventCallId && interactionId) {
+          const normalizedEventCallId = String(eventCallId).trim().toLowerCase();
+          const normalizedInteractionId = String(interactionId).trim().toLowerCase();
+          callIdMatches = normalizedEventCallId === normalizedInteractionId;
+          
+          if (callIdMatches) {
+            console.log('[AgentAssistPanel] ✅ CallId matched after normalization', {
+              eventCallId,
+              interactionId,
+              normalizedEventCallId,
+              normalizedInteractionId,
+            });
+          }
+        }
+        
+        // Fix 1.3: Additional fallback - check if eventCallId contains interactionId or vice versa
+        if (!callIdMatches && eventCallId && interactionId) {
+          const eventCallIdStr = String(eventCallId).trim();
+          const interactionIdStr = String(interactionId).trim();
+          if (eventCallIdStr.includes(interactionIdStr) || interactionIdStr.includes(eventCallIdStr)) {
+            console.warn('[AgentAssistPanel] ⚠️ CallId partial match detected - using fallback matching', {
+              eventCallId: eventCallIdStr,
+              interactionId: interactionIdStr,
+              note: 'This is a fallback match - exact match preferred',
+            });
+            callIdMatches = true; // Allow partial match as fallback
+          }
+        }
         
         if (!callIdMatches) {
           console.warn('[AgentAssistPanel] ⚠️ CallId mismatch - skipping transcript', {
             eventCallId,
             expectedCallId: interactionId,
+            eventCallIdType: typeof eventCallId,
+            interactionIdType: typeof interactionId,
             suggestion: 'Check if UI is connected with the correct callId. Update interactionId prop or wait for auto-discovery.',
           });
           return;

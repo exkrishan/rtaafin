@@ -139,18 +139,47 @@ export async function ingestTranscriptCore(
   params: IngestTranscriptParams
 ): Promise<IngestTranscriptResult> {
   try {
-    // Validate required fields
-    if (!params.callId || params.seq === undefined || !params.ts || !params.text) {
+    // Fix 1.1: Validate required fields with enhanced callId validation
+    if (!params.callId || (typeof params.callId === 'string' && params.callId.trim().length === 0)) {
+      console.error('[ingest-transcript-core] ❌ Invalid callId in params', {
+        callId: params.callId,
+        callIdType: typeof params.callId,
+        seq: params.seq,
+        timestamp: new Date().toISOString(),
+      });
       return {
         ok: false,
-        error: 'Missing required fields: callId, seq, ts, text',
+        error: 'Missing or invalid callId field',
+      };
+    }
+    
+    if (params.seq === undefined || !params.ts || !params.text) {
+      return {
+        ok: false,
+        error: 'Missing required fields: seq, ts, or text',
+      };
+    }
+    
+    // Fix 1.1: Ensure callId is a valid string
+    const validatedCallId = String(params.callId).trim();
+    if (validatedCallId.length === 0) {
+      console.error('[ingest-transcript-core] ❌ callId is empty after validation', {
+        originalCallId: params.callId,
+        seq: params.seq,
+      });
+      return {
+        ok: false,
+        error: 'callId cannot be empty',
       };
     }
 
     const tenantId = params.tenantId || 'default';
+    
+    // Fix 1.1: Use validated callId throughout
+    const validatedCallId = String(params.callId).trim();
 
     console.info('[ingest-transcript-core] Processing transcript chunk', {
-      callId: params.callId,
+      callId: validatedCallId,
       seq: params.seq,
       ts: params.ts,
       textLength: params.text.length,
@@ -164,7 +193,7 @@ export async function ingestTranscriptCore(
       const { data, error } = await (supabase as any)
         .from('ingest_events')
         .upsert({
-          call_id: params.callId,
+          call_id: validatedCallId,
           seq: params.seq,
           ts: params.ts,
           text: params.text,
@@ -178,7 +207,7 @@ export async function ingestTranscriptCore(
       if (error) {
         if (error.code === '23505') {
           console.debug('[ingest-transcript-core] Duplicate transcript chunk (already exists)', {
-            callId: params.callId,
+            callId: validatedCallId,
             seq: params.seq,
           });
         } else {
@@ -195,6 +224,16 @@ export async function ingestTranscriptCore(
 
     // Broadcast transcript line to real-time listeners
     try {
+      // Task 1.2: Enhanced logging before broadcast
+      console.log('[DEBUG] Broadcasting transcript with callId:', params.callId, {
+        callIdType: typeof params.callId,
+        callIdLength: params.callId?.length || 0,
+        isEmpty: !params.callId || params.callId.trim().length === 0,
+        seq: params.seq,
+        textLength: params.text.length,
+        timestamp: new Date().toISOString(),
+      });
+      
       const broadcastPayload = {
         type: 'transcript_line' as const,
         callId: params.callId,
@@ -216,7 +255,7 @@ export async function ingestTranscriptCore(
       
       broadcastEvent(broadcastPayload);
       console.info('[ingest-transcript-core] ✅ Broadcast transcript_line', {
-        callId: params.callId,
+        callId: validatedCallId,
         seq: params.seq,
         textLength: params.text.length,
         textPreview: params.text.substring(0, 50),
@@ -225,7 +264,7 @@ export async function ingestTranscriptCore(
     } catch (broadcastErr) {
       console.error('[ingest-transcript-core] ❌ Failed to broadcast transcript_line:', {
         error: broadcastErr,
-        callId: params.callId,
+        callId: validatedCallId,
         seq: params.seq,
         timestamp: new Date().toISOString(),
       });
@@ -267,7 +306,7 @@ export async function ingestTranscriptCore(
       // Store intent in database
       try {
         const { error: intentError } = await (supabase as any).from('intents').insert({
-          call_id: params.callId,
+          call_id: validatedCallId,
           seq: params.seq,
           intent,
           confidence,
@@ -347,7 +386,7 @@ export async function ingestTranscriptCore(
       try {
         const intentUpdatePayload = {
           type: 'intent_update' as const,
-          callId: params.callId,
+          callId: validatedCallId,
           seq: params.seq,
           intent,
           confidence,
@@ -355,7 +394,7 @@ export async function ingestTranscriptCore(
         };
         
         console.info('[ingest-transcript-core] 📤 Broadcasting intent_update', {
-          callId: params.callId,
+          callId: validatedCallId,
           seq: params.seq,
           intent,
           confidence,
@@ -367,7 +406,7 @@ export async function ingestTranscriptCore(
         broadcastEvent(intentUpdatePayload);
         
         console.info('[ingest-transcript-core] ✅ Broadcast intent_update', {
-          callId: params.callId,
+          callId: validatedCallId,
           seq: params.seq,
           intent,
           confidence,
@@ -377,7 +416,7 @@ export async function ingestTranscriptCore(
       } catch (broadcastErr) {
         console.error('[ingest-transcript-core] ❌ Failed to broadcast intent_update:', {
           error: broadcastErr,
-          callId: params.callId,
+          callId: validatedCallId,
           seq: params.seq,
           timestamp: new Date().toISOString(),
         });
