@@ -38,9 +38,25 @@ export async function GET(req: Request) {
     
     const stream = new ReadableStream({
     start(controller) {
-      // CRITICAL FIX: Send initial connection event IMMEDIATELY when stream starts
-      // This ensures EventSource's onopen event fires properly
-      // We send this BEFORE registering the client so the browser gets it right away
+      // CRITICAL FIX: Send comment line FIRST to trigger headers and onopen
+      // EventSource's onopen fires when it receives ANY data, including comments
+      // Comment lines (starting with :) are ignored by EventSource but trigger the connection
+      try {
+        // Send comment line first - this triggers headers to be sent and onopen to fire
+        const commentLine = `: connected\n\n`;
+        controller.enqueue(new TextEncoder().encode(commentLine));
+        console.log('[sse-endpoint] ✅ Sent connection comment (triggers onopen)', {
+          callId: streamCallId || 'global',
+          timestamp: new Date().toISOString(),
+        });
+      } catch (err: any) {
+        console.error('[sse-endpoint] Failed to send comment line', {
+          error: err?.message || err,
+          stack: err?.stack,
+        });
+      }
+
+      // Then send initial connection event
       const clientId = `client_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
       const initialEvent = {
         type: 'transcript_line',
