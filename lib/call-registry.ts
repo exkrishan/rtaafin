@@ -61,6 +61,7 @@ class CallRegistry {
   // Last known good state (fallback)
   private lastKnownGoodState: CallMetadata[] | null = null;
   private lastKnownGoodStateTime: number = 0;
+  private static readonly MAX_LAST_KNOWN_GOOD_STATE = 100; // Maximum calls to store in fallback state (prevents memory leaks)
 
   constructor() {
     // Create dedicated Redis connection for key-value operations
@@ -644,8 +645,9 @@ class CallRegistry {
       // Update cache
       this.updateCache(result);
       
-      // Update last known good state
-      this.lastKnownGoodState = [...result];
+      // Update last known good state (limit size to prevent memory leaks)
+      const limitedResult = result.slice(0, CallRegistry.MAX_LAST_KNOWN_GOOD_STATE);
+      this.lastKnownGoodState = [...limitedResult];
       this.lastKnownGoodStateTime = Date.now();
       
       // Record success for circuit breaker
@@ -661,14 +663,16 @@ class CallRegistry {
       // Record failure for circuit breaker
       this.recordFailure();
       
-      // Return last known good state if available
+      // Return last known good state if available (limit to prevent memory issues)
       if (this.lastKnownGoodState && 
           Date.now() - this.lastKnownGoodStateTime < 60000) {
+        const limitedState = this.lastKnownGoodState.slice(0, Math.min(limit, CallRegistry.MAX_LAST_KNOWN_GOOD_STATE));
         console.info('[CallRegistry] ✅ Using last known good state after error', {
-          count: this.lastKnownGoodState.length,
+          count: limitedState.length,
+          originalCount: this.lastKnownGoodState.length,
           age: Date.now() - this.lastKnownGoodStateTime,
         });
-        return this.lastKnownGoodState.slice(0, limit);
+        return limitedState;
       }
       
       return [];

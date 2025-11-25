@@ -35,10 +35,44 @@ const connectionCache = new Map<string, RedisInstance>();
 const connectionRefCount = new Map<string, number>(); // Track how many adapters use each connection
 const maxClientsErrorTime = new Map<string, number>(); // Track when max clients error occurred per URL
 const MAX_CLIENTS_BACKOFF_MS = 60000; // Don't retry for 60 seconds after max clients error
+const MAX_CONNECTION_CACHE_SIZE = 5; // Maximum number of Redis connections to cache (prevents memory leaks)
 
 // Cleanup dead connections periodically
 setInterval(() => {
   const cacheEntries = Array.from(connectionCache.entries());
+  
+  // CRITICAL FIX: Limit connection cache size to prevent memory leaks
+  if (connectionCache.size > MAX_CONNECTION_CACHE_SIZE) {
+    // Remove oldest connections (by status - remove dead ones first, then oldest ready ones)
+    const sortedEntries = cacheEntries.sort((a, b) => {
+      const aStatus = a[1]?.status || 'unknown';
+      const bStatus = b[1]?.status || 'unknown';
+      // Dead connections first, then by status
+      if (aStatus !== 'ready' && bStatus === 'ready') return -1;
+      if (aStatus === 'ready' && bStatus !== 'ready') return 1;
+      return 0;
+    });
+    
+    const toRemove = connectionCache.size - MAX_CONNECTION_CACHE_SIZE;
+    for (let i = 0; i < toRemove; i++) {
+      const [url, conn] = sortedEntries[i];
+      console.warn('[RedisStreamsAdapter] Removing connection to enforce cache limit', {
+        url: url.replace(/:[^:@]+@/, ':****@'),
+        status: conn?.status,
+        cacheSize: connectionCache.size,
+        maxSize: MAX_CONNECTION_CACHE_SIZE,
+      });
+      connectionCache.delete(url);
+      connectionRefCount.delete(url);
+      try {
+        conn?.disconnect();
+      } catch (e) {
+        // Ignore disconnect errors
+      }
+    }
+  }
+  
+  // Remove dead connections
   for (const [url, conn] of cacheEntries) {
     if (conn && conn.status !== 'ready' && conn.status !== 'connecting') {
       console.warn(`[RedisStreamsAdapter] Removing dead connection from cache: ${url}`);
@@ -58,6 +92,22 @@ setInterval(() => {
   for (const [url, errorTime] of errorEntries) {
     if (now - errorTime > MAX_CLIENTS_BACKOFF_MS) {
       maxClientsErrorTime.delete(url);
+    }
+  }
+  
+  // CRITICAL FIX: Memory monitoring for Redis connections
+  if (connectionCache.size > 0) {
+    const usage = process.memoryUsage();
+    const heapUsedMB = Math.round(usage.heapUsed / 1024 / 1024);
+    
+    // Log warning if heap usage is high and we have many connections
+    if (heapUsedMB > 150 && connectionCache.size >= 3) {
+      console.warn('[RedisStreamsAdapter] ⚠️ High memory usage with Redis connections', {
+        heapUsed: `${heapUsedMB}MB`,
+        connectionCount: connectionCache.size,
+        maxConnections: MAX_CONNECTION_CACHE_SIZE,
+        note: 'Consider reducing connection count or increasing heap limit',
+      });
     }
   }
 }, 30000); // Check every 30 seconds
@@ -221,6 +271,36 @@ export class RedisStreamsAdapter implements PubSubAdapter {
   }
 
   private createNewConnection(url: string): RedisInstance {
+    // CRITICAL FIX: Enforce connection cache limit before creating new connection
+    if (connectionCache.size >= MAX_CONNECTION_CACHE_SIZE) {
+      // Remove oldest dead connection first, then oldest ready connection
+      const cacheEntries = Array.from(connectionCache.entries());
+      const sortedEntries = cacheEntries.sort((a, b) => {
+        const aStatus = a[1]?.status || 'unknown';
+        const bStatus = b[1]?.status || 'unknown';
+        if (aStatus !== 'ready' && bStatus === 'ready') return -1;
+        if (aStatus === 'ready' && bStatus !== 'ready') return 1;
+        return 0;
+      });
+      
+      if (sortedEntries.length > 0) {
+        const [oldUrl, oldConn] = sortedEntries[0];
+        console.warn('[RedisStreamsAdapter] Connection cache at limit, removing oldest connection', {
+          removedUrl: oldUrl.replace(/:[^:@]+@/, ':****@'),
+          removedStatus: oldConn?.status,
+          cacheSize: connectionCache.size,
+          maxSize: MAX_CONNECTION_CACHE_SIZE,
+        });
+        connectionCache.delete(oldUrl);
+        connectionRefCount.delete(oldUrl);
+        try {
+          oldConn?.disconnect();
+        } catch (e) {
+          // Ignore disconnect errors
+        }
+      }
+    }
+    
     console.info('[RedisStreamsAdapter] Creating new Redis connection:', url);
     const connection = new ioredis(url, this.defaultRedisOptions);
     connectionCache.set(url, connection);
