@@ -5,9 +5,10 @@
  * Real-time event stream for transcript lines and intent updates.
  * Clients connect via EventSource and receive live events as they occur.
  *
- * CTO FIX: Using TransformStream to ensure immediate data flush
+ * CTO FIX: Using ReadableStream with controller.enqueue() for immediate data flush
  * This fixes the issue where EventSource.onopen wasn't firing because
- * Next.js ReadableStream was buffering data instead of flushing immediately.
+ * Next.js was buffering data. Using controller.enqueue() in the start() callback
+ * ensures data is sent immediately before the Response is returned.
  *
  * Note: Must use Node.js runtime (not Edge) for response streaming support.
  */
@@ -38,117 +39,122 @@ export async function GET(req: Request) {
     const streamCallId = callId; // Capture in const for closure
     const encoder = new TextEncoder();
     let closeHandler: (() => void) | null = null;
+    let streamController: ReadableStreamDefaultController<Uint8Array> | null = null;
 
-    // CTO FIX: Use TransformStream instead of ReadableStream
-    // TransformStream ensures immediate data transmission, fixing the buffering issue
-    const { readable, writable } = new TransformStream();
-    const writer = writable.getWriter();
-
-    // CRITICAL: Send initial data IMMEDIATELY (synchronously, before any async operations)
-    // This ensures EventSource.onopen fires because data is actually sent to the browser
-    const initialData = {
-      type: 'connection',
-      callId: streamCallId || 'system',
-      message: 'connected',
-      timestamp: new Date().toISOString(),
-    };
-    const initialDataStr = `data: ${JSON.stringify(initialData)}\n\n`;
-    
-    // CRITICAL FIX: AWAIT the write to ensure data is flushed before Response is returned
-    // This ensures EventSource.onopen fires because data is actually sent to the browser
-    await writer.write(encoder.encode(initialDataStr));
-    console.log('[sse-endpoint] ✅ Sent initial connection data (flushed)', {
-      callId: streamCallId || 'global',
-      timestamp: new Date().toISOString(),
-    });
-
-    // Create mock response object for registerSseClient
-    // This allows realtime.ts to write to our TransformStream
-    const mockRes = {
-      controller: { desiredSize: 1 }, // Mock controller for compatibility checks
-      setHeader: () => {}, // No-op (headers set in Response constructor)
-      flushHeaders: () => {}, // No-op (TransformStream flushes automatically)
-      write: (chunk: string | Uint8Array) => {
+    // CRITICAL FIX: Use ReadableStream with controller - Next.js App Router supports this natively
+    // This ensures immediate data transmission without buffering issues
+    const stream = new ReadableStream({
+      start(controller) {
+        streamController = controller;
+        
+        // Send initial connection data IMMEDIATELY (synchronously in start callback)
+        // This ensures EventSource.onopen fires because data is sent before Response is returned
+        const initialData = {
+          type: 'connection',
+          callId: streamCallId || 'system',
+          message: 'connected',
+          timestamp: new Date().toISOString(),
+        };
+        const initialDataStr = `data: ${JSON.stringify(initialData)}\n\n`;
+        
         try {
-          // Encode string chunks to Uint8Array
-          const encoded = typeof chunk === 'string' 
-            ? encoder.encode(chunk)
-            : chunk instanceof Uint8Array 
-            ? chunk
-            : encoder.encode(String(chunk));
-          
-          // Write to TransformStream (this flushes immediately)
-          writer.write(encoded).catch((err: any) => {
-            // Stream might be closed, log but don't throw
-            if (err?.name !== 'TypeError' || !err?.message?.includes('closed')) {
-              console.warn('[sse-endpoint] Write error (stream may be closed)', {
+          controller.enqueue(encoder.encode(initialDataStr));
+          console.log('[sse-endpoint] ✅ Sent initial connection data (enqueued)', {
+            callId: streamCallId || 'global',
+            timestamp: new Date().toISOString(),
+          });
+        } catch (err: any) {
+          console.error('[sse-endpoint] Failed to send initial data', {
+            error: err?.message || err,
+            callId: streamCallId || 'global',
+          });
+        }
+
+        // Create mock response object for registerSseClient
+        // This allows realtime.ts to write to our ReadableStream
+        const mockRes = {
+          controller: { desiredSize: 1 }, // Mock controller for compatibility checks
+          setHeader: () => {}, // No-op (headers set in Response constructor)
+          flushHeaders: () => {}, // No-op (ReadableStream flushes automatically)
+          write: (chunk: string | Uint8Array) => {
+            try {
+              if (!streamController) {
+                console.warn('[sse-endpoint] Cannot write - stream controller is null');
+                return;
+              }
+              
+              // Encode string chunks to Uint8Array
+              const encoded = typeof chunk === 'string' 
+                ? encoder.encode(chunk)
+                : chunk instanceof Uint8Array 
+                ? chunk
+                : encoder.encode(String(chunk));
+              
+              // Enqueue to ReadableStream (this sends data immediately)
+              streamController.enqueue(encoded);
+            } catch (err: any) {
+              console.warn('[sse-endpoint] Write error', {
                 error: err?.message || err,
                 chunkType: typeof chunk,
               });
             }
-          });
-        } catch (err: any) {
-          console.warn('[sse-endpoint] Failed to write chunk', {
-            error: err?.message || err,
-          });
-        }
-      },
-      flush: () => {
-        // No-op for TransformStream (flushes automatically)
-      },
-      end: () => {
-        writer.close().catch(() => {
-          // Already closed - ignore
-        });
-      },
-    };
+          },
+          flush: () => {
+            // No-op for ReadableStream (flushes automatically)
+          },
+          end: () => {
+            try {
+              if (streamController) {
+                streamController.close();
+                streamController = null;
+              }
+            } catch (err) {
+              // Already closed - ignore
+            }
+          },
+        };
 
-    // Create mock request for cleanup handling
-    const mockReq = {
-      on: (event: string, handler: any) => {
-        if (event === 'close') {
-          closeHandler = handler;
-        }
-        return mockReq;
-      },
-    };
+        // Create mock request for cleanup handling
+        const mockReq = {
+          on: (event: string, handler: any) => {
+            if (event === 'close') {
+              closeHandler = handler;
+            }
+            return mockReq;
+          },
+        };
 
-    // Register SSE client asynchronously (after initial data is sent)
-    // This allows broadcasts from realtime.ts to work
-    // Note: registerSseClient returns void, not a Promise, so we use try-catch
-    try {
-      registerSseClient(mockReq, mockRes, streamCallId);
-    } catch (err: any) {
-      console.error('[sse-endpoint] Failed to register client', {
-        error: err?.message || err,
-        callId: streamCallId || 'global',
-      });
-    }
-
-    // Handle cleanup when stream is cancelled
-    // TransformStream automatically handles cancellation, but we need to clean up our resources
-    // The writer will be closed automatically when readable is cancelled
-    // We use a promise to detect when the stream ends
-    writer.closed.then(() => {
-      console.info('[sse-endpoint] ❌ Stream writer closed', {
-        callId: streamCallId || 'global',
-        timestamp: new Date().toISOString(),
-      });
-      
-      // Call cleanup handler if it exists
-      if (closeHandler) {
+        // Register SSE client (synchronously in start callback)
+        // This allows broadcasts from realtime.ts to work
         try {
-          closeHandler();
-        } catch (err) {
-          console.warn('[sse-endpoint] Error in close handler', err);
+          registerSseClient(mockReq, mockRes, streamCallId);
+        } catch (err: any) {
+          console.error('[sse-endpoint] Failed to register client', {
+            error: err?.message || err,
+            callId: streamCallId || 'global',
+          });
         }
-      }
-    }).catch(() => {
-      // Stream closed normally or cancelled - ignore
+      },
+      cancel() {
+        console.info('[sse-endpoint] ❌ Stream cancelled', {
+          callId: streamCallId || 'global',
+          timestamp: new Date().toISOString(),
+        });
+        
+        if (closeHandler) {
+          try {
+            closeHandler();
+          } catch (err) {
+            console.warn('[sse-endpoint] Error in close handler', err);
+          }
+        }
+        
+        streamController = null;
+      },
     });
 
-    // Return SSE response with TransformStream readable side
-    return new Response(readable, {
+    // Return SSE response with ReadableStream
+    return new Response(stream, {
       headers: {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache, no-transform',
