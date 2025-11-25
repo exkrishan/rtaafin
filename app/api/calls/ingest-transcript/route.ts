@@ -162,11 +162,11 @@ export async function POST(req: Request) {
       const { data, error } = await (supabase as any)
         .from('ingest_events')
         .upsert({
-          call_id: body.callId,
-          seq: body.seq,
-          ts: body.ts,
-          text: body.text,
-          created_at: new Date().toISOString(),
+        call_id: body.callId,
+        seq: body.seq,
+        ts: body.ts,
+        text: body.text,
+        created_at: new Date().toISOString(),
         }, {
           onConflict: 'call_id,seq',
           ignoreDuplicates: false, // Update if duplicate exists
@@ -182,7 +182,7 @@ export async function POST(req: Request) {
             note: 'This is normal if the same chunk is sent multiple times (retries, etc.)',
           });
         } else {
-          console.error('[ingest-transcript] Supabase insert error:', error);
+        console.error('[ingest-transcript] Supabase insert error:', error);
         }
         // Don't fail the request, just log it
         console.warn('[ingest-transcript] Continuing despite Supabase error');
@@ -202,7 +202,19 @@ export async function POST(req: Request) {
         seq: body.seq,
         ts: body.ts,
         text: body.text,
+        speaker: 'customer', // Default until we implement speaker diarization
       };
+      
+      console.info('[ingest-transcript] 📤 Broadcasting transcript_line', {
+        callId: body.callId,
+        seq: body.seq,
+        textLength: body.text.length,
+        textPreview: body.text.substring(0, 50),
+        speaker: 'customer',
+        timestamp: new Date().toISOString(),
+        note: 'UI should be connected with this exact callId to receive this event',
+      });
+      
       broadcastEvent(broadcastPayload);
       console.info('[realtime] ✅ Broadcast transcript_line', {
         callId: body.callId,
@@ -234,14 +246,14 @@ export async function POST(req: Request) {
 
     try {
       if (shouldDetectIntent) {
-        // Detect intent from the transcript text
-        console.info('[ingest-transcript] Detecting intent for seq:', body.seq, {
-          textLength: body.text.length,
-          textPreview: body.text.substring(0, 100),
-        });
-        const intentResult = await detectIntent(body.text);
-        intent = intentResult.intent;
-        confidence = intentResult.confidence;
+      // Detect intent from the transcript text
+      console.info('[ingest-transcript] Detecting intent for seq:', body.seq, {
+        textLength: body.text.length,
+        textPreview: body.text.substring(0, 100),
+      });
+      const intentResult = await detectIntent(body.text);
+      intent = intentResult.intent;
+      confidence = intentResult.confidence;
       } else {
         console.debug('[ingest-transcript] Skipping intent detection (text too short)', {
           seq: body.seq,

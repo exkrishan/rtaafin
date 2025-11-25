@@ -53,7 +53,6 @@ export interface AgentAssistPanelV2Props {
   useSse?: boolean; // If false, skip SSE connection (for demo mode)
   directTranscripts?: TranscriptUtterance[]; // Direct transcript updates (for demo mode)
   onKbArticlesUpdate?: (articles: KBArticle[], intent?: string, confidence?: number) => void; // Callback for KB articles from API
-  onInteractionIdChange?: (newInteractionId: string) => void; // Callback when component discovers a new interactionId from transcripts
 }
 
 export default function AgentAssistPanelV2({
@@ -73,7 +72,6 @@ export default function AgentAssistPanelV2({
   useSse = true,
   directTranscripts,
   onKbArticlesUpdate,
-  onInteractionIdChange,
 }: AgentAssistPanelV2Props) {
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [kbSuggestionsOpen, setKbSuggestionsOpen] = useState(true);
@@ -306,6 +304,7 @@ export default function AgentAssistPanelV2({
           hasText: !!data.text,
           text: data.text?.substring(0, 50),
           seq: data.seq,
+          speaker: data.speaker || 'not provided',
           timestamp: new Date().toISOString(),
         });
         
@@ -316,40 +315,37 @@ export default function AgentAssistPanelV2({
         }
         
         // Match callId - must match exactly or be missing (assume it's for this interaction)
-        // CRITICAL FIX: If UI is on default 'test-call-123' and we receive a transcript for a different ID,
-        // automatically switch to that ID for real-time transcription
-        const isDefaultCallId = interactionId === 'test-call-123';
         const callIdMatches = !eventCallId || eventCallId === interactionId;
         
-        // Auto-switch if we're on default and receive a transcript for a real call
-        if (isDefaultCallId && eventCallId && eventCallId !== 'test-call-123' && eventCallId !== 'system') {
-          console.log('[AgentAssistPanel] 🔄 Auto-switching to discovered interactionId:', {
-            from: interactionId,
-            to: eventCallId,
-            note: 'Received transcript for real call, switching from default',
+        if (!callIdMatches) {
+          console.warn('[AgentAssistPanel] ⚠️ CallId mismatch - skipping transcript', {
+            eventCallId,
+            expectedCallId: interactionId,
+            suggestion: 'Check if UI is connected with the correct callId. Update interactionId prop or wait for auto-discovery.',
           });
-          // Update parent component's interactionId (if callback provided)
-          // This will trigger a reconnection with the correct ID
-          if (onInteractionIdChange) {
-            onInteractionIdChange(eventCallId);
-          }
+          return;
         }
         
         if (callIdMatches && data.text && data.text.trim().length > 0) {
-          // Determine speaker from text prefix (Agent: or Customer:)
-          let speaker: 'agent' | 'customer' = 'customer';
+          // Determine speaker from data.speaker field or text prefix
+          let speaker: 'agent' | 'customer' = 'customer'; // Default
           let text = data.text;
           
-          // Check for speaker prefix in text (case-insensitive)
-          if (text.match(/^Agent:\s*/i)) {
+          // Priority 1: Use data.speaker if provided
+          if (data.speaker) {
+            speaker = data.speaker.toLowerCase() === 'agent' ? 'agent' : 'customer';
+            text = text.trim();
+          } 
+          // Priority 2: Check for speaker prefix in text (case-insensitive)
+          else if (text.match(/^Agent:\s*/i)) {
             speaker = 'agent';
             text = text.replace(/^Agent:\s*/i, '').trim();
           } else if (text.match(/^Customer:\s*/i)) {
             speaker = 'customer';
             text = text.replace(/^Customer:\s*/i, '').trim();
-          } else if (data.speaker) {
-            // Fallback to data.speaker if provided
-            speaker = data.speaker.toLowerCase() === 'agent' ? 'agent' : 'customer';
+          } else {
+            // Default to customer if no speaker info
+            speaker = 'customer';
             text = text.trim();
           }
           
