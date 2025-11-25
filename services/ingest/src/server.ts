@@ -20,6 +20,7 @@ import { ExotelHandler } from './exotel-handler';
 import { validateConfig, printValidationResults } from './config-validator';
 import { dumpAudioChunk } from './audio-dumper';
 import { uploadToGoogleDrive, listDriveFolders, listCallFolderFiles, listDriveFiles } from './google-drive-uploader';
+import { logger } from './logger';
 
 // Load environment variables from project root .env.local
 // This is safe - dotenv handles missing files gracefully
@@ -177,45 +178,38 @@ class IngestionServer {
     // ============================================
     // HTTP Routes
     // ============================================
-    // Log ALL HTTP requests for debugging
+    // HTTP request logging (rate-limited to reduce noise)
     this.server.on('request', (req: any, res: any) => {
-      // Log all incoming requests (but only once per request to avoid spam)
       if (!req._logged) {
-        // Check if this is a WebSocket upgrade attempt
         const isWebSocketUpgrade = req.headers.upgrade === 'websocket' || 
                                    req.headers.connection?.toLowerCase().includes('upgrade');
         
         if (isWebSocketUpgrade) {
-          console.info('[server] 🔌 WebSocket upgrade attempt detected in HTTP request', {
-            method: req.method,
-            url: req.url,
-            headers: {
-              'user-agent': req.headers['user-agent']?.substring(0, 50) || 'unknown',
-              'upgrade': req.headers.upgrade || 'none',
-              'connection': req.headers.connection || 'none',
-              'authorization': req.headers.authorization ? 'present' : 'missing',
-              'origin': req.headers.origin || 'none',
-              'sec-websocket-key': req.headers['sec-websocket-key'] ? 'present' : 'missing',
-              'sec-websocket-version': req.headers['sec-websocket-version'] || 'none',
+          // Rate-limited verbose log for WebSocket upgrade attempts
+          logger.verbose(
+            'ws-upgrade-attempt',
+            '[server] 🔌 WebSocket upgrade attempt detected in HTTP request',
+            {
+              method: req.method,
+              url: req.url,
+              remoteAddress: req.socket?.remoteAddress || 'unknown',
             },
-            remoteAddress: req.socket?.remoteAddress || 'unknown',
-            remotePort: req.socket?.remotePort || 'unknown',
-          });
+            'debug'
+          );
         } else if (req.url !== '/health') {
-          // Only log non-health-check requests to reduce noise
-          console.info('[server] HTTP request received', {
-            method: req.method,
-            url: req.url,
-            headers: {
-              'user-agent': req.headers['user-agent']?.substring(0, 50) || 'unknown',
-              'upgrade': req.headers.upgrade || 'none',
-              'connection': req.headers.connection || 'none',
-              'authorization': req.headers.authorization ? 'present' : 'missing',
-              'origin': req.headers.origin || 'none',
+          // Rate-limited verbose log for non-health HTTP requests
+          logger.verbose(
+            'http-request',
+            '[server] HTTP request received',
+            {
+              method: req.method,
+              url: req.url,
+              remoteAddress: req.socket?.remoteAddress || 'unknown',
             },
-            remoteAddress: req.socket?.remoteAddress || 'unknown',
-          });
+            'debug'
+          );
         }
+        // Don't log health checks at all
         req._logged = true;
       }
     });
@@ -329,62 +323,55 @@ class IngestionServer {
       path: '/v1/ingest',
       verifyClient: (info, callback) => {
         try {
-          // Log ALL WebSocket upgrade attempts for debugging
-          console.info('[server] 🔌 WebSocket upgrade request received', {
-            url: info.req.url,
-            method: info.req.method,
-            headers: {
-              authorization: info.req.headers.authorization ? 'present' : 'missing',
-              'user-agent': info.req.headers['user-agent']?.substring(0, 50) || 'unknown',
-              origin: info.req.headers.origin || 'none',
-              upgrade: info.req.headers.upgrade || 'none',
-              connection: info.req.headers.connection || 'none',
-              'sec-websocket-key': info.req.headers['sec-websocket-key'] ? 'present' : 'missing',
-              'sec-websocket-version': info.req.headers['sec-websocket-version'] || 'none',
+          // Rate-limited verbose log for WebSocket upgrade requests
+          logger.verbose(
+            'ws-upgrade-request',
+            '[server] 🔌 WebSocket upgrade request received',
+            {
+              url: info.req.url,
+              method: info.req.method,
+              remoteAddress: info.req.socket?.remoteAddress || 'unknown',
             },
-            remoteAddress: info.req.socket?.remoteAddress || 'unknown',
-            remotePort: info.req.socket?.remotePort || 'unknown',
-          });
+            'debug'
+          );
           
           // Check if this is Exotel (no JWT or Basic Auth) or our protocol (JWT)
           const authHeader = info.req.headers.authorization;
           const isExotel = this.detectExotelProtocol(info.req);
           
           if (isExotel && this.supportExotel) {
-            // Exotel connection - accept without JWT validation
-            console.info('[server] ✅ Exotel WebSocket upgrade request accepted (IP whitelist/Basic Auth)');
+            // Only log when connection is actually accepted (not just attempted)
+            logger.debug('[server] ✅ Exotel WebSocket upgrade request accepted (IP whitelist/Basic Auth)');
             (info.req as any).isExotel = true;
             callback(true);
           } else if (!authHeader && this.supportExotel) {
-            // No auth header but Exotel support enabled - might be Exotel with IP whitelisting
-            console.info('[server] ⚠️  WebSocket upgrade with no auth - accepting as Exotel (SUPPORT_EXOTEL=true)');
+            logger.debug('[server] ⚠️  WebSocket upgrade with no auth - accepting as Exotel (SUPPORT_EXOTEL=true)');
             (info.req as any).isExotel = true;
             callback(true);
           } else {
             // Our protocol - require JWT authentication
             try {
-              console.info('[server] WebSocket upgrade request (JWT protocol)', {
+              logger.debug('[server] WebSocket upgrade request (JWT protocol)', {
                 hasAuthHeader: !!authHeader,
-                authHeaderPrefix: authHeader?.substring(0, 20) || 'none',
               });
               const payload = authenticateConnection(info.req.headers as any);
               // Store payload in request for later use
               (info.req as any).jwtPayload = payload;
               (info.req as any).isExotel = false;
-              console.info('[server] ✅ Authentication successful', {
+              // Only log successful authentication at debug level
+              logger.debug('[server] ✅ Authentication successful', {
                 tenant_id: payload.tenant_id,
                 interaction_id: payload.interaction_id,
               });
               callback(true);
             } catch (error: any) {
-              console.warn('[server] ❌ Authentication failed:', error.message);
-              console.warn('[server] Error details:', error);
+              // Always log authentication failures (errors are important)
+              logger.warn('[server] ❌ Authentication failed:', error.message);
               callback(false, 401, 'Unauthorized');
             }
           }
         } catch (error: any) {
-          console.error('[server] ❌ Error in verifyClient:', error);
-          console.error('[server] Error stack:', error.stack);
+          logger.error('[server] ❌ Error in verifyClient:', error);
           callback(false, 500, 'Internal Server Error');
         }
       },

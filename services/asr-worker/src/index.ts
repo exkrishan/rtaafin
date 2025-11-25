@@ -15,6 +15,7 @@ import { BufferManager } from './buffer-manager';
 import { ConnectionHealthMonitor } from './connection-health-monitor';
 import { ElevenLabsCircuitBreaker } from './circuit-breaker';
 import { dumpBufferedAudioChunk } from './audio-dumper';
+import { logger } from './logger';
 
 // Load environment variables from project root .env.local
 require('dotenv').config({ path: require('path').join(__dirname, '../../../.env.local') });
@@ -289,21 +290,29 @@ class AsrWorker {
 
     try {
       const audioHandle = await this.pubsub.subscribe(audioTopicName, async (msg) => {
-        // CRITICAL: Log when message is received from Redis (diagnostic)
-        console.info(`[ASRWorker] 📨 Message received from Redis for topic ${audioTopicName}`, {
-          interaction_id: msg?.interaction_id || 'unknown',
-          seq: msg?.seq || 'unknown',
-          has_audio: !!msg?.audio,
-          audio_length: msg?.audio?.length || 0,
-          audio_type: typeof msg?.audio,
-          msg_keys: Object.keys(msg || {}),
-          msg_preview: JSON.stringify(msg).substring(0, 500),
-          timestamp: new Date().toISOString(),
-        });
+        // Only log if there's actual audio data (ingestion happening)
+        if (msg?.audio && msg.audio.length > 0) {
+          logger.info(`[ASRWorker] 📨 Message received from Redis for topic ${audioTopicName}`, {
+            interaction_id: msg?.interaction_id || 'unknown',
+            seq: msg?.seq || 'unknown',
+            has_audio: !!msg?.audio,
+            audio_length: msg?.audio?.length || 0,
+            audio_type: typeof msg?.audio,
+            msg_keys: Object.keys(msg || {}),
+            msg_preview: JSON.stringify(msg).substring(0, 500),
+            timestamp: new Date().toISOString(),
+          });
+        } else {
+          // Empty messages - only log at debug level
+          logger.debug(`[ASRWorker] 📨 Empty message received from Redis (no audio)`, {
+            interaction_id: msg?.interaction_id || 'unknown',
+            seq: msg?.seq || 'unknown',
+          });
+        }
         
-        // CRITICAL: Log message structure to diagnose parsing issues
+        // Log message structure issues only at debug level
         if (!msg?.audio && !msg?.audio_data && !msg?.data) {
-          console.warn(`[ASRWorker] ⚠️ Message missing audio field!`, {
+          logger.debug(`[ASRWorker] ⚠️ Message missing audio field!`, {
             interaction_id: msg?.interaction_id,
             seq: msg?.seq,
             all_keys: Object.keys(msg || {}),
@@ -380,8 +389,8 @@ class AsrWorker {
     const interactionId = msg?.interaction_id;
     const seq = msg?.seq;
     
-    // CRITICAL: Log entry into handler for debugging - THIS MUST APPEAR IN LOGS
-    console.info(`[ASRWorker] 🎵 Processing audio for ${interactionId}`, {
+    // Log entry into handler - actual work happening
+    logger.info(`[ASRWorker] 🎵 Processing audio for ${interactionId}`, {
       interaction_id: interactionId,
       seq,
       has_audio: !!msg?.audio,
@@ -1162,11 +1171,16 @@ class AsrWorker {
       // Skip if already processing or no chunks
       if (buffer.isProcessing || buffer.chunks.length === 0) {
         if (buffer.chunks.length === 0) {
-          // Log when timer runs but buffer is empty (for debugging)
-          console.debug(`[ASRWorker] ⏸️ Timer tick: buffer empty for ${interactionId}`, {
-            timeSinceLastSend: buffer.lastContinuousSendTime > 0 ? Date.now() - buffer.lastContinuousSendTime : 'never',
-            hasSentInitialChunk: buffer.hasSentInitialChunk,
-          });
+          // Rate-limited verbose log for empty buffer ticks
+          logger.verbose(
+            `timer-empty-${interactionId}`,
+            `[ASRWorker] ⏸️ Timer tick: buffer empty for ${interactionId}`,
+            {
+              timeSinceLastSend: buffer.lastContinuousSendTime > 0 ? Date.now() - buffer.lastContinuousSendTime : 'never',
+              hasSentInitialChunk: buffer.hasSentInitialChunk,
+            },
+            'debug'
+          );
         }
         return;
       }
@@ -1177,12 +1191,7 @@ class AsrWorker {
         return;
       }
       
-      // Log timer tick for debugging
-      console.debug(`[ASRWorker] ⏰ Timer tick for ${interactionId}`, {
-        chunksCount: buffer.chunks.length,
-        isProcessing: buffer.isProcessing,
-        hasSentInitialChunk: buffer.hasSentInitialChunk,
-      });
+      // Don't log every timer tick - only log when actually processing
 
       // Calculate current audio duration
       // CRITICAL: Correct calculation for PCM16 audio
@@ -1258,7 +1267,8 @@ class AsrWorker {
       
       // CRITICAL FIX: Log why we're processing or not processing
       if (finalShouldProcess) {
-        console.info(`[ASRWorker] 📤 Timer: Triggering send for ${interactionId}`, {
+        // Always log when actually processing (work happening)
+        logger.info(`[ASRWorker] 📤 Timer: Triggering send for ${interactionId}`, {
           interactionId,
           currentAudioDurationMs: currentAudioDurationMs.toFixed(0),
           timeSinceLastSend: timeSinceLastContinuousSend,
@@ -1275,25 +1285,21 @@ class AsrWorker {
           reason: isVeryLongTimeout ? 'very-long-timeout' : (hasTimedOut ? 'timeout' : (isTimeoutRisk ? 'timeout-risk' : (exceedsMaxChunkSize ? 'max-size' : 'optimal-chunk'))),
         });
       } else {
-        // Log why we're NOT processing (for debugging)
-        const reason = isElevenLabs && currentAudioDurationMs < MIN_CHUNK_DURATION_MS
-          ? `TESTING: ElevenLabs requires ${MIN_CHUNK_DURATION_MS}ms minimum (changed from 2000ms), have ${currentAudioDurationMs.toFixed(0)}ms - waiting for more audio`
-          : (!hasMinimumChunkSize ? `need ${MIN_CHUNK_DURATION_MS}ms, have ${currentAudioDurationMs.toFixed(0)}ms` : 
-              (timeSinceLastContinuousSend < MAX_TIME_BETWEEN_SENDS_MS ? `waiting for timeout (${MAX_TIME_BETWEEN_SENDS_MS}ms)` : 'unknown'));
-        console.info(`[ASRWorker] ⏸️ Timer: Not sending for ${interactionId}`, {
-          interactionId,
-          currentAudioDurationMs: currentAudioDurationMs.toFixed(0),
-          timeSinceLastSend: timeSinceLastContinuousSend,
-          hasMinimumChunkSize,
-          exceedsMaxChunkSize,
-          isTimeoutRisk,
-          hasTimedOut,
-          isVeryLongTimeout,
-          chunksCount: buffer.chunks.length,
-          minRequired: minChunkForSend,
-          provider: ASR_PROVIDER,
-          reason,
-        });
+        // Rate-limited verbose log when NOT processing (idle state)
+        logger.verbose(
+          `timer-idle-${interactionId}`,
+          `[ASRWorker] ⏸️ Timer: Not sending for ${interactionId}`,
+          {
+            interactionId,
+            currentAudioDurationMs: currentAudioDurationMs.toFixed(0),
+            timeSinceLastSend: timeSinceLastContinuousSend,
+            hasMinimumChunkSize,
+            chunksCount: buffer.chunks.length,
+            minRequired: minChunkForSend,
+            provider: ASR_PROVIDER,
+          },
+          'debug'
+        );
       }
       
       // CRITICAL FIX: Actually send if conditions are met

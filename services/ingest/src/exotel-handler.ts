@@ -11,6 +11,7 @@ import { callEndTopic } from '@rtaa/pubsub/topics';
 import { dumpAudioChunk } from './audio-dumper';
 import * as path from 'path';
 import * as fs from 'fs';
+import { logger } from './logger';
 
 export interface ExotelConnectionState {
   streamSid: string;
@@ -184,7 +185,8 @@ export class ExotelHandler {
     ws.exotelState = state;
     this.connections.set(stream_sid, state);
 
-    console.info('[exotel] Start event received', {
+    // Keep start event log - it indicates ingestion is happening
+    logger.info('[exotel] Start event received', {
       stream_sid,
       call_sid: start.call_sid,
       sample_rate: sampleRate,
@@ -451,9 +453,9 @@ export class ExotelHandler {
           this.flushBoundedBuffer(callId);
         }
 
-        // Log first frame and every 10th frame
-        if (state.seq === 1 || state.seq % 10 === 0) {
-          console.info('[exotel] ✅ Published audio frame', {
+        // Log first frame and every 100th frame (reduced from every 10th to reduce logs)
+        if (state.seq === 1 || state.seq % 100 === 0) {
+          logger.info('[exotel] ✅ Published audio frame', {
             stream_sid: state.streamSid,
             call_sid: state.callSid,
             seq: state.seq,
