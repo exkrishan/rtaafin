@@ -55,6 +55,8 @@ export function useRealtimeTranscript(
   const connectionTimeoutRef = useRef<NodeJS.Timeout | undefined>(undefined);
   const shouldReconnectRef = useRef(true);
   const reconnectAttemptsRef = useRef(0);
+  const pollIntervalRef = useRef<NodeJS.Timeout | undefined>(undefined);
+  const lastSeqRef = useRef<number>(0); // Track last seq to only fetch new transcripts
   
   const {
     onTranscript,
@@ -93,6 +95,10 @@ export function useRealtimeTranscript(
     if (connectionTimeoutRef.current) {
       clearTimeout(connectionTimeoutRef.current);
       connectionTimeoutRef.current = undefined;
+    }
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current);
+      pollIntervalRef.current = undefined;
     }
   }, []);
 
@@ -148,8 +154,14 @@ export function useRealtimeTranscript(
             reconnectAttempts: reconnectAttemptsRef.current,
           });
           eventSource.close();
-          setError('Connection timeout - server may be slow');
+          setError('Connection timeout - using polling fallback');
           setIsConnected(false);
+          
+          // CRITICAL: Start polling fallback when SSE fails
+          if (!pollIntervalRef.current) {
+            console.log('[useRealtimeTranscript] 🔄 Starting polling fallback (SSE connection failed)', { callId });
+            startPolling();
+          }
           
           // Retry if auto-reconnect is enabled
           if (autoReconnect && shouldReconnectRef.current) {
@@ -165,6 +177,13 @@ export function useRealtimeTranscript(
       eventSource.onopen = () => {
         clearTimeout(connectionTimeoutRef.current);
         reconnectAttemptsRef.current = 0; // Reset on successful connection
+        
+        // Stop polling when SSE connects successfully
+        if (pollIntervalRef.current) {
+          clearInterval(pollIntervalRef.current);
+          pollIntervalRef.current = undefined;
+          console.log('[useRealtimeTranscript] 🛑 Stopped polling (SSE connected)', { callId });
+        }
         
         console.log('[useRealtimeTranscript] ✅ SSE connection opened', {
           callId,
@@ -341,14 +360,22 @@ export function useRealtimeTranscript(
             // This is our initial connection message - connection is ready
             console.log('[useRealtimeTranscript] ✅ Received connection confirmation', { callId });
             
-            // CRITICAL FIX: Set connected state when we receive connection message
-            // This handles cases where onopen doesn't fire but data is flowing
-            clearTimeout(connectionTimeoutRef.current);
-            connectionTimeoutRef.current = undefined;
-            setIsConnected(true);
-            setError(null);
-            reconnectAttemptsRef.current = 0; // Reset attempts
-            onConnectionChangeRef.current?.(true);
+          // CRITICAL FIX: Set connected state when we receive connection message
+          // This handles cases where onopen doesn't fire but data is flowing
+          clearTimeout(connectionTimeoutRef.current);
+          connectionTimeoutRef.current = undefined;
+          
+          // Stop polling when SSE connects successfully
+          if (pollIntervalRef.current) {
+            clearInterval(pollIntervalRef.current);
+            pollIntervalRef.current = undefined;
+            console.log('[useRealtimeTranscript] 🛑 Stopped polling (SSE connected via message)', { callId });
+          }
+          
+          setIsConnected(true);
+          setError(null);
+          reconnectAttemptsRef.current = 0; // Reset attempts
+          onConnectionChangeRef.current?.(true);
           }
         } catch (err) {
           // Ignore parse errors for non-JSON messages
@@ -392,6 +419,74 @@ export function useRealtimeTranscript(
       }
     };
 
+    // Polling fallback function (when SSE fails)
+    const startPolling = () => {
+      if (pollIntervalRef.current) {
+        return; // Already polling
+      }
+      
+      console.log('[useRealtimeTranscript] 🔄 Starting polling fallback', { callId });
+      
+      const poll = async () => {
+        try {
+          const response = await fetch(`/api/transcripts/latest?callId=${encodeURIComponent(callId!)}`);
+          if (!response.ok) {
+            console.warn('[useRealtimeTranscript] Polling request failed', { status: response.status, callId });
+            return;
+          }
+          
+          const data = await response.json();
+          if (data.ok && data.transcripts && Array.isArray(data.transcripts)) {
+            // Only add new transcripts (based on seq number)
+            setTranscripts((prev) => {
+              const existingSeqs = new Set(prev.map(t => t.seq).filter(Boolean));
+              const newTranscripts = data.transcripts.filter((t: TranscriptUtterance) => 
+                t.seq && !existingSeqs.has(t.seq)
+              );
+              
+              if (newTranscripts.length > 0) {
+                console.log('[useRealtimeTranscript] 📥 Polling: Received new transcripts', {
+                  callId,
+                  newCount: newTranscripts.length,
+                  totalCount: prev.length + newTranscripts.length,
+                });
+                
+                // Merge new transcripts
+                const merged = [...prev, ...newTranscripts].sort((a, b) => {
+                  if (a.seq && b.seq) return a.seq - b.seq;
+                  if (a.seq) return -1;
+                  if (b.seq) return 1;
+                  return new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime();
+                });
+                
+                // Limit to MAX_TRANSCRIPTS
+                if (merged.length > MAX_TRANSCRIPTS) {
+                  return merged.slice(-MAX_TRANSCRIPTS);
+                }
+                return merged;
+              }
+              
+              return prev;
+            });
+            
+            // Update last seq
+            if (data.transcripts.length > 0) {
+              const maxSeq = Math.max(...data.transcripts.map((t: TranscriptUtterance) => t.seq || 0).filter(Boolean));
+              if (maxSeq > lastSeqRef.current) {
+                lastSeqRef.current = maxSeq;
+              }
+            }
+          }
+        } catch (err: any) {
+          console.error('[useRealtimeTranscript] Polling error', { error: err.message, callId });
+        }
+      };
+      
+      // Poll immediately, then every 2 seconds
+      poll();
+      pollIntervalRef.current = setInterval(poll, 2000);
+    };
+
     // Initial connection
     connect();
 
@@ -399,6 +494,7 @@ export function useRealtimeTranscript(
     return () => {
       shouldReconnectRef.current = false;
       cleanup();
+      lastSeqRef.current = 0; // Reset last seq
     };
   }, [callId, autoReconnect, reconnectDelay, cleanup]); // CRITICAL: No callbacks in dependency array - use refs instead
 
