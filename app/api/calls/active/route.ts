@@ -4,12 +4,11 @@
  */
 
 import { NextResponse } from 'next/server';
-import { getCallRegistry } from '@/lib/call-registry';
+import { getCallRegistry, type CallMetadata } from '@/lib/call-registry';
 
 export const dynamic = 'force-dynamic';
 
 export async function GET(req: Request) {
-  // Fix 2.1: Add timeout protection (5 seconds max for entire request)
   const requestStartTime = Date.now();
   
   try {
@@ -20,43 +19,75 @@ export async function GET(req: Request) {
 
     const callRegistry = getCallRegistry();
     
-        // Fix 2.1: Wrap getActiveCalls() in Promise.race with 6-second timeout (increased for slow Redis)
-        const activeCallsPromise = callRegistry.getActiveCalls(limit);
-        const timeoutPromise = new Promise<typeof activeCallsPromise>((_, reject) => 
-          setTimeout(() => reject(new Error('getActiveCalls timeout after 6 seconds')), 6000)
-        );
+    // IMPROVEMENT: Reduced timeout to 3 seconds (cache will handle most requests faster)
+    // With caching, most requests should be < 100ms, so 3s timeout is generous
+    const activeCallsPromise = callRegistry.getActiveCalls(limit);
+    const timeoutPromise = new Promise<typeof activeCallsPromise>((_, reject) => 
+      setTimeout(() => reject(new Error('getActiveCalls timeout after 3 seconds')), 3000)
+    );
     
     let activeCalls;
     try {
       activeCalls = await Promise.race([activeCallsPromise, timeoutPromise]);
+      
+      // IMPROVEMENT: Even on timeout, getActiveCalls may return fallback data
+      // Check if we got any data (could be from cache or fallback)
+      if (activeCalls && activeCalls.length > 0) {
+        const requestDuration = Date.now() - requestStartTime;
+        console.info('[active-calls] ✅ Fetched active calls', {
+          count: activeCalls.length,
+          latestCall: activeCalls[0]?.interactionId,
+          duration: `${requestDuration}ms`,
+          source: requestDuration < 100 ? 'cache' : 'redis',
+        });
+      }
     } catch (error: any) {
       if (error.message?.includes('timeout')) {
-        console.error('[active-calls] ⚠️ getActiveCalls() timed out after 6 seconds', {
-          limit,
-          duration: Date.now() - requestStartTime,
-          timestamp: new Date().toISOString(),
-        });
-        // Fix 2.1: Return graceful error response (200 with error flag) instead of 503
-        return NextResponse.json({
-          ok: false,
-          error: 'Request timeout - Redis operation took too long',
-          calls: [],
-          count: 0,
-          timeout: true,
-        }, { status: 200 }); // Return 200 so frontend can parse JSON
+        // IMPROVEMENT: Try to get fallback data even on timeout
+        // The getActiveCalls method may have returned fallback data before timing out
+        try {
+          // Give it one more quick try (might return cached/fallback data)
+          const fallbackCalls = await Promise.race([
+            callRegistry.getActiveCalls(limit),
+            new Promise<CallMetadata[]>((resolve) => 
+              setTimeout(() => resolve([]), 500) // Quick 500ms timeout for fallback
+            ),
+          ]);
+          
+          if (fallbackCalls && fallbackCalls.length > 0) {
+            console.info('[active-calls] ✅ Got fallback data after timeout', {
+              count: fallbackCalls.length,
+              duration: Date.now() - requestStartTime,
+            });
+            activeCalls = fallbackCalls;
+          } else {
+            throw error; // No fallback available, throw original error
+          }
+        } catch {
+          // FIX: Use warn instead of error to reduce log noise (timeouts are expected with slow Redis)
+          console.warn('[active-calls] ⚠️ getActiveCalls() timed out after 3 seconds', {
+            limit,
+            duration: Date.now() - requestStartTime,
+            timestamp: new Date().toISOString(),
+          });
+          // Fix 2.1: Return graceful error response (200 with error flag) instead of 503
+          return NextResponse.json({
+            ok: false,
+            error: 'Request timeout - Redis operation took too long',
+            calls: [],
+            count: 0,
+            timeout: true,
+          }, { status: 200 }); // Return 200 so frontend can parse JSON
+        }
+      } else {
+        throw error; // Re-throw if it's not a timeout
       }
-      throw error; // Re-throw if it's not a timeout
     }
 
     // Get latest call (most recent activity)
     const latestCall = activeCalls.length > 0 ? activeCalls[0].interactionId : null;
 
     const requestDuration = Date.now() - requestStartTime;
-    console.info('[active-calls] ✅ Fetched active calls', {
-      count: activeCalls.length,
-      latestCall,
-      duration: `${requestDuration}ms`,
-    });
     
     return NextResponse.json({
       ok: true,
@@ -68,9 +99,12 @@ export async function GET(req: Request) {
         tenantId: call.tenantId,
         startTime: call.startTime,
         lastActivity: call.lastActivity,
+        status: call.status, // Include status for frontend filtering
       })),
       latestCall,
       count: activeCalls.length,
+      cached: requestDuration < 100, // Indicate if response was from cache
+      duration: requestDuration,
     });
   } catch (error: any) {
     const requestDuration = Date.now() - requestStartTime;

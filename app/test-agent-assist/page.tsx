@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import LeftSidebar from '@/components/LeftSidebar';
 import CentralCallView from '@/components/CentralCallView';
 import AgentAssistPanelV2, { Customer, KBArticle, DispositionData } from '@/components/AgentAssistPanelV2';
@@ -39,6 +39,11 @@ export default function TestAgentAssistPage() {
   
   // Auto-discovery state (silent, always enabled)
   const [lastDiscoveredCallId, setLastDiscoveredCallId] = useState<string | null>(null);
+  
+  // Retry state for exponential backoff
+  const discoveryRetryCountRef = useRef(0);
+  const isDiscoveryPausedRef = useRef(false);
+  const lastSuccessTimeRef = useRef<number>(Date.now());
 
   // CRITICAL FIX: Read callId from URL parameter FIRST (before auto-discovery)
   // This ensures manual callId from URL takes precedence over auto-discovery
@@ -57,7 +62,7 @@ export default function TestAgentAssistPage() {
   }, []); // Run once on mount only
 
   // Auto-discover active calls silently in background
-  // CRITICAL: Poll more aggressively (every 2 seconds) for real-time transcription
+  // FIX: Reduced polling frequency with exponential backoff to prevent timeout spam
   // Includes recently ended calls (within 60 seconds) for real-time transcription
   // CRITICAL FIX: Empty dependency array - use functional updates to avoid stale closures
   // This prevents the effect from restarting every time callId changes
@@ -71,14 +76,21 @@ export default function TestAgentAssistPage() {
       // If URL has callId, skip auto-discovery (user explicitly set it)
       if (hasUrlCallId) {
         console.debug('[Test] URL parameter present, skipping auto-discovery');
+        discoveryRetryCountRef.current = 0; // Reset retry count
+        isDiscoveryPausedRef.current = false;
         return;
       }
 
-      // Fix 2.3: Add comprehensive error handling
+      // If discovery is paused due to repeated failures, skip
+      if (isDiscoveryPausedRef.current) {
+        return;
+      }
+
+      // Fix: Add comprehensive error handling with exponential backoff
       try {
-        // Fix 2.3: Add timeout to fetch request (8 seconds - increased to handle slow Redis)
+        // FIX: Reduced timeout to 5 seconds to fail faster and reduce spam
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 8000);
+        const timeoutId = setTimeout(() => controller.abort(), 5000);
         
         const response = await fetch('/api/calls/active?limit=10', {
           signal: controller.signal,
@@ -86,20 +98,25 @@ export default function TestAgentAssistPage() {
         
         clearTimeout(timeoutId);
         
-        // Fix 2.3: Handle non-OK responses gracefully
+        // Reset retry count on success
+        discoveryRetryCountRef.current = 0;
+        isDiscoveryPausedRef.current = false;
+        lastSuccessTimeRef.current = Date.now();
+        
+        // Fix: Handle non-OK responses gracefully
         if (!response.ok) {
-          // Fix 2.3: Handle 503 errors gracefully (return empty array)
+          // Fix: Handle 503 errors gracefully (return empty array)
           if (response.status === 503) {
-            console.warn('[Test] Service unavailable (503), returning empty calls');
+            console.debug('[Test] Service unavailable (503), skipping auto-discovery');
             return;
           }
           throw new Error(`HTTP ${response.status}: ${response.statusText}`);
         }
         
-        // Fix 2.3: Check if response has content before parsing
+        // Fix: Check if response has content before parsing
         const text = await response.text();
         if (!text || text.trim().length === 0) {
-          console.warn('[Test] Empty response from /api/calls/active');
+          console.debug('[Test] Empty response from /api/calls/active');
           return;
         }
         
@@ -107,7 +124,7 @@ export default function TestAgentAssistPage() {
         try {
           data = JSON.parse(text);
         } catch (parseError) {
-          // Fix 2.3: Handle JSON parse errors
+          // Fix: Handle JSON parse errors
           console.error('[Test] Failed to parse JSON response:', parseError);
           return;
         }
@@ -166,12 +183,33 @@ export default function TestAgentAssistPage() {
           console.debug('[Test] No active calls found, keeping current callId');
         }
       } catch (err: any) {
-        // Fix 2.3: Handle timeout, network errors, and JSON parse errors gracefully
+        // Fix: Handle timeout and network errors with exponential backoff
         if (err.name === 'AbortError' || err.name === 'TimeoutError') {
-          console.warn('[Test] Request timeout when fetching active calls (8s)', {
-            error: err.message,
-            note: 'Returning empty array to prevent UI errors',
-          });
+          const newRetryCount = discoveryRetryCountRef.current + 1;
+          discoveryRetryCountRef.current = newRetryCount;
+          
+          // FIX: Only log warning after 3 consecutive failures (reduce console spam)
+          if (newRetryCount >= 3) {
+            console.warn('[Test] Request timeout when fetching active calls (5s)', {
+              retryCount: newRetryCount,
+              note: newRetryCount >= 5 
+                ? 'Auto-discovery paused temporarily. Will retry with backoff.' 
+                : 'Auto-discovery will retry with backoff.',
+            });
+            
+            // Pause discovery for 30 seconds after 5 consecutive failures
+            if (newRetryCount >= 5) {
+              isDiscoveryPausedRef.current = true;
+              setTimeout(() => {
+                isDiscoveryPausedRef.current = false;
+                discoveryRetryCountRef.current = 0;
+                console.debug('[Test] Auto-discovery resumed after pause');
+              }, 30000); // Pause for 30 seconds
+            }
+          } else {
+            // Silent retry for first few failures (reduce console spam)
+            console.debug('[Test] Request timeout, retrying...', { retryCount: newRetryCount });
+          }
         } else if (err instanceof SyntaxError) {
           console.error('[Test] Failed to parse JSON response:', {
             error: err.message,
@@ -181,9 +219,9 @@ export default function TestAgentAssistPage() {
           console.error('[Test] Failed to discover active calls:', {
             error: err.message || String(err),
             errorName: err.name,
-            note: 'Returning empty array to prevent UI errors',
           });
         }
+        
         // On error, keep current callId (don't reset)
         // Don't log warning if URL parameter is set (that's intentional)
         const params = new URLSearchParams(window.location.search);
@@ -191,7 +229,7 @@ export default function TestAgentAssistPage() {
         if (!urlCallId) {
           setCallId(prevCallId => {
             if (prevCallId === 'test-call-123') {
-              console.warn('[Test] ⚠️ Using default test callId due to discovery error');
+              console.debug('[Test] Using default test callId due to discovery error');
             }
             return prevCallId; // Keep current callId
           });
@@ -202,11 +240,33 @@ export default function TestAgentAssistPage() {
     // Initial discovery
     discoverActiveCalls();
 
-    // CRITICAL FIX: Poll every 2 seconds (instead of 5) for faster auto-discovery
-    // This ensures UI connects to new calls within 2 seconds of registration
-    const interval = setInterval(discoverActiveCalls, 2000);
+    // FIX: Use dynamic polling with exponential backoff
+    // Base interval: 5 seconds (reduced from 2s to reduce load)
+    // Use recursive setTimeout instead of setInterval for dynamic intervals
+    let timeoutId: NodeJS.Timeout;
+    
+    const scheduleNextPoll = () => {
+      const baseInterval = 5000; // 5 seconds base
+      const retryCount = discoveryRetryCountRef.current;
+      
+      // Calculate backoff: 5s, 7.5s, 10s, 12.5s, 15s (max)
+      const backoffMultiplier = retryCount === 0 ? 1 : Math.min(1 + retryCount * 0.5, 3);
+      const pollInterval = baseInterval * backoffMultiplier;
+      
+      timeoutId = setTimeout(() => {
+        discoverActiveCalls();
+        scheduleNextPoll(); // Schedule next poll
+      }, pollInterval);
+    };
+    
+    // Start the polling loop
+    scheduleNextPoll();
 
-    return () => clearInterval(interval);
+    return () => {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+    };
   }, []); // CRITICAL FIX: Empty dependency array - use functional updates instead
   // This prevents the effect from restarting every time callId changes
   // Functional updates (setCallId(prev => ...)) access current state, avoiding stale closures

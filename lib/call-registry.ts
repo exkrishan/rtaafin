@@ -26,10 +26,41 @@ export interface CallMetadata {
 const CALL_METADATA_TTL_SECONDS = 3600; // 1 hour
 const CALL_METADATA_KEY_PREFIX = 'call:metadata:';
 
+// Cache configuration
+const CACHE_TTL_MS = 3000; // 3 seconds cache TTL
+const CIRCUIT_BREAKER_FAILURE_THRESHOLD = 5; // Open circuit after 5 failures
+const CIRCUIT_BREAKER_RESET_MS = 30000; // Reset circuit after 30 seconds
+
+interface CacheEntry {
+  data: CallMetadata[];
+  timestamp: number;
+  expiresAt: number;
+}
+
+interface CircuitBreakerState {
+  failures: number;
+  lastFailureTime: number;
+  state: 'closed' | 'open' | 'half-open';
+}
+
 class CallRegistry {
   private redis: any;
   private redisUrl: string = '';
   private connectionStatus: 'connected' | 'disconnected' | 'error' = 'disconnected';
+  
+  // In-memory cache for active calls
+  private activeCallsCache: CacheEntry | null = null;
+  
+  // Circuit breaker for Redis operations
+  private circuitBreaker: CircuitBreakerState = {
+    failures: 0,
+    lastFailureTime: 0,
+    state: 'closed',
+  };
+  
+  // Last known good state (fallback)
+  private lastKnownGoodState: CallMetadata[] | null = null;
+  private lastKnownGoodStateTime: number = 0;
 
   constructor() {
     // Create dedicated Redis connection for key-value operations
@@ -140,6 +171,13 @@ class CallRegistry {
   }
 
   /**
+   * Invalidate cache (call when calls are registered/updated)
+   */
+  private invalidateCache(): void {
+    this.activeCallsCache = null;
+  }
+
+  /**
    * Register a new call
    */
   async registerCall(metadata: CallMetadata): Promise<void> {
@@ -169,6 +207,28 @@ class CallRegistry {
         CALL_METADATA_TTL_SECONDS,
         JSON.stringify(metadata)
       );
+      
+      // IMPROVEMENT: Invalidate cache when new call is registered
+      this.invalidateCache();
+      
+      // IMPROVEMENT: Update last known good state if this is a new active call
+      if (metadata.status === 'active') {
+        if (!this.lastKnownGoodState) {
+          this.lastKnownGoodState = [];
+        }
+        // Add or update the call in last known good state
+        const existingIndex = this.lastKnownGoodState.findIndex(
+          c => c.interactionId === metadata.interactionId
+        );
+        if (existingIndex >= 0) {
+          this.lastKnownGoodState[existingIndex] = metadata;
+        } else {
+          this.lastKnownGoodState.push(metadata);
+        }
+        this.lastKnownGoodState.sort((a, b) => b.lastActivity - a.lastActivity);
+        this.lastKnownGoodStateTime = Date.now();
+      }
+      
       console.info('[CallRegistry] ✅ Registered call', {
         interactionId: metadata.interactionId,
         callSid: metadata.callSid,
@@ -190,6 +250,7 @@ class CallRegistry {
           error.message?.includes('Connection') ||
           (error as any).code === 'ECONNREFUSED') {
         this.connectionStatus = 'error';
+        this.recordFailure();
       }
     }
   }
@@ -231,7 +292,7 @@ class CallRegistry {
       if (metadata) {
         metadata.status = status;
         metadata.lastActivity = Date.now();
-        await this.registerCall(metadata);
+        await this.registerCall(metadata); // This will invalidate cache
       }
     } catch (error: any) {
       console.error('[CallRegistry] Failed to update call status', {
@@ -240,21 +301,161 @@ class CallRegistry {
       });
     }
   }
+  
+  /**
+   * Get cache statistics (for monitoring)
+   */
+  getCacheStats(): {
+    hasCache: boolean;
+    cacheAge?: number;
+    cacheSize?: number;
+    circuitBreakerState: string;
+    circuitBreakerFailures: number;
+    hasFallback: boolean;
+    fallbackAge?: number;
+  } {
+    const now = Date.now();
+    return {
+      hasCache: !!this.activeCallsCache,
+      cacheAge: this.activeCallsCache ? now - this.activeCallsCache.timestamp : undefined,
+      cacheSize: this.activeCallsCache?.data.length,
+      circuitBreakerState: this.circuitBreaker.state,
+      circuitBreakerFailures: this.circuitBreaker.failures,
+      hasFallback: !!this.lastKnownGoodState,
+      fallbackAge: this.lastKnownGoodState ? now - this.lastKnownGoodStateTime : undefined,
+    };
+  }
+
+  /**
+   * Check circuit breaker state
+   */
+  private checkCircuitBreaker(): boolean {
+    const now = Date.now();
+    
+    // Reset circuit if enough time has passed
+    if (this.circuitBreaker.state === 'open' && 
+        now - this.circuitBreaker.lastFailureTime > CIRCUIT_BREAKER_RESET_MS) {
+      console.info('[CallRegistry] 🔄 Circuit breaker transitioning to half-open');
+      this.circuitBreaker.state = 'half-open';
+      this.circuitBreaker.failures = 0;
+    }
+    
+    // Block if circuit is open
+    if (this.circuitBreaker.state === 'open') {
+      return false;
+    }
+    
+    return true;
+  }
+  
+  /**
+   * Record circuit breaker success
+   */
+  private recordSuccess(): void {
+    if (this.circuitBreaker.state === 'half-open') {
+      console.info('[CallRegistry] ✅ Circuit breaker closed - Redis is healthy again');
+      this.circuitBreaker.state = 'closed';
+    }
+    this.circuitBreaker.failures = 0;
+  }
+  
+  /**
+   * Record circuit breaker failure
+   */
+  private recordFailure(): void {
+    this.circuitBreaker.failures++;
+    this.circuitBreaker.lastFailureTime = Date.now();
+    
+    if (this.circuitBreaker.failures >= CIRCUIT_BREAKER_FAILURE_THRESHOLD) {
+      console.warn('[CallRegistry] ⚠️ Circuit breaker opened - too many failures', {
+        failures: this.circuitBreaker.failures,
+        threshold: CIRCUIT_BREAKER_FAILURE_THRESHOLD,
+      });
+      this.circuitBreaker.state = 'open';
+    }
+  }
+  
+  /**
+   * Get cached active calls if available and fresh
+   */
+  private getCachedActiveCalls(): CallMetadata[] | null {
+    if (!this.activeCallsCache) {
+      return null;
+    }
+    
+    const now = Date.now();
+    if (now < this.activeCallsCache.expiresAt) {
+      // Cache is still valid
+      return this.activeCallsCache.data;
+    }
+    
+    // Cache expired
+    this.activeCallsCache = null;
+    return null;
+  }
+  
+  /**
+   * Update cache with new data
+   */
+  private updateCache(data: CallMetadata[]): void {
+    const now = Date.now();
+    this.activeCallsCache = {
+      data: [...data], // Deep copy
+      timestamp: now,
+      expiresAt: now + CACHE_TTL_MS,
+    };
+  }
 
   /**
    * Get all active calls (includes recently ended calls for UI auto-discovery)
    * 
    * For real-time transcription, we need to include calls that ended within the last 60 seconds
    * so the UI can still discover and connect to them even if the test script sent a stop event.
+   * 
+   * IMPROVEMENTS:
+   * - In-memory cache (3s TTL) to reduce Redis load
+   * - Circuit breaker to skip Redis when unhealthy
+   * - Fallback to last known good state
    */
   async getActiveCalls(limit: number = 10): Promise<CallMetadata[]> {
+    // Check cache first (fast path)
+    const cached = this.getCachedActiveCalls();
+    if (cached) {
+      console.debug('[CallRegistry] ✅ Returning cached active calls', {
+        count: cached.length,
+        cacheAge: Date.now() - (this.activeCallsCache?.timestamp || 0),
+      });
+      return cached.slice(0, limit);
+    }
+    
+    // Check circuit breaker
+    if (!this.checkCircuitBreaker()) {
+      console.warn('[CallRegistry] ⚠️ Circuit breaker is open, using fallback', {
+        failures: this.circuitBreaker.failures,
+        lastFailureTime: new Date(this.circuitBreaker.lastFailureTime).toISOString(),
+      });
+      
+      // Return last known good state if available
+      if (this.lastKnownGoodState && 
+          Date.now() - this.lastKnownGoodStateTime < 60000) { // Use fallback if less than 60s old
+        console.info('[CallRegistry] ✅ Using last known good state (fallback)', {
+          count: this.lastKnownGoodState.length,
+          age: Date.now() - this.lastKnownGoodStateTime,
+        });
+        return this.lastKnownGoodState.slice(0, limit);
+      }
+      
+      // No fallback available
+      return [];
+    }
+    
     // Task 2.2: Check Redis connection health before operation
     if (!this.redis) {
       console.warn('[CallRegistry] ⚠️ Redis client not available', {
         connectionStatus: this.connectionStatus,
         timestamp: new Date().toISOString(),
       });
-      return [];
+      return this.lastKnownGoodState?.slice(0, limit) || [];
     }
     
     // Task 2.2: Verify connection status
@@ -263,7 +464,8 @@ class CallRegistry {
         connectionStatus: this.connectionStatus,
         timestamp: new Date().toISOString(),
       });
-      return [];
+      this.recordFailure();
+      return this.lastKnownGoodState?.slice(0, limit) || [];
     }
 
     try {
@@ -424,12 +626,38 @@ class CallRegistry {
       // Sort by last activity (most recent first)
       calls.sort((a, b) => b.lastActivity - a.lastActivity);
 
+      const result = calls.slice(0, limit);
+      
+      // Update cache
+      this.updateCache(result);
+      
+      // Update last known good state
+      this.lastKnownGoodState = [...result];
+      this.lastKnownGoodStateTime = Date.now();
+      
+      // Record success for circuit breaker
+      this.recordSuccess();
+      
       // Return only the limit requested
-      return calls.slice(0, limit);
+      return result;
     } catch (error: any) {
       console.error('[CallRegistry] Failed to get active calls', {
         error: error.message,
       });
+      
+      // Record failure for circuit breaker
+      this.recordFailure();
+      
+      // Return last known good state if available
+      if (this.lastKnownGoodState && 
+          Date.now() - this.lastKnownGoodStateTime < 60000) {
+        console.info('[CallRegistry] ✅ Using last known good state after error', {
+          count: this.lastKnownGoodState.length,
+          age: Date.now() - this.lastKnownGoodStateTime,
+        });
+        return this.lastKnownGoodState.slice(0, limit);
+      }
+      
       return [];
     }
   }
