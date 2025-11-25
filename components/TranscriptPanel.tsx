@@ -1,8 +1,9 @@
 'use client';
 
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import KBSuggestions, { KBArticle } from './KBSuggestions';
 import AutoDispositionModal, { Suggestion } from './AutoDispositionModal';
+import { useRealtimeTranscript } from '@/hooks/useRealtimeTranscript';
 
 export interface TranscriptLine {
   text: string;
@@ -24,8 +25,20 @@ export default function TranscriptPanel({
   tenantId,
   onOpenDisposition,
 }: TranscriptPanelProps) {
-  const [lines, setLines] = useState<TranscriptLine[]>([]);
-  const [isConnected, setIsConnected] = useState(false);
+  // CTO FIX: Use custom hook for real-time transcripts
+  const { transcripts, isConnected, error: transcriptError } = useRealtimeTranscript(callId, {
+    onConnectionChange: (connected) => {
+      console.log('[TranscriptPanel] Connection state changed', { connected, callId });
+    },
+  });
+
+  // Convert hook transcripts to lines format (for backward compatibility)
+  const lines: TranscriptLine[] = transcripts.map(t => ({
+    text: t.text,
+    ts: t.timestamp,
+    seq: t.seq,
+  }));
+
   const [error, setError] = useState<string | null>(null);
   const [callEnded, setCallEnded] = useState(false);
   const [summaryData, setSummaryData] = useState<{
@@ -38,128 +51,11 @@ export default function TranscriptPanel({
   const transcriptEndRef = useRef<HTMLDivElement>(null);
   const transcriptContainerRef = useRef<HTMLDivElement>(null);
 
-  // Connect to SSE stream
-  useEffect(() => {
-    if (!callId) {
-      console.log('[TranscriptPanel] ⏸️ No callId, skipping SSE connection');
-      return;
-    }
+  // Combine errors
+  const displayError = transcriptError || error;
 
-    console.log('[TranscriptPanel] 🔌 Connecting to SSE stream', { callId });
-    const url = `/api/events/stream?callId=${encodeURIComponent(callId)}`;
-    console.log('[TranscriptPanel] SSE URL:', url);
-    const eventSource = new EventSource(url);
-
-    eventSourceRef.current = eventSource;
-
-    eventSource.onopen = () => {
-      console.log('[TranscriptPanel] ✅ SSE connection opened', { callId });
-      setIsConnected(true);
-      setError(null);
-    };
-
-    eventSource.onerror = (err) => {
-      console.error('[TranscriptPanel] ❌ SSE error', { 
-        callId,
-        readyState: eventSource.readyState,
-        error: err
-      });
-      setError('Connection error. Retrying...');
-      setIsConnected(false);
-      
-      // Log readyState for debugging
-      // 0 = CONNECTING, 1 = OPEN, 2 = CLOSED
-      if (eventSource.readyState === EventSource.CLOSED) {
-        console.error('[TranscriptPanel] SSE connection closed');
-      }
-    };
-
-    eventSource.addEventListener('transcript_line', (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        console.log('[TranscriptPanel] Received transcript_line event', { 
-          eventCallId: data.callId, 
-          expectedCallId: callId,
-          hasText: !!data.text,
-          text: data.text?.substring(0, 50)
-        });
-        
-        // Only add lines that match our callId and have text
-        // Skip system messages (connection messages)
-        if (data.callId === callId && data.text && data.callId !== 'system') {
-          console.log('[TranscriptPanel] Adding transcript line', { seq: data.seq, text: data.text.substring(0, 50) });
-          setLines((prev) => {
-            // Check for duplicates by seq
-            const exists = prev.some(line => line.seq === data.seq);
-            if (exists) {
-              console.log('[TranscriptPanel] Duplicate line skipped', { seq: data.seq });
-              return prev;
-            }
-            return [
-              ...prev,
-              {
-                text: data.text,
-                ts: data.ts,
-                seq: data.seq,
-              },
-            ];
-          });
-        } else {
-          console.log('[TranscriptPanel] Skipping event', { 
-            reason: data.callId !== callId ? 'callId mismatch' : !data.text ? 'no text' : 'system message'
-          });
-        }
-      } catch (err) {
-        console.error('[TranscriptPanel] Failed to parse transcript_line', err, event.data);
-      }
-    });
-
-    eventSource.addEventListener('call_end', () => {
-      setCallEnded(true);
-      eventSource.close();
-      // Auto-fetch summary and open disposition modal
-      fetchSummaryAndOpenDisposition();
-    });
-
-    // Handle intent_update events that may contain KB articles
-    eventSource.addEventListener('intent_update', (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        console.log('[TranscriptPanel] Received intent_update', data);
-        if (data.articles && Array.isArray(data.articles)) {
-          // Update KB suggestions with new articles from intent detection
-          setKbSuggestions((prev) => {
-            // Merge new articles, avoiding duplicates by id
-            const existingIds = new Set(prev.map(a => a.id || a.code));
-            const newArticles = data.articles.filter((a: KBArticle) => !existingIds.has(a.id || a.code || ''));
-            return [...prev, ...newArticles];
-          });
-        }
-      } catch (err) {
-        console.error('[TranscriptPanel] Failed to parse intent_update', err);
-      }
-    });
-
-    return () => {
-      eventSource.close();
-      eventSourceRef.current = null;
-    };
-  }, [callId]);
-
-  // Auto-scroll to bottom of transcript when new lines arrive
-  useEffect(() => {
-    // Auto-scroll to bottom when new transcript lines are added
-    if (transcriptEndRef.current && transcriptContainerRef.current) {
-      // Use requestAnimationFrame to ensure DOM is updated
-      requestAnimationFrame(() => {
-        if (transcriptEndRef.current) {
-          transcriptEndRef.current.scrollIntoView({ behavior: 'smooth', block: 'end' });
-        }
-      });
-    }
-  }, [lines]);
-
-  const fetchSummaryAndOpenDisposition = async () => {
+  // Define fetchSummaryAndOpenDisposition with useCallback (to avoid dependency issues)
+  const fetchSummaryAndOpenDisposition = useCallback(async () => {
     try {
       const response = await fetch('/api/calls/summary', {
         method: 'POST',
@@ -202,8 +98,6 @@ export default function TranscriptPanel({
       setSummaryData(dispositionData);
 
       // Update KB suggestions from summary if available
-      // Note: KB suggestions are already updated via intent_update events during call
-      // This is just for any additional articles from summary
       if (payload.kbArticles && Array.isArray(payload.kbArticles)) {
         setKbSuggestions((prev) => {
           const existingIds = new Set(prev.map(a => a.id || a.code));
@@ -222,7 +116,64 @@ export default function TranscriptPanel({
       console.error('[TranscriptPanel] Failed to fetch summary', err);
       setError(err?.message || 'Failed to generate summary');
     }
-  };
+  }, [callId, tenantId, onOpenDisposition]);
+
+  // Listen for call_end and intent_update events (not handled by hook)
+  useEffect(() => {
+    if (!callId) {
+      return;
+    }
+
+    console.log('[TranscriptPanel] 🔌 Setting up call_end and intent_update listeners', { callId });
+    const url = `/api/events/stream?callId=${encodeURIComponent(callId)}`;
+    const eventSource = new EventSource(url);
+    eventSourceRef.current = eventSource;
+
+    eventSource.addEventListener('call_end', () => {
+      console.log('[TranscriptPanel] Call ended event received');
+      setCallEnded(true);
+      eventSource.close();
+      // Auto-fetch summary and open disposition modal
+      fetchSummaryAndOpenDisposition();
+    });
+
+    // Handle intent_update events that may contain KB articles
+    eventSource.addEventListener('intent_update', (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        console.log('[TranscriptPanel] Received intent_update', data);
+        if (data.articles && Array.isArray(data.articles)) {
+          // Update KB suggestions with new articles from intent detection
+          setKbSuggestions((prev) => {
+            // Merge new articles, avoiding duplicates by id
+            const existingIds = new Set(prev.map(a => a.id || a.code));
+            const newArticles = data.articles.filter((a: KBArticle) => !existingIds.has(a.id || a.code || ''));
+            return [...prev, ...newArticles];
+          });
+        }
+      } catch (err) {
+        console.error('[TranscriptPanel] Failed to parse intent_update', err);
+      }
+    });
+
+    return () => {
+      eventSource.close();
+      eventSourceRef.current = null;
+    };
+  }, [callId, fetchSummaryAndOpenDisposition]);
+
+  // Auto-scroll to bottom of transcript when new lines arrive
+  useEffect(() => {
+    // Auto-scroll to bottom when new transcript lines are added
+    if (transcriptEndRef.current && transcriptContainerRef.current) {
+      // Use requestAnimationFrame to ensure DOM is updated
+      requestAnimationFrame(() => {
+        if (transcriptEndRef.current) {
+          transcriptEndRef.current.scrollIntoView({ behavior: 'smooth', block: 'end' });
+        }
+      });
+    }
+  }, [lines]);
 
   const handleManualDisposition = () => {
     if (summaryData) {
@@ -234,9 +185,9 @@ export default function TranscriptPanel({
 
   return (
     <>
-      {error && (
+      {displayError && (
         <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 mb-3">
-          {error}
+          {displayError}
         </div>
       )}
 

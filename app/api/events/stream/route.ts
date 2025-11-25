@@ -5,6 +5,10 @@
  * Real-time event stream for transcript lines and intent updates.
  * Clients connect via EventSource and receive live events as they occur.
  *
+ * CTO FIX: Using TransformStream to ensure immediate data flush
+ * This fixes the issue where EventSource.onopen wasn't firing because
+ * Next.js ReadableStream was buffering data instead of flushing immediately.
+ *
  * Note: Must use Node.js runtime (not Edge) for response streaming support.
  */
 
@@ -31,165 +35,102 @@ export async function GET(req: Request) {
       timestamp: new Date().toISOString(),
     });
 
-    // Create a ReadableStream to handle SSE
-    // Use a closure-safe approach for Turbopack
     const streamCallId = callId; // Capture in const for closure
+    const encoder = new TextEncoder();
     let closeHandler: (() => void) | null = null;
+
+    // CTO FIX: Use TransformStream instead of ReadableStream
+    // TransformStream ensures immediate data transmission, fixing the buffering issue
+    const { readable, writable } = new TransformStream();
+    const writer = writable.getWriter();
+
+    // CRITICAL: Send initial data IMMEDIATELY (synchronously, before any async operations)
+    // This ensures EventSource.onopen fires because data is actually sent to the browser
+    const initialData = {
+      type: 'connection',
+      callId: streamCallId || 'system',
+      message: 'connected',
+      timestamp: new Date().toISOString(),
+    };
+    const initialDataStr = `data: ${JSON.stringify(initialData)}\n\n`;
     
-    const stream = new ReadableStream({
-    start(controller) {
-      // CRITICAL FIX: Send data line FIRST (without event type) to trigger onopen
-      // EventSource's onopen fires when it receives data, even without event type
-      // We send a simple data line first, then the proper event
-      try {
-        // Send a simple data line first - this definitely triggers onopen
-        // Format: data: <json>\n\n (no event: line means it's a 'message' event)
-        const initialData = {
-          type: 'connection',
-          callId: streamCallId || 'system',
-          message: 'connected',
-        };
-        const initialDataStr = `data: ${JSON.stringify(initialData)}\n\n`;
-        controller.enqueue(new TextEncoder().encode(initialDataStr));
-        console.log('[sse-endpoint] ✅ Sent initial data line (triggers onopen)', {
-          callId: streamCallId || 'global',
-          timestamp: new Date().toISOString(),
-        });
-      } catch (err: any) {
-        console.error('[sse-endpoint] Failed to send initial data line', {
-          error: err?.message || err,
-          stack: err?.stack,
-        });
-      }
+    // Write immediately - this will be flushed to browser right away
+    writer.write(encoder.encode(initialDataStr));
+    console.log('[sse-endpoint] ✅ Sent initial connection data (immediate flush)', {
+      callId: streamCallId || 'global',
+      timestamp: new Date().toISOString(),
+    });
 
-      // Then send initial connection event with proper event type
-      const clientId = `client_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-      const initialEvent = {
-        type: 'transcript_line',
-        callId: streamCallId || 'system',
-        text: `Connected to realtime stream (clientId: ${clientId})`,
-      };
-      
-      // Format as SSE event: event: <type>\ndata: <json>\n\n
-      const initialEventStr = `event: ${initialEvent.type}\ndata: ${JSON.stringify(initialEvent)}\n\n`;
-      
-      try {
-        // Send immediately via controller (before registering client)
-        // This ensures headers are sent and browser's onopen event fires
-        const encoded = new TextEncoder().encode(initialEventStr);
-        controller.enqueue(encoded);
-        console.log('[sse-endpoint] ✅ Sent initial connection event immediately', {
-          clientId,
-          callId: streamCallId || 'global',
-          timestamp: new Date().toISOString(),
-        });
-      } catch (err: any) {
-        console.error('[sse-endpoint] Failed to send initial event', {
-          error: err?.message || err,
-          stack: err?.stack,
-        });
-        // If we can't send initial event, try to send error event
+    // Create mock response object for registerSseClient
+    // This allows realtime.ts to write to our TransformStream
+    const mockRes = {
+      controller: { desiredSize: 1 }, // Mock controller for compatibility checks
+      setHeader: () => {}, // No-op (headers set in Response constructor)
+      flushHeaders: () => {}, // No-op (TransformStream flushes automatically)
+      write: (chunk: string | Uint8Array) => {
         try {
-          const errorEvent = `event: error\ndata: ${JSON.stringify({ error: 'Failed to initialize stream' })}\n\n`;
-          controller.enqueue(new TextEncoder().encode(errorEvent));
-        } catch {
-          // If even that fails, we'll let the outer try-catch handle it
-          throw err;
-        }
-      }
-
-      // CRITICAL FIX: Create a mock response object that properly writes to ReadableStream
-      // The write() method must handle SSE format correctly and ensure data is properly encoded
-      // Store controller reference so realtime.ts can check if stream is closed
-      const mockRes = {
-        controller, // CRITICAL FIX: Expose controller for closed-state checks
-        setHeader: () => {},
-        flushHeaders: () => {},
-        write: (chunk: string | Uint8Array) => {
-          try {
-            // CRITICAL FIX: Check if stream is closed before writing
-            if (controller.desiredSize === null) {
-              // Stream is closed, don't write
-              return;
-            }
-            
-            // CRITICAL FIX: Ensure chunk is properly encoded as UTF-8
-            // ReadableStream expects Uint8Array, so we need to encode strings
-            if (typeof chunk === 'string') {
-              const encoded = new TextEncoder().encode(chunk);
-              controller.enqueue(encoded);
-            } else if (chunk instanceof Uint8Array) {
-              controller.enqueue(chunk);
-            } else {
-              // Fallback: convert to string then encode
-              const encoded = new TextEncoder().encode(String(chunk));
-              controller.enqueue(encoded);
-            }
-          } catch (err: any) {
+          // Encode string chunks to Uint8Array
+          const encoded = typeof chunk === 'string' 
+            ? encoder.encode(chunk)
+            : chunk instanceof Uint8Array 
+            ? chunk
+            : encoder.encode(String(chunk));
+          
+          // Write to TransformStream (this flushes immediately)
+          writer.write(encoded).catch((err: any) => {
             // Stream might be closed, log but don't throw
             if (err?.name !== 'TypeError' || !err?.message?.includes('closed')) {
               console.warn('[sse-endpoint] Write error (stream may be closed)', {
                 error: err?.message || err,
                 chunkType: typeof chunk,
-                chunkLength: typeof chunk === 'string' ? chunk.length : 'N/A',
               });
             }
-          }
-        },
-        flush: () => {
-          // CRITICAL FIX: Add flush method for compatibility with Node.js streams
-          // ReadableStream doesn't need explicit flush, but some code may call it
-          try {
-            // No-op for ReadableStream, but ensure controller is still open
-            if (controller.desiredSize === null) {
-              // Stream is closed
-              return;
-            }
-          } catch (err) {
-            // Ignore flush errors
-          }
-        },
-        end: () => {
-          try {
-            controller.close();
-          } catch (err) {
-            // Already closed - ignore
-          }
-        },
-      };
-
-      // Create a mock request for cleanup handling
-      const mockReq = {
-        on: (event: string, handler: any) => {
-          if (event === 'close') {
-            // Store cleanup handler to call when stream is cancelled
-            closeHandler = handler;
-          }
-          return mockReq; // Return self for chaining
-        },
-      };
-
-      // Register SSE client
-      // CRITICAL: Don't close stream if registration fails - initial event was already sent
-      // The browser already knows it's connected, so let the stream continue
-      try {
-        registerSseClient(mockReq, mockRes, streamCallId);
-      } catch (err: any) {
-        console.error('[sse-endpoint] Failed to register client', {
-          error: err?.message || err,
-          stack: err?.stack,
-          callId: streamCallId || 'global',
+          });
+        } catch (err: any) {
+          console.warn('[sse-endpoint] Failed to write chunk', {
+            error: err?.message || err,
+          });
+        }
+      },
+      flush: () => {
+        // No-op for TransformStream (flushes automatically)
+      },
+      end: () => {
+        writer.close().catch(() => {
+          // Already closed - ignore
         });
-        // DON'T call controller.error() - let stream continue
-        // The initial event was already sent, so browser knows it's connected
-      }
-    },
-    cancel() {
-      const cancelledCallId = streamCallId || 'global';
-      console.info('[sse-endpoint] ❌ Stream cancelled', { 
-        callId: cancelledCallId,
-        timestamp: new Date().toISOString()
+      },
+    };
+
+    // Create mock request for cleanup handling
+    const mockReq = {
+      on: (event: string, handler: any) => {
+        if (event === 'close') {
+          closeHandler = handler;
+        }
+        return mockReq;
+      },
+    };
+
+    // Register SSE client asynchronously (after initial data is sent)
+    // This allows broadcasts from realtime.ts to work
+    registerSseClient(mockReq, mockRes, streamCallId).catch((err: any) => {
+      console.error('[sse-endpoint] Failed to register client', {
+        error: err?.message || err,
+        callId: streamCallId || 'global',
       });
+    });
+
+    // Handle cleanup when stream is cancelled
+    // TransformStream automatically handles cancellation, but we need to clean up our resources
+    // The writer will be closed automatically when readable is cancelled
+    // We use a promise to detect when the stream ends
+    writer.closed.then(() => {
+      console.info('[sse-endpoint] ❌ Stream writer closed', {
+        callId: streamCallId || 'global',
+        timestamp: new Date().toISOString(),
+      });
+      
       // Call cleanup handler if it exists
       if (closeHandler) {
         try {
@@ -198,16 +139,17 @@ export async function GET(req: Request) {
           console.warn('[sse-endpoint] Error in close handler', err);
         }
       }
-    },
-  });
+    }).catch(() => {
+      // Stream closed normally or cancelled - ignore
+    });
 
-    // Return SSE response
-    return new Response(stream, {
+    // Return SSE response with TransformStream readable side
+    return new Response(readable, {
       headers: {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache, no-transform',
         'Connection': 'keep-alive',
-        'X-Accel-Buffering': 'no',
+        'X-Accel-Buffering': 'no', // Disable nginx/proxy buffering
         // CORS for dev (restrict in production)
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'GET, OPTIONS',
