@@ -44,8 +44,8 @@ export function useRealtimeTranscript(
   const [error, setError] = useState<string | null>(null);
   
   const eventSourceRef = useRef<EventSource | null>(null);
-  const reconnectTimeoutRef = useRef<NodeJS.Timeout>();
-  const connectionTimeoutRef = useRef<NodeJS.Timeout>();
+  const reconnectTimeoutRef = useRef<NodeJS.Timeout | undefined>(undefined);
+  const connectionTimeoutRef = useRef<NodeJS.Timeout | undefined>(undefined);
   const shouldReconnectRef = useRef(true);
   const reconnectAttemptsRef = useRef(0);
   
