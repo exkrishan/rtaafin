@@ -176,7 +176,8 @@ export async function GET(req: Request) {
           console.warn('[sse-endpoint] Error in close handler', err);
         }
       }
-    });
+    },
+  });
 
     // Return SSE response
     return new Response(stream, {
