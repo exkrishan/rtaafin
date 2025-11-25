@@ -114,12 +114,15 @@ export async function GET(req: Request) {
 
     // Register SSE client asynchronously (after initial data is sent)
     // This allows broadcasts from realtime.ts to work
-    registerSseClient(mockReq, mockRes, streamCallId).catch((err: any) => {
+    // Note: registerSseClient returns void, not a Promise, so we use try-catch
+    try {
+      registerSseClient(mockReq, mockRes, streamCallId);
+    } catch (err: any) {
       console.error('[sse-endpoint] Failed to register client', {
         error: err?.message || err,
         callId: streamCallId || 'global',
       });
-    });
+    }
 
     // Handle cleanup when stream is cancelled
     // TransformStream automatically handles cancellation, but we need to clean up our resources
