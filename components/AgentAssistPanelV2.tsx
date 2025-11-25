@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import CustomerDetailsHeader, { Customer } from './CustomerDetailsHeader';
 import { showToast } from './ToastContainer';
+import { useRealtimeTranscript } from '@/hooks/useRealtimeTranscript';
 
 // Re-export Customer type for convenience
 export type { Customer } from './CustomerDetailsHeader';
@@ -111,6 +112,60 @@ export default function AgentAssistPanelV2({
     emitTelemetryRef.current = emitTelemetry;
     onConnectionStateChangeRef.current = onConnectionStateChange;
   });
+
+  // CTO FIX: Use custom hook for real-time transcripts (replaces direct EventSource usage)
+  const { 
+    transcripts: hookTranscripts, 
+    isConnected: hookIsConnected, 
+    error: transcriptError 
+  } = useRealtimeTranscript(
+    useSse ? interactionId : null, // Only connect if useSse is true
+    {
+      onTranscript: (utterance) => {
+        // Convert hook's TranscriptUtterance to our format
+        const ourUtterance: TranscriptUtterance = {
+          utterance_id: utterance.id,
+          speaker: utterance.speaker,
+          text: utterance.text,
+          confidence: utterance.confidence || 0.95,
+          timestamp: utterance.timestamp,
+          isPartial: false,
+        };
+        
+        // Update local utterances state
+        setUtterances(prev => {
+          const exists = prev.some(u => u.utterance_id === ourUtterance.utterance_id);
+          if (exists) {
+            return prev;
+          }
+          return [...prev, ourUtterance];
+        });
+        
+        // Call callbacks
+        onTranscriptEventRef.current?.(ourUtterance);
+        emitTelemetryRef.current?.('transcript_generated', {
+          interaction_id: interactionId,
+          utterance_id: ourUtterance.utterance_id,
+          speaker: ourUtterance.speaker,
+          confidence: ourUtterance.confidence,
+          timestamp: ourUtterance.timestamp,
+          latency_ms: 2000,
+        });
+      },
+      onConnectionChange: (connected) => {
+        setWsConnected(connected);
+        setHealthStatus(connected ? 'healthy' : 'error');
+        onConnectionStateChangeRef.current?.(connected, connected ? EventSource.OPEN : EventSource.CLOSED);
+      },
+      autoReconnect: true,
+    }
+  );
+
+  // Sync hook's connection state to local state
+  useEffect(() => {
+    setWsConnected(hookIsConnected);
+    setHealthStatus(hookIsConnected ? 'healthy' : 'error');
+  }, [hookIsConnected]);
 
   // Persist collapse state in sessionStorage
   useEffect(() => {
@@ -253,9 +308,9 @@ export default function AgentAssistPanelV2({
           readyState: eventSource.readyState, // Should be 1 (OPEN)
           timestamp: new Date().toISOString()
         });
-        setWsConnected(true);
-        setHealthStatus('healthy');
-        onConnectionStateChangeRef.current?.(true, eventSource.readyState);
+        // CTO FIX: Connection state is handled by useRealtimeTranscript hook - don't set here
+        // setWsConnected and setHealthStatus are managed by the hook
+        // onConnectionStateChangeRef.current?.(true, eventSource.readyState);
       }
     };
 
@@ -283,9 +338,9 @@ export default function AgentAssistPanelV2({
               readyState,
               timestamp: new Date().toISOString()
             });
-            setWsConnected(false);
-            setHealthStatus('error');
-            onConnectionStateChangeRef.current?.(false, readyState);
+            // CTO FIX: Connection state is handled by useRealtimeTranscript hook - don't set here
+            // setWsConnected and setHealthStatus are managed by the hook
+            // onConnectionStateChangeRef.current?.(false, readyState);
           }
         }, 3000); // Wait 3 seconds before showing error
         
@@ -308,166 +363,14 @@ export default function AgentAssistPanelV2({
         // Keep wsConnected as true if it was already open, or don't change it if connecting
         if (readyState === EventSource.OPEN) {
           // Connection is actually open, keep connected
-          setWsConnected(true);
-          setHealthStatus('healthy');
+          // CTO FIX: Connection state is handled by useRealtimeTranscript hook - don't set here
+          // setWsConnected and setHealthStatus are managed by the hook
         }
       }
     };
 
-    eventSource.addEventListener('transcript_line', (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        const eventCallId = data.callId || data.interaction_id || data.interactionId;
-        
-        console.log('[AgentAssistPanel] 📥 Received transcript_line event', {
-          eventCallId,
-          expectedCallId: interactionId,
-          matches: eventCallId === interactionId || !eventCallId,
-          hasText: !!data.text,
-          text: data.text?.substring(0, 50),
-          seq: data.seq,
-          speaker: data.speaker || 'not provided',
-          timestamp: new Date().toISOString(),
-        });
-        
-        // Skip system messages
-        if (data.text && (data.text.includes('Connected to realtime stream') || data.text.includes('clientId:') || data.callId === 'system')) {
-          console.log('[AgentAssistPanel] Skipping system message');
-          return;
-        }
-        
-        // Fix 1.3: Enhanced callId matching with fallbacks
-        // Match callId - must match exactly or be missing (assume it's for this interaction)
-        let callIdMatches = !eventCallId || eventCallId === interactionId;
-        
-        // Fix 1.3: Fallback matching - try case-insensitive and trimmed comparison
-        if (!callIdMatches && eventCallId && interactionId) {
-          const normalizedEventCallId = String(eventCallId).trim().toLowerCase();
-          const normalizedInteractionId = String(interactionId).trim().toLowerCase();
-          callIdMatches = normalizedEventCallId === normalizedInteractionId;
-          
-          if (callIdMatches) {
-            console.log('[AgentAssistPanel] ✅ CallId matched after normalization', {
-              eventCallId,
-              interactionId,
-              normalizedEventCallId,
-              normalizedInteractionId,
-            });
-          }
-        }
-        
-        // Fix 1.3: Additional fallback - check if eventCallId contains interactionId or vice versa
-        if (!callIdMatches && eventCallId && interactionId) {
-          const eventCallIdStr = String(eventCallId).trim();
-          const interactionIdStr = String(interactionId).trim();
-          if (eventCallIdStr.includes(interactionIdStr) || interactionIdStr.includes(eventCallIdStr)) {
-            console.warn('[AgentAssistPanel] ⚠️ CallId partial match detected - using fallback matching', {
-              eventCallId: eventCallIdStr,
-              interactionId: interactionIdStr,
-              note: 'This is a fallback match - exact match preferred',
-            });
-            callIdMatches = true; // Allow partial match as fallback
-          }
-        }
-        
-        if (!callIdMatches) {
-          console.warn('[AgentAssistPanel] ⚠️ CallId mismatch - skipping transcript', {
-            eventCallId,
-            expectedCallId: interactionId,
-            eventCallIdType: typeof eventCallId,
-            interactionIdType: typeof interactionId,
-            suggestion: 'Check if UI is connected with the correct callId. Update interactionId prop or wait for auto-discovery.',
-          });
-          return;
-        }
-        
-        if (callIdMatches && data.text && data.text.trim().length > 0) {
-          // Determine speaker from data.speaker field or text prefix
-          let speaker: 'agent' | 'customer' = 'customer'; // Default
-          let text = data.text;
-          
-          // Priority 1: Use data.speaker if provided
-          if (data.speaker) {
-            speaker = data.speaker.toLowerCase() === 'agent' ? 'agent' : 'customer';
-            text = text.trim();
-          } 
-          // Priority 2: Check for speaker prefix in text (case-insensitive)
-          else if (text.match(/^Agent:\s*/i)) {
-            speaker = 'agent';
-            text = text.replace(/^Agent:\s*/i, '').trim();
-          } else if (text.match(/^Customer:\s*/i)) {
-            speaker = 'customer';
-            text = text.replace(/^Customer:\s*/i, '').trim();
-          } else {
-            // Default to customer if no speaker info
-            speaker = 'customer';
-            text = text.trim();
-          }
-          
-          // Only add if we have actual text content
-          if (!text || text.length === 0) {
-            console.log('[AgentAssistPanel] Skipping empty text after processing');
-            return;
-          }
-          
-          const utterance: TranscriptUtterance = {
-            utterance_id: data.seq?.toString() || `${Date.now()}-${Math.random()}`,
-            speaker,
-            text: text,
-            confidence: data.confidence || 0.95,
-            timestamp: data.ts || new Date().toISOString(),
-            isPartial: false,
-          };
-          
-          console.log('[AgentAssistPanel] ✅ Adding utterance', {
-            utterance_id: utterance.utterance_id,
-            speaker: utterance.speaker,
-            textLength: utterance.text.length,
-            textPreview: utterance.text.substring(0, 50),
-            timestamp: new Date().toISOString(),
-          });
-          
-          setUtterances(prev => {
-            // Check for duplicates by seq or utterance_id
-            const exists = prev.some(u => 
-              u.utterance_id === utterance.utterance_id || 
-              (data.seq && u.utterance_id === data.seq.toString())
-            );
-            if (exists) {
-              console.log('[AgentAssistPanel] ⏭️ Skipping duplicate utterance', {
-                utterance_id: utterance.utterance_id,
-                seq: data.seq
-              });
-              return prev;
-            }
-            console.log('[AgentAssistPanel] ✅ Adding new utterance', {
-              utterance_id: utterance.utterance_id,
-              totalCount: prev.length + 1,
-              speaker: utterance.speaker
-            });
-            return [...prev, utterance];
-          });
-          onTranscriptEventRef.current?.(utterance);
-          emitTelemetryRef.current?.('transcript_generated', {
-            interaction_id: interactionId,
-            utterance_id: utterance.utterance_id,
-            speaker: utterance.speaker,
-            confidence: utterance.confidence,
-            timestamp: utterance.timestamp,
-            latency_ms: 2000, // Simulated
-          });
-        } else {
-          console.log('[AgentAssistPanel] Skipping transcript_line', {
-            reason: !callIdMatches ? 'callId mismatch' : !data.text ? 'no text' : 'unknown',
-            eventCallId: data.callId,
-            expectedCallId: interactionId,
-            hasText: !!data.text,
-          });
-        }
-      } catch (err) {
-        console.error('[AgentAssistPanel] Failed to parse transcript_line', err, event.data);
-      }
-    });
+    // CTO FIX: transcript_line events are now handled by useRealtimeTranscript hook above
+    // We only listen for call_end and intent_update events here
 
     // Handle call_end event - trigger disposition generation
     eventSource.addEventListener('call_end', async (event) => {
@@ -622,16 +525,14 @@ export default function AgentAssistPanelV2({
     });
 
     return () => {
-      console.log('[AgentAssistPanel] Closing SSE connection', { 
+      console.log('[AgentAssistPanel] Closing call_end/intent_update SSE connection', { 
         interactionId,
         readyState: eventSource.readyState,
         timestamp: new Date().toISOString()
       });
       eventSource.close();
-      setWsConnected(false);
-      onConnectionStateChangeRef.current?.(false, EventSource.CLOSED);
     };
-  }, [interactionId, useSse]); // CRITICAL FIX: Only depend on interactionId and useSse to prevent connection churn
+  }, [interactionId, useSse]); // Only depend on interactionId and useSse
 
   // Auto-scroll transcript
   useEffect(() => {
