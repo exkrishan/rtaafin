@@ -99,6 +99,19 @@ export default function AgentAssistPanelV2({
   const [isDragging, setIsDragging] = useState(false);
   const dividerRef = useRef<HTMLDivElement>(null);
 
+  // CRITICAL FIX: Use refs for callbacks to prevent SSE useEffect from re-running unnecessarily
+  // This prevents connection churn (multiple connections being created/destroyed)
+  const onTranscriptEventRef = useRef(onTranscriptEvent);
+  const emitTelemetryRef = useRef(emitTelemetry);
+  const onConnectionStateChangeRef = useRef(onConnectionStateChange);
+
+  // Update refs whenever callbacks change (without triggering SSE reconnection)
+  useEffect(() => {
+    onTranscriptEventRef.current = onTranscriptEvent;
+    emitTelemetryRef.current = emitTelemetry;
+    onConnectionStateChangeRef.current = onConnectionStateChange;
+  });
+
   // Persist collapse state in sessionStorage
   useEffect(() => {
     const saved = sessionStorage.getItem('aa_panel_collapsed');
@@ -242,7 +255,7 @@ export default function AgentAssistPanelV2({
         });
         setWsConnected(true);
         setHealthStatus('healthy');
-        onConnectionStateChange?.(true, eventSource.readyState);
+        onConnectionStateChangeRef.current?.(true, eventSource.readyState);
       }
     };
 
@@ -272,7 +285,7 @@ export default function AgentAssistPanelV2({
             });
             setWsConnected(false);
             setHealthStatus('error');
-            onConnectionStateChange?.(false, readyState);
+            onConnectionStateChangeRef.current?.(false, readyState);
           }
         }, 3000); // Wait 3 seconds before showing error
         
@@ -434,8 +447,8 @@ export default function AgentAssistPanelV2({
             });
             return [...prev, utterance];
           });
-          onTranscriptEvent?.(utterance);
-          emitTelemetry?.('transcript_generated', {
+          onTranscriptEventRef.current?.(utterance);
+          emitTelemetryRef.current?.('transcript_generated', {
             interaction_id: interactionId,
             utterance_id: utterance.utterance_id,
             speaker: utterance.speaker,
@@ -592,7 +605,7 @@ export default function AgentAssistPanelV2({
           });
           
           articlesWithIntent.forEach((article: KBArticle) => {
-            emitTelemetry?.('kb_suggestion_shown', {
+            emitTelemetryRef.current?.('kb_suggestion_shown', {
               interaction_id: interactionId,
               article_id: article.id,
               confidence: article.confidence || article.relevance || 0,
@@ -616,9 +629,9 @@ export default function AgentAssistPanelV2({
       });
       eventSource.close();
       setWsConnected(false);
-      onConnectionStateChange?.(false, EventSource.CLOSED);
+      onConnectionStateChangeRef.current?.(false, EventSource.CLOSED);
     };
-  }, [interactionId, onTranscriptEvent, emitTelemetry, tenantId, agentId, onConnectionStateChange, useSse]);
+  }, [interactionId, useSse]); // CRITICAL FIX: Only depend on interactionId and useSse to prevent connection churn
 
   // Auto-scroll transcript
   useEffect(() => {
