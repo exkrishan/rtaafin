@@ -171,8 +171,11 @@ export function useRealtimeTranscript(
           }
         } else if (readyState === EventSource.OPEN) {
           // Connection is actually open, just clear any error
+          clearTimeout(connectionTimeoutRef.current);
+          connectionTimeoutRef.current = undefined;
           setIsConnected(true);
           setError(null);
+          onConnectionChange?.(true); // CRITICAL: Notify that we're connected
         }
       };
 
@@ -263,7 +266,16 @@ export function useRealtimeTranscript(
           const data = JSON.parse(event.data);
           if (data.type === 'connection' && data.message === 'connected') {
             // This is our initial connection message - connection is ready
-            console.log('[useRealtimeTranscript] Received connection confirmation', { callId });
+            console.log('[useRealtimeTranscript] ✅ Received connection confirmation', { callId });
+            
+            // CRITICAL FIX: Set connected state when we receive connection message
+            // This handles cases where onopen doesn't fire but data is flowing
+            clearTimeout(connectionTimeoutRef.current);
+            connectionTimeoutRef.current = undefined;
+            setIsConnected(true);
+            setError(null);
+            reconnectAttemptsRef.current = 0; // Reset attempts
+            onConnectionChange?.(true);
           }
         } catch (err) {
           // Ignore parse errors for non-JSON messages

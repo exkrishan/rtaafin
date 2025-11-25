@@ -54,9 +54,10 @@ export async function GET(req: Request) {
     };
     const initialDataStr = `data: ${JSON.stringify(initialData)}\n\n`;
     
-    // Write immediately - this will be flushed to browser right away
-    writer.write(encoder.encode(initialDataStr));
-    console.log('[sse-endpoint] ✅ Sent initial connection data (immediate flush)', {
+    // CRITICAL FIX: AWAIT the write to ensure data is flushed before Response is returned
+    // This ensures EventSource.onopen fires because data is actually sent to the browser
+    await writer.write(encoder.encode(initialDataStr));
+    console.log('[sse-endpoint] ✅ Sent initial connection data (flushed)', {
       callId: streamCallId || 'global',
       timestamp: new Date().toISOString(),
     });
