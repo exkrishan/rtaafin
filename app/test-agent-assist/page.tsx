@@ -299,7 +299,6 @@ export default function TestAgentAssistPage() {
           onTranscriptEvent={handleTranscriptEvent}
           triggerKBSearch={handleKBSearch}
           fetchDispositionSummary={handleDispositionSummary}
-          onInteractionIdChange={handleInteractionIdChange}
           emitTelemetry={(eventName, payload) => {
             console.log('[Test] Telemetry:', eventName, payload);
           }}
