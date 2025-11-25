@@ -254,63 +254,26 @@ export default function LivePage() {
       });
   }, [callId]);
 
-  // CRITICAL: Single hook instance for all events (transcripts, call_end, intent_update)
-  // This ensures only ONE EventSource connection
+  // CRITICAL: Use hook EXACTLY like simple UI - NO CALLBACKS
+  // This matches the working pattern from test-simple-transcript
   const { 
     transcripts, 
     isConnected: transcriptConnected, 
     error: transcriptError 
-  } = useRealtimeTranscript(
-    callId || null,
-    {
-      autoReconnect: true,
-      // Use refs pattern - callbacks won't cause reconnection loop
-      onCallEnd: async (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          console.log('[Live] 📞 Call ended event received', { callId });
-          
-          // Trigger disposition generation
-          await disposeCall();
-        } catch (err) {
-          console.error('[Live] Failed to handle call_end event', err);
-        }
-      },
-      onIntentUpdate: (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          console.log('[Live] 🎯 Intent update event received', { callId, intent: data.intent });
-          
-          // Update KB articles if provided
-          if (data.articles && Array.isArray(data.articles) && data.articles.length > 0) {
-            const articles: KBArticle[] = data.articles.map((article: any) => ({
-              id: article.id || article.code || String(Math.random()),
-              title: article.title || 'Untitled',
-              snippet: article.snippet || '',
-              url: article.url,
-              confidence: article.score || article.confidence || 0.8,
-              intent: data.intent,
-              intentConfidence: data.confidence,
-            }));
-            
-            // Update local state
-            setKbArticles(prev => {
-              const existingIds = new Set(prev.map(a => a.id));
-              const newArticles = articles.filter(a => !existingIds.has(a.id));
-              return [...newArticles, ...prev];
-            });
-            
-            // Update AgentAssistPanelV2 via window function (when useSse=false)
-            if (typeof window !== 'undefined' && (window as any).__updateKbArticles) {
-              (window as any).__updateKbArticles(articles, data.intent, data.confidence);
-            }
-          }
-        } catch (err) {
-          console.error('[Live] Failed to parse intent_update event', err);
-        }
-      },
-    }
-  );
+  } = useRealtimeTranscript(callId || null, {
+    autoReconnect: true,
+  });
+
+  // Debug: Log hook state to verify transcripts are being received
+  useEffect(() => {
+    console.log('[Live] 🔍 Hook State:', {
+      callId,
+      transcriptsCount: transcripts.length,
+      isConnected: transcriptConnected,
+      error: transcriptError,
+      firstTranscript: transcripts[0]?.text?.substring(0, 50) || 'none',
+    });
+  }, [callId, transcripts.length, transcriptConnected, transcriptError]);
 
   const disposeCall = async () => {
     if (!callId) return;
