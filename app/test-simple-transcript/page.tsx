@@ -1,10 +1,22 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { useRealtimeTranscript } from '@/hooks/useRealtimeTranscript';
 
 export default function SimpleTranscriptTestPage() {
-  const [callId, setCallId] = useState('test-1764084348');
+  const searchParams = useSearchParams();
+  // CRITICAL FIX: Read callId from URL parameter, fallback to default
+  const urlCallId = searchParams.get('callId');
+  const [callId, setCallId] = useState(urlCallId || 'test-1764084348');
+  
+  // Update callId when URL parameter changes
+  useEffect(() => {
+    if (urlCallId && urlCallId !== callId) {
+      console.log('[SimpleTranscriptTest] Updating callId from URL', { urlCallId, currentCallId: callId });
+      setCallId(urlCallId);
+    }
+  }, [urlCallId, callId]);
   
   // Use the hook directly - this is the ONLY way we connect to SSE
   const { 
