@@ -435,13 +435,16 @@ class TranscriptConsumer {
       });
       
       for (const failed of toRetry) {
+        // CRITICAL FIX: Remove permanently failed items instead of keeping them in memory
         // Only retry if retry count is below threshold (max 5 retries total)
         if (failed.retryCount >= 5) {
-          console.error('[TranscriptConsumer] Max retries exceeded for dead-letter transcript', {
+          console.error('[TranscriptConsumer] Max retries exceeded, removing permanently failed transcript', {
             interaction_id: failed.interaction_id,
             seq: failed.seq,
             retryCount: failed.retryCount,
+            note: 'Removed from memory to prevent dead-letter queue growth',
           });
+          // CRITICAL: Don't add back to queue - remove permanently to prevent memory leak
           continue; // Skip this one, it's permanently failed
         }
         

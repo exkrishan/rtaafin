@@ -20,6 +20,9 @@ interface SseClientEntry {
 // In-memory store of active SSE connections
 const clients = new Map<string, SseClientEntry>();
 
+// CRITICAL FIX: Limit SSE clients to prevent memory issues and OOM crashes
+const MAX_SSE_CLIENTS = 100; // Maximum number of concurrent SSE connections
+
 // Keep-alive interval (send comment every 30s to prevent timeout)
 const HEARTBEAT_INTERVAL_MS = 30000;
 let heartbeatTimer: NodeJS.Timeout | null = null;
@@ -39,6 +42,38 @@ function generateClientId(): string {
  * @param callId - Optional callId to subscribe to specific call (null = global)
  */
 export function registerSseClient(req: any, res: any, callId: string | null = null): void {
+  // CRITICAL FIX: Limit SSE clients to prevent memory issues and OOM crashes
+  // If we have too many clients, remove oldest ones first
+  if (clients.size >= MAX_SSE_CLIENTS) {
+    // Remove oldest clients (by creation time)
+    const clientsArray = Array.from(clients.entries())
+      .sort((a, b) => a[1].createdAt.getTime() - b[1].createdAt.getTime());
+    
+    const toRemove = clientsArray.slice(0, 10); // Remove 10 oldest
+    for (const [id] of toRemove) {
+      const client = clients.get(id);
+      if (client) {
+        try {
+          if (client.res && typeof client.res.end === 'function') {
+            client.res.end();
+          } else if (client.res && client.res.controller && typeof client.res.controller.close === 'function') {
+            client.res.controller.close();
+          }
+        } catch (e) {
+          // Ignore cleanup errors
+        }
+        clients.delete(id);
+      }
+    }
+    
+    console.warn('[realtime] ⚠️ SSE client limit reached, removed oldest clients', {
+      removed: toRemove.length,
+      remaining: clients.size,
+      maxAllowed: MAX_SSE_CLIENTS,
+      timestamp: new Date().toISOString(),
+    });
+  }
+
   const clientId = generateClientId();
 
   console.info('[realtime] ✅ New SSE client connected', {
