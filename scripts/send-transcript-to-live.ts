@@ -89,17 +89,9 @@ async function sendTranscriptChunk(
   const url = `${frontendUrl}/api/calls/ingest-transcript`;
   
   try {
-    // Import https for custom agent (handles TLS certificate issues)
-    const https = await import('https');
-    const agent = new https.Agent({
-      rejectUnauthorized: false, // Allow self-signed certificates (for testing/demo)
-    });
-    
-    // Add timeout using AbortController
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
-    
-    const response = await fetch(url, {
+    // Node.js 20+ uses undici for fetch, need to use undici.Agent with dispatcher
+    // This handles TLS certificate validation issues (self-signed certs)
+    let fetchOptions: any = {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -111,10 +103,35 @@ async function sendTranscriptChunk(
         ts: new Date().toISOString(),
         text,
       }),
-      signal: controller.signal,
-      // @ts-ignore - agent is valid for Node.js fetch
-      agent,
-    });
+    };
+    
+    // Add timeout using AbortController
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+    fetchOptions.signal = controller.signal;
+    
+    // Try to use undici dispatcher (Node.js 20+ built-in fetch)
+    try {
+      const undici = await import('undici');
+      if (undici && undici.Agent) {
+        const dispatcher = new undici.Agent({
+          connect: {
+            rejectUnauthorized: false, // Allow self-signed certificates (for testing/demo)
+          },
+        });
+        fetchOptions.dispatcher = dispatcher;
+      }
+    } catch (undiciErr) {
+      // If undici import fails, try https.Agent fallback
+      const https = await import('https');
+      const agent = new https.Agent({
+        rejectUnauthorized: false,
+        keepAlive: false,
+      });
+      fetchOptions.agent = agent;
+    }
+    
+    const response = await fetch(url, fetchOptions);
     
     clearTimeout(timeoutId);
 
