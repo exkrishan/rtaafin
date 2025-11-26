@@ -167,6 +167,39 @@ export default function AgentAssistPanelV2({
     setHealthStatus(hookIsConnected ? 'healthy' : 'error');
   }, [hookIsConnected]);
 
+  // CRITICAL FIX: Sync hookTranscripts to utterances state
+  // This handles both SSE and polling fallback cases
+  // The onTranscript callback only fires for SSE events, not polling
+  useEffect(() => {
+    if (hookTranscripts && hookTranscripts.length > 0) {
+      // Convert hook transcripts to our format
+      const newUtterances: TranscriptUtterance[] = hookTranscripts.map((t) => ({
+        utterance_id: t.id,
+        speaker: t.speaker,
+        text: t.text,
+        confidence: t.confidence || 0.95,
+        timestamp: t.timestamp,
+        isPartial: false,
+      }));
+      
+      // Merge with existing utterances, avoiding duplicates
+      setUtterances((prev) => {
+        const existingIds = new Set(prev.map((u) => u.utterance_id));
+        const toAdd = newUtterances.filter((u) => !existingIds.has(u.utterance_id));
+        
+        if (toAdd.length > 0) {
+          console.log('[AgentAssistPanel] ✅ Syncing utterances from hook', {
+            newCount: toAdd.length,
+            totalCount: prev.length + toAdd.length,
+            interactionId,
+          });
+          return [...prev, ...toAdd];
+        }
+        return prev;
+      });
+    }
+  }, [hookTranscripts, interactionId]);
+
   // Persist collapse state in sessionStorage
   useEffect(() => {
     const saved = sessionStorage.getItem('aa_panel_collapsed');
