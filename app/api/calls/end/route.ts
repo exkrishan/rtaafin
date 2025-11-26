@@ -7,6 +7,7 @@ import { NextResponse } from 'next/server';
 import { getCallRegistry } from '@/lib/call-registry';
 import { generateCallSummary } from '@/lib/summary';
 import { supabase } from '@/lib/supabase';
+import { unsubscribeFromTranscripts } from '@/lib/transcript-consumer';
 
 export const dynamic = 'force-dynamic';
 
@@ -45,6 +46,19 @@ export async function POST(req: Request) {
       console.warn('[call-end] Failed to update call registry', {
         error: error.message,
         interactionId,
+      });
+    }
+
+    // CRITICAL FIX: Unsubscribe from transcript streams when call ends
+    // This prevents memory leaks and 502 errors from too many subscriptions
+    try {
+      await unsubscribeFromTranscripts(interactionId);
+      console.info('[call-end] ✅ Unsubscribed from transcript streams', { interactionId });
+    } catch (error: any) {
+      console.warn('[call-end] Failed to unsubscribe from transcripts', {
+        error: error.message,
+        interactionId,
+        note: 'Non-critical - subscription will be cleaned up eventually',
       });
     }
 

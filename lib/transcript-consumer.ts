@@ -154,6 +154,36 @@ class TranscriptConsumer {
       return;
     }
 
+    // CRITICAL FIX: Safety limit to prevent memory issues and 502 errors
+    // If we have too many subscriptions, clean up old ones first
+    const MAX_SUBSCRIPTIONS = 50; // Limit to 50 active subscriptions
+    if (this.subscriptions.size >= MAX_SUBSCRIPTIONS) {
+      console.warn('[TranscriptConsumer] ⚠️ Subscription limit reached, cleaning up old subscriptions', {
+        currentCount: this.subscriptions.size,
+        maxAllowed: MAX_SUBSCRIPTIONS,
+        newInteractionId: interactionId,
+      });
+      
+      // Try to clean up ended calls first
+      await this.cleanupEndedCallSubscriptions();
+      
+      // If still at limit, remove oldest subscriptions
+      if (this.subscriptions.size >= MAX_SUBSCRIPTIONS) {
+        const subscriptionsArray = Array.from(this.subscriptions.entries())
+          .sort((a, b) => a[1].createdAt.getTime() - b[1].createdAt.getTime()); // Oldest first
+        
+        const toRemove = subscriptionsArray.slice(0, 10); // Remove 10 oldest
+        for (const [id] of toRemove) {
+          try {
+            await this.unsubscribeFromInteraction(id);
+            console.info('[TranscriptConsumer] 🧹 Removed oldest subscription to make room', { interactionId: id });
+          } catch (error: any) {
+            console.warn('[TranscriptConsumer] Failed to remove old subscription', { interactionId: id, error: error.message });
+          }
+        }
+      }
+    }
+
     const topic = transcriptTopic(interactionId);
     console.info('[TranscriptConsumer] Subscribing to transcript topic', { interactionId, topic });
 
@@ -170,7 +200,11 @@ class TranscriptConsumer {
         transcriptCount: 0,
       });
 
-      console.info('[TranscriptConsumer] ✅ Subscribed to transcript topic', { interactionId, topic });
+      console.info('[TranscriptConsumer] ✅ Subscribed to transcript topic', { 
+        interactionId, 
+        topic,
+        totalSubscriptions: this.subscriptions.size,
+      });
     } catch (error: any) {
       console.error('[TranscriptConsumer] Failed to subscribe to transcript topic', {
         interactionId,
@@ -495,12 +529,74 @@ class TranscriptConsumer {
 
       try {
         await this.discoverAndSubscribeToNewStreams();
+        // CRITICAL FIX: Clean up subscriptions for ended calls to prevent memory leaks
+        await this.cleanupEndedCallSubscriptions();
       } catch (error: any) {
         console.error('[TranscriptConsumer] Stream discovery error:', error);
       }
     }, 5000); // CRITICAL FIX: Reduced from 30000ms (30s) to 5000ms (5s) for faster discovery
 
     console.info('[TranscriptConsumer] Stream discovery started (auto-subscribe mode)');
+  }
+
+  /**
+   * CRITICAL FIX: Clean up subscriptions for ended calls
+   * This prevents memory leaks and 502 errors from too many active subscriptions
+   */
+  private async cleanupEndedCallSubscriptions(): Promise<void> {
+    try {
+      // Get call registry to check which calls are ended
+      const { getCallRegistry } = await import('@/lib/call-registry');
+      const callRegistry = getCallRegistry();
+      
+      // Get all active calls (only active ones)
+      const activeCalls = await callRegistry.getActiveCalls(1000); // Get up to 1000 to check all
+      const activeCallIds = new Set(activeCalls.map(call => call.interactionId));
+      
+      // Find subscriptions for calls that are no longer active
+      const subscriptionsToCleanup: string[] = [];
+      for (const [interactionId, subscription] of this.subscriptions.entries()) {
+        // Check if call is ended (not in active calls list)
+        if (!activeCallIds.has(interactionId)) {
+          // Also check if subscription is old (created more than 1 hour ago)
+          const ageMs = Date.now() - subscription.createdAt.getTime();
+          const oneHourMs = 60 * 60 * 1000;
+          
+          if (ageMs > oneHourMs) {
+            subscriptionsToCleanup.push(interactionId);
+          }
+        }
+      }
+      
+      // Unsubscribe from ended/old calls
+      if (subscriptionsToCleanup.length > 0) {
+        console.info('[TranscriptConsumer] 🧹 Cleaning up subscriptions for ended/old calls', {
+          count: subscriptionsToCleanup.length,
+          interactionIds: subscriptionsToCleanup.slice(0, 5), // Log first 5
+        });
+        
+        for (const interactionId of subscriptionsToCleanup) {
+          try {
+            await this.unsubscribeFromInteraction(interactionId);
+          } catch (error: any) {
+            console.warn('[TranscriptConsumer] Failed to cleanup subscription', {
+              interactionId,
+              error: error.message,
+            });
+          }
+        }
+        
+        console.info('[TranscriptConsumer] ✅ Cleaned up subscriptions', {
+          count: subscriptionsToCleanup.length,
+          remainingSubscriptions: this.subscriptions.size,
+        });
+      }
+    } catch (error: any) {
+      // Non-critical - log but don't fail
+      console.warn('[TranscriptConsumer] Cleanup error (non-critical):', {
+        error: error.message || String(error),
+      });
+    }
   }
 
   /**
