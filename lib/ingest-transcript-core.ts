@@ -423,17 +423,37 @@ async function detectIntentAndSurfaceKB(
           }
         }
 
-        // Strategy 2: Search with expanded terms
-        for (const term of searchTerms) {
-          if (term.length < 3) continue;
-          
-          const termResults = await kbAdapter.search(term, {
-            tenantId,
-            max: Math.floor(config.kb.maxArticles / searchTerms.length) || 3,
-            context: [text],
-          });
+        // Strategy 2: Search with expanded terms (PARALLELIZED)
+        // CRITICAL FIX: Run searches in parallel, but process results sequentially to maintain deduplication
+        const searchPromises = searchTerms
+          .filter(term => term.length >= 3) // Filter short terms
+          .map(term => 
+            kbAdapter.search(term, {
+              tenantId,
+              max: Math.floor(config.kb.maxArticles / searchTerms.length) || 3,
+              context: [text],
+            }).catch(err => {
+              // CRITICAL FIX: Handle individual search failures gracefully
+              console.warn('[ingest-transcript-core] KB search failed for term', {
+                term,
+                error: err?.message || String(err),
+              });
+              return []; // Return empty array on error
+            })
+          );
+
+        // CRITICAL FIX: Wait for all searches to complete (parallel execution)
+        const searchResults = await Promise.all(searchPromises);
+
+        // CRITICAL FIX: Process results sequentially to maintain deduplication logic
+        for (const termResults of searchResults) {
+          if (!Array.isArray(termResults)) {
+            // Skip invalid results
+            continue;
+          }
 
           for (const article of termResults) {
+            // CRITICAL FIX: Maintain existing deduplication logic
             if (!seenIds.has(article.id) && allArticles.length < config.kb.maxArticles) {
               allArticles.push(article);
               seenIds.add(article.id);

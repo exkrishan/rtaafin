@@ -251,6 +251,24 @@ class CallRegistry {
         tenantId: metadata.tenantId,
         ttl: CALL_METADATA_TTL_SECONDS,
       });
+
+      // CRITICAL FIX: Trigger immediate stream discovery (throttled, safe)
+      try {
+        const { triggerStreamDiscovery } = await import('@/lib/transcript-consumer');
+        // This is safe - triggerStreamDiscovery has a 2s throttle guard
+        await triggerStreamDiscovery().catch(err => {
+          // CRITICAL FIX: Don't fail registration if discovery fails
+          console.debug('[CallRegistry] Stream discovery trigger failed (non-critical)', {
+            interactionId: metadata.interactionId,
+            error: err?.message,
+          });
+        });
+      } catch (importErr) {
+        // CRITICAL FIX: Handle import errors gracefully
+        console.debug('[CallRegistry] Could not trigger stream discovery (module not available)', {
+          interactionId: metadata.interactionId,
+        });
+      }
     } catch (error: any) {
       console.error('[CallRegistry] ❌ Failed to register call', {
         error: error.message,

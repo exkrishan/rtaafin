@@ -129,29 +129,59 @@ Use specific intents: credit_card_block, credit_card_fraud, credit_card_replacem
       
       let response;
       try {
-        response = await fetch(url, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            contents: [{
-              parts: [{
-                text: fullPrompt,
-              }],
-            }],
-            generationConfig: {
-              temperature: 0.3,
-              maxOutputTokens: 200, // Sufficient for gemini-2.0-flash (doesn't use thinking tokens)
+        // CRITICAL FIX: Add timeout to prevent hanging requests
+        const controller = new AbortController();
+        const timeoutMs = 5000; // 5 second timeout
+        const timeoutId = setTimeout(() => {
+          controller.abort();
+        }, timeoutMs);
+
+        try {
+          response = await fetch(url, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
             },
-          }),
-        });
-      } catch (fetchErr: any) {
-        console.error('[intent] Fetch error (network/timeout):', {
-          error: fetchErr.message,
-          name: fetchErr.name,
-          code: fetchErr.code,
-        });
+            signal: controller.signal, // CRITICAL: Add abort signal
+            body: JSON.stringify({
+              contents: [{
+                parts: [{
+                  text: fullPrompt,
+                }],
+              }],
+              generationConfig: {
+                temperature: 0.3,
+                maxOutputTokens: 200, // Sufficient for gemini-2.0-flash (doesn't use thinking tokens)
+              },
+            }),
+          });
+          
+          // CRITICAL FIX: Clear timeout on success
+          clearTimeout(timeoutId);
+        } catch (fetchErr: any) {
+          // CRITICAL FIX: Clear timeout on error
+          clearTimeout(timeoutId);
+          
+          // Check if it's a timeout/abort error
+          if (fetchErr.name === 'AbortError' || fetchErr.message?.includes('aborted')) {
+            console.warn('[intent] Gemini API request timeout (5s), returning unknown intent', {
+              timeoutMs,
+              suggestion: 'Request took too long, falling back to unknown intent',
+            });
+            return { intent: 'unknown', confidence: 0 };
+          }
+          
+          // Other network errors
+          console.error('[intent] Fetch error (network/timeout):', {
+            error: fetchErr.message,
+            name: fetchErr.name,
+            code: fetchErr.code,
+          });
+          return { intent: 'unknown', confidence: 0 };
+        }
+      } catch (err: any) {
+        // Fallback for any other errors
+        console.error('[intent] Unexpected error in fetch:', err);
         return { intent: 'unknown', confidence: 0 };
       }
 

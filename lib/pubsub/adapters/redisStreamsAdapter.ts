@@ -37,6 +37,28 @@ const maxClientsErrorTime = new Map<string, number>(); // Track when max clients
 const MAX_CLIENTS_BACKOFF_MS = 60000; // Don't retry for 60 seconds after max clients error
 const MAX_CONNECTION_CACHE_SIZE = 5; // Maximum number of Redis connections to cache (prevents memory leaks)
 
+// CRITICAL FIX: Error logging throttling to prevent log spam
+const lastErrorLogTime = new Map<string, number>();
+const ERROR_LOG_THROTTLE_MS = 60000; // Log same error max once per minute
+
+/**
+ * Log error with throttling to prevent spam
+ */
+function logErrorSafely(errorType: string, error: Error | string, context?: any): void {
+  const now = Date.now();
+  const lastLog = lastErrorLogTime.get(errorType) || 0;
+  const errorMessage = error instanceof Error ? error.message : String(error);
+  
+  if (now - lastLog > ERROR_LOG_THROTTLE_MS) {
+    console.error(`[RedisStreamsAdapter] ${errorType}:`, {
+      error: errorMessage,
+      ...context,
+      note: 'This error is throttled - will log again in 60s if it persists',
+    });
+    lastErrorLogTime.set(errorType, now);
+  }
+}
+
 // Cleanup dead connections periodically
 setInterval(() => {
   const cacheEntries = Array.from(connectionCache.entries());
@@ -355,8 +377,22 @@ export class RedisStreamsAdapter implements PubSubAdapter {
       }
     }
     
+    // CRITICAL FIX: Check Redis before throwing (with throttled logging)
     if (!this.redis) {
+      logErrorSafely('Redis not initialized for publish', new Error('Redis client not initialized'), {
+        topic,
+        suggestion: 'Check REDIS_URL environment variable and Redis connection',
+      });
       throw new Error('Redis client not initialized. ioredis is required.');
+    }
+
+    // CRITICAL FIX: Check connection status
+    if (this.redis.status !== 'ready' && this.redis.status !== 'connecting') {
+      logErrorSafely('Redis not ready for publish', new Error(`Redis status: ${this.redis.status}`), {
+        topic,
+        status: this.redis.status,
+      });
+      throw new Error(`Redis client not ready (status: ${this.redis.status})`);
     }
     
     try {
@@ -425,8 +461,21 @@ export class RedisStreamsAdapter implements PubSubAdapter {
     // Create consumer group if it doesn't exist
     await this.ensureConsumerGroup(topic, this.consumerGroup);
 
+    // CRITICAL FIX: Check Redis before throwing (with throttled logging)
     if (!this.redis) {
+      logErrorSafely('Redis not initialized for subscribe', new Error('Redis client not initialized'), {
+        topic,
+      });
       throw new Error('Redis client not initialized. ioredis is required.');
+    }
+
+    // CRITICAL FIX: Check connection status
+    if (this.redis.status !== 'ready' && this.redis.status !== 'connecting') {
+      logErrorSafely('Redis not ready for subscribe', new Error(`Redis status: ${this.redis.status}`), {
+        topic,
+        status: this.redis.status,
+      });
+      throw new Error(`Redis client not ready (status: ${this.redis.status})`);
     }
     
     // REUSE the main Redis connection instead of creating a new one
@@ -468,8 +517,21 @@ export class RedisStreamsAdapter implements PubSubAdapter {
     console.info(`[RedisStreamsAdapter] 🔧 Ensuring consumer group exists: ${groupName} for topic: ${topic}`);
     
     if (!this.redis) {
-      console.error(`[RedisStreamsAdapter] ❌ CRITICAL: Redis client is null when ensuring consumer group for ${topic}`);
+      logErrorSafely('Redis not initialized for consumer group', new Error('Redis client not initialized'), {
+        topic,
+        groupName,
+      });
       throw new Error('Redis client not initialized');
+    }
+
+    // CRITICAL FIX: Check connection status
+    if (this.redis.status !== 'ready' && this.redis.status !== 'connecting') {
+      logErrorSafely('Redis not ready for consumer group', new Error(`Redis status: ${this.redis.status}`), {
+        topic,
+        groupName,
+        status: this.redis.status,
+      });
+      throw new Error(`Redis client not ready (status: ${this.redis.status})`);
     }
     
     try {
