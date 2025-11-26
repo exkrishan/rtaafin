@@ -734,7 +734,7 @@ export class RedisStreamsAdapter implements PubSubAdapter {
             'COUNT',
             10, // Read up to 10 messages at a time for efficiency
             'BLOCK',
-            1000, // Block for 1 second
+            500, // Block for 500ms (reduced from 1000ms for faster response)
             'STREAMS',
             topic,
             readPosition

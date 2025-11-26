@@ -157,6 +157,76 @@ export default function AgentAssistPanelV2({
         setHealthStatus(connected ? 'healthy' : 'error');
         onConnectionStateChangeRef.current?.(connected, connected ? EventSource.OPEN : EventSource.CLOSED);
       },
+      // CRITICAL FIX: Add onIntentUpdate callback to receive KB suggestions via the same SSE connection
+      onIntentUpdate: (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          const eventCallId = data.callId || data.interaction_id || data.interactionId;
+          
+          // Check callId match before processing
+          const callIdMatches = !eventCallId || eventCallId === interactionId;
+          
+          if (!callIdMatches) {
+            console.warn('[AgentAssistPanel] ⚠️ Intent update callId mismatch - skipping', {
+              eventCallId,
+              expectedCallId: interactionId,
+              intent: data.intent,
+              articlesCount: data.articles?.length || 0,
+            });
+            return;
+          }
+          
+          console.log('[AgentAssistPanel] 📥 Received intent_update event (via hook)', {
+            eventCallId,
+            expectedCallId: interactionId,
+            matches: callIdMatches,
+            intent: data.intent,
+            confidence: data.confidence,
+            articlesCount: data.articles?.length || 0,
+            timestamp: new Date().toISOString(),
+          });
+          
+          if (callIdMatches && data.articles && Array.isArray(data.articles)) {
+            // Attach intent information to articles
+            const articlesWithIntent = data.articles.map((article: KBArticle) => ({
+              ...article,
+              intent: data.intent || article.intent, // Use intent from event or article
+              intentConfidence: data.confidence || article.intentConfidence, // Use confidence from event or article
+            }));
+            
+            setKbArticles(prev => {
+              const existingIds = new Set(prev.map(a => a.id));
+              const newArticles = articlesWithIntent
+                .filter((a: KBArticle) => !existingIds.has(a.id))
+                .map((a: KBArticle) => ({
+                  ...a,
+                  timestamp: Date.now(), // Add timestamp for sorting
+                }));
+              // Sort by timestamp (newest first), then merge with existing
+              const allArticles = [...newArticles, ...prev];
+              return allArticles.sort((a, b) => {
+                const aTime = (a as any).timestamp || 0;
+                const bTime = (b as any).timestamp || 0;
+                return bTime - aTime; // Newest first
+              });
+            });
+            
+            articlesWithIntent.forEach((article: KBArticle) => {
+              emitTelemetryRef.current?.('kb_suggestion_shown', {
+                interaction_id: interactionId,
+                article_id: article.id,
+                confidence: article.confidence || article.relevance || 0,
+                intent: article.intent,
+                intentConfidence: article.intentConfidence,
+                rank: 0,
+                latency_ms: 1500,
+              });
+            });
+          }
+        } catch (err) {
+          console.error('[AgentAssistPanel] Failed to parse intent_update event (via hook)', err);
+        }
+      },
       autoReconnect: true,
     }
   );
@@ -413,8 +483,8 @@ export default function AgentAssistPanelV2({
       }
     };
 
-    // CTO FIX: transcript_line events are now handled by useRealtimeTranscript hook above
-    // We only listen for call_end and intent_update events here
+    // CTO FIX: transcript_line and intent_update events are now handled by useRealtimeTranscript hook above
+    // We only listen for call_end events here
 
     // Handle call_end event - trigger disposition generation
     eventSource.addEventListener('call_end', async (event) => {
@@ -497,79 +567,11 @@ export default function AgentAssistPanelV2({
       }
     });
 
-    eventSource.addEventListener('intent_update', (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        const eventCallId = data.callId || data.interaction_id || data.interactionId;
-        
-        // CRITICAL FIX: Check callId match before processing (same as transcript_line)
-        const callIdMatches = !eventCallId || eventCallId === interactionId;
-        
-        if (!callIdMatches) {
-          console.warn('[AgentAssistPanel] ⚠️ Intent update callId mismatch - skipping', {
-            eventCallId,
-            expectedCallId: interactionId,
-            intent: data.intent,
-            articlesCount: data.articles?.length || 0,
-            suggestion: 'Check if UI is connected with the correct callId. Update interactionId prop or wait for auto-discovery.',
-          });
-          return;
-        }
-        
-        console.log('[AgentAssistPanel] 📥 Received intent_update event', {
-          eventCallId,
-          expectedCallId: interactionId,
-          matches: callIdMatches,
-          intent: data.intent,
-          confidence: data.confidence,
-          articlesCount: data.articles?.length || 0,
-          timestamp: new Date().toISOString(),
-        });
-        
-        if (callIdMatches && data.articles && Array.isArray(data.articles)) {
-          // Attach intent information to articles
-          const articlesWithIntent = data.articles.map((article: KBArticle) => ({
-            ...article,
-            intent: data.intent || article.intent, // Use intent from event or article
-            intentConfidence: data.confidence || article.intentConfidence, // Use confidence from event or article
-          }));
-          
-          setKbArticles(prev => {
-            const existingIds = new Set(prev.map(a => a.id));
-            const newArticles = articlesWithIntent
-              .filter((a: KBArticle) => !existingIds.has(a.id))
-              .map((a: KBArticle) => ({
-                ...a,
-                timestamp: Date.now(), // Add timestamp for sorting
-              }));
-            // Sort by timestamp (newest first), then merge with existing
-            const allArticles = [...newArticles, ...prev];
-            return allArticles.sort((a, b) => {
-              const aTime = (a as any).timestamp || 0;
-              const bTime = (b as any).timestamp || 0;
-              return bTime - aTime; // Newest first
-            });
-          });
-          
-          articlesWithIntent.forEach((article: KBArticle) => {
-            emitTelemetryRef.current?.('kb_suggestion_shown', {
-              interaction_id: interactionId,
-              article_id: article.id,
-              confidence: article.confidence || article.relevance || 0,
-              intent: article.intent,
-              intentConfidence: article.intentConfidence,
-              rank: 0,
-              latency_ms: 1500,
-            });
-          });
-        }
-      } catch (err) {
-        console.error('[AgentAssistPanel] Failed to parse intent_update', err);
-      }
-    });
+    // CRITICAL FIX: intent_update events are now handled by useRealtimeTranscript hook's onIntentUpdate callback
+    // No need for separate EventSource listener - this reduces to a single SSE connection
 
     return () => {
-      console.log('[AgentAssistPanel] Closing call_end/intent_update SSE connection', { 
+      console.log('[AgentAssistPanel] Closing call_end SSE connection', { 
         interactionId,
         readyState: eventSource.readyState,
         timestamp: new Date().toISOString()

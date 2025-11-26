@@ -143,9 +143,9 @@ export function useRealtimeTranscript(
       const eventSource = new EventSource(url);
       eventSourceRef.current = eventSource;
 
-      // CRITICAL FIX: Increased timeout for Render.com free tier (takes 50s+ to wake up from sleep)
-      // Connection timeout: if onopen doesn't fire within 60 seconds, consider it failed
-      const connectionTimeoutMs = 60000; // 60 seconds to handle Render.com 50s+ wake-up delay
+      // CRITICAL FIX: Reduced timeout for always-awake services (paid plans)
+      // Connection timeout: if onopen doesn't fire within 10 seconds, consider it failed
+      const connectionTimeoutMs = 10000; // 10 seconds (reduced from 60s for always-awake services)
       connectionTimeoutRef.current = setTimeout(() => {
         if (eventSource.readyState !== EventSource.OPEN) {
           console.warn(`[useRealtimeTranscript] ⚠️ Connection timeout (${connectionTimeoutMs / 1000}s)`, {
@@ -482,9 +482,9 @@ export function useRealtimeTranscript(
         }
       };
       
-      // Poll immediately, then every 2 seconds
+      // Poll immediately, then every 1 second (reduced from 2s for faster updates)
       poll();
-      pollIntervalRef.current = setInterval(poll, 2000);
+      pollIntervalRef.current = setInterval(poll, 1000);
     };
 
     // Initial connection

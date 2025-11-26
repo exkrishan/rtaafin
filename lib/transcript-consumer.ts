@@ -58,6 +58,10 @@ class TranscriptConsumer {
   private discoveryFailureCount: number = 0;
   private lastDiscoveryFailureTime: number = 0;
   private readonly DISCOVERY_BACKOFF_MS = 30000; // 30 seconds backoff after failures
+  
+  // CRITICAL FIX: Throttle manual discovery triggers to prevent too-frequent calls
+  private lastManualDiscoveryTime: number = 0;
+  private readonly MIN_MANUAL_DISCOVERY_INTERVAL_MS = 2000; // 2 seconds minimum between manual triggers
 
   constructor() {
     this.pubsub = createPubSubAdapterFromEnv();
@@ -539,13 +543,13 @@ class TranscriptConsumer {
         await this.discoverAndSubscribeToNewStreams();
         await this.cleanupEndedCallSubscriptions();
         
-        // Success - reset failure count and use normal interval (5 seconds)
+        // Success - reset failure count and use normal interval (1 second for faster discovery)
         this.discoveryFailureCount = 0;
         
         if (this.discoveryInterval) {
           clearInterval(this.discoveryInterval);
         }
-        this.discoveryInterval = setTimeout(runDiscovery, 5000);
+        this.discoveryInterval = setTimeout(runDiscovery, 1000);
       } catch (error: any) {
         // Failure - increment failure count and use longer interval (30 seconds) to reduce spam
         this.discoveryFailureCount++;
@@ -558,8 +562,8 @@ class TranscriptConsumer {
       }
     };
     
-    // Start with normal interval
-    this.discoveryInterval = setTimeout(runDiscovery, 5000);
+    // Start with normal interval (1 second for faster discovery)
+    this.discoveryInterval = setTimeout(runDiscovery, 1000);
 
     console.info('[TranscriptConsumer] Stream discovery started (auto-subscribe mode)');
   }
@@ -1038,10 +1042,25 @@ export function getTranscriptConsumerStatus() {
 
 /**
  * Trigger stream discovery manually (for health checks and manual triggers)
+ * CRITICAL FIX: Added throttle guard to prevent too-frequent calls
  */
 export async function triggerStreamDiscovery(): Promise<void> {
   const consumer = getTranscriptConsumer();
   if (consumer['isRunning']) {
+    const now = Date.now();
+    const lastTrigger = consumer['lastManualDiscoveryTime'] || 0;
+    const timeSinceLastTrigger = now - lastTrigger;
+    
+    // Throttle: Don't trigger more than once every 2 seconds
+    if (timeSinceLastTrigger < consumer['MIN_MANUAL_DISCOVERY_INTERVAL_MS']) {
+      console.debug('[TranscriptConsumer] Discovery throttled (too soon after last trigger)', {
+        timeSinceLastTrigger: `${timeSinceLastTrigger}ms`,
+        minInterval: `${consumer['MIN_MANUAL_DISCOVERY_INTERVAL_MS']}ms`,
+      });
+      return;
+    }
+    
+    consumer['lastManualDiscoveryTime'] = now;
     await consumer['discoverAndSubscribeToNewStreams']();
   } else {
     console.warn('[TranscriptConsumer] Consumer not running, cannot trigger discovery');
