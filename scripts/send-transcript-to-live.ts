@@ -88,88 +88,88 @@ async function sendTranscriptChunk(
 ): Promise<boolean> {
   const url = `${frontendUrl}/api/calls/ingest-transcript`;
   
-  try {
-    // Import undici - we need to use undici.request() directly because
-    // fetch() doesn't properly respect the dispatcher option in Node.js 20+
-    const undici = await import('undici');
+  // Use https module directly - avoids undici File API compatibility issues
+  // This is the most reliable approach for Node.js
+  return new Promise<boolean>((resolve) => {
+    const https = require('https');
+    const { URL } = require('url');
     
-    // Create dispatcher that allows self-signed certificates (demo only)
-    // This is our "special pass" to bypass TLS certificate validation
-    const dispatcher = new undici.Agent({
-      connect: {
-        rejectUnauthorized: false, // ⚠️ Demo only - disables cert validation
-      },
+    const urlObj = new URL(url);
+    const bodyString = JSON.stringify({
+      callId,
+      seq,
+      ts: new Date().toISOString(),
+      text,
     });
     
-    // Add timeout using AbortController
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
-    
-    // Use undici.request() instead of fetch() - this is the "VIP door" that accepts our pass
-    // fetch() ignores the dispatcher, but undici.request() respects it
-    const response = await undici.request(url, {
+    const options = {
+      hostname: urlObj.hostname,
+      port: urlObj.port || 443,
+      path: urlObj.pathname + urlObj.search,
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'x-tenant-id': tenantId,
+        'Content-Length': Buffer.byteLength(bodyString),
       },
-      body: JSON.stringify({
-        callId,
-        seq,
-        ts: new Date().toISOString(),
-        text,
+      // Create agent that allows self-signed certificates (demo only)
+      // This is our "special pass" to bypass TLS certificate validation
+      agent: new https.Agent({
+        rejectUnauthorized: false, // ⚠️ Demo only - disables cert validation
       }),
-      dispatcher, // Show our special pass here
-      signal: controller.signal,
+    };
+    
+    const req = https.request(options, (res: any) => {
+      let responseData = '';
+      
+      res.on('data', (chunk: Buffer) => {
+        responseData += chunk.toString();
+      });
+      
+      res.on('end', () => {
+        if (res.statusCode !== 200) {
+          let errorData;
+          try {
+            errorData = JSON.parse(responseData);
+          } catch {
+            errorData = { error: responseData || `HTTP ${res.statusCode}` };
+          }
+          console.error(`❌ Failed to send transcript chunk ${seq} (HTTP ${res.statusCode}):`, errorData.error || res.statusMessage);
+          resolve(false);
+          return;
+        }
+        
+        try {
+          const data = JSON.parse(responseData);
+          console.log(`✅ Sent transcript chunk ${seq}`, {
+            text: text.substring(0, 50) + '...',
+            intent: data.intent,
+            kbArticles: data.articles?.length || 0,
+          });
+          resolve(true);
+        } catch (parseError: any) {
+          console.error(`❌ Failed to parse response for chunk ${seq}:`, parseError.message);
+          resolve(false);
+        }
+      });
     });
     
-    clearTimeout(timeoutId);
-
-    // undici.request() uses statusCode instead of status
-    if (response.statusCode !== 200) {
-      const errorText = await response.body.text();
-      let errorData;
-      try {
-        errorData = JSON.parse(errorText);
-      } catch {
-        errorData = { error: errorText || `HTTP ${response.statusCode}` };
-      }
-      console.error(`❌ Failed to send transcript chunk ${seq} (HTTP ${response.statusCode}):`, errorData.error || response.statusMessage);
-      return false;
-    }
-
-    // undici.request() uses response.body.json() instead of response.json()
-    const data = await response.body.json();
-    console.log(`✅ Sent transcript chunk ${seq}`, {
-      text: text.substring(0, 50) + '...',
-      intent: data.intent,
-      kbArticles: data.articles?.length || 0,
+    req.on('error', (error: any) => {
+      console.error(`❌ Request error for chunk ${seq}:`, error.message);
+      resolve(false);
     });
-
-    return true;
-  } catch (error: any) {
-    // More detailed error information
-    const errorDetails: string[] = [];
-    if (error.code) errorDetails.push(`Code: ${error.code}`);
-    if (error.cause) errorDetails.push(`Cause: ${error.cause.message || error.cause}`);
-    if (error.message) errorDetails.push(`Message: ${error.message}`);
-    if (error.name === 'AbortError') {
-      errorDetails.push('Request timed out after 30 seconds');
-    }
     
-    console.error(`❌ Error sending transcript chunk ${seq} to ${url}:`);
-    console.error(`   ${errorDetails.length > 0 ? errorDetails.join(', ') : error.message || 'Unknown error'}`);
+    // Set timeout (30 seconds)
+    req.setTimeout(30000, () => {
+      req.destroy();
+      console.error(`❌ Request timeout for chunk ${seq}`);
+      resolve(false);
+    });
     
-    // Check if it's a network error
-    if (error.message?.includes('fetch failed') || error.code === 'ENOTFOUND' || error.code === 'ECONNREFUSED' || error.name === 'AbortError') {
-      console.error(`   💡 Tip: The frontend might be sleeping (Render free tier). Try:`);
-      console.error(`      1. Open ${frontendUrl}/live in a browser first to wake it up`);
-      console.error(`      2. Wait 10-20 seconds for the service to fully start`);
-      console.error(`      3. Run this script again`);
-    }
-    
-    return false;
-  }
+    // Send the request
+    req.write(bodyString);
+    req.end();
+  });
 }
 
 async function sleep(ms: number): Promise<void> {
