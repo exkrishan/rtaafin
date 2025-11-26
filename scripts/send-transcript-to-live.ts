@@ -89,9 +89,25 @@ async function sendTranscriptChunk(
   const url = `${frontendUrl}/api/calls/ingest-transcript`;
   
   try {
-    // Node.js 20+ uses undici for fetch, need to use undici.Agent with dispatcher
-    // This handles TLS certificate validation issues (self-signed certs)
-    let fetchOptions: any = {
+    // Import undici - we need to use undici.request() directly because
+    // fetch() doesn't properly respect the dispatcher option in Node.js 20+
+    const undici = await import('undici');
+    
+    // Create dispatcher that allows self-signed certificates (demo only)
+    // This is our "special pass" to bypass TLS certificate validation
+    const dispatcher = new undici.Agent({
+      connect: {
+        rejectUnauthorized: false, // ⚠️ Demo only - disables cert validation
+      },
+    });
+    
+    // Add timeout using AbortController
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+    
+    // Use undici.request() instead of fetch() - this is the "VIP door" that accepts our pass
+    // fetch() ignores the dispatcher, but undici.request() respects it
+    const response = await undici.request(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -103,51 +119,27 @@ async function sendTranscriptChunk(
         ts: new Date().toISOString(),
         text,
       }),
-    };
-    
-    // Add timeout using AbortController
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
-    fetchOptions.signal = controller.signal;
-    
-    // Try to use undici dispatcher (Node.js 20+ built-in fetch)
-    try {
-      const undici = await import('undici');
-      if (undici && undici.Agent) {
-        const dispatcher = new undici.Agent({
-          connect: {
-            rejectUnauthorized: false, // Allow self-signed certificates (for testing/demo)
-          },
-        });
-        fetchOptions.dispatcher = dispatcher;
-      }
-    } catch (undiciErr) {
-      // If undici import fails, try https.Agent fallback
-      const https = await import('https');
-      const agent = new https.Agent({
-        rejectUnauthorized: false,
-        keepAlive: false,
-      });
-      fetchOptions.agent = agent;
-    }
-    
-    const response = await fetch(url, fetchOptions);
+      dispatcher, // Show our special pass here
+      signal: controller.signal,
+    });
     
     clearTimeout(timeoutId);
 
-    if (!response.ok) {
-      const errorText = await response.text().catch(() => 'Unable to read error response');
+    // undici.request() uses statusCode instead of status
+    if (response.statusCode !== 200) {
+      const errorText = await response.body.text();
       let errorData;
       try {
         errorData = JSON.parse(errorText);
       } catch {
-        errorData = { error: errorText || response.statusText };
+        errorData = { error: errorText || `HTTP ${response.statusCode}` };
       }
-      console.error(`❌ Failed to send transcript chunk ${seq} (HTTP ${response.status}):`, errorData.error || response.statusText);
+      console.error(`❌ Failed to send transcript chunk ${seq} (HTTP ${response.statusCode}):`, errorData.error || response.statusMessage);
       return false;
     }
 
-    const data = await response.json();
+    // undici.request() uses response.body.json() instead of response.json()
+    const data = await response.body.json();
     console.log(`✅ Sent transcript chunk ${seq}`, {
       text: text.substring(0, 50) + '...',
       intent: data.intent,
