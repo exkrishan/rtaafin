@@ -282,10 +282,12 @@ async function main() {
   console.log(`Frontend URL: ${FRONTEND_URL}/live`);
   console.log('\n✅ Transcript sent successfully!');
   console.log('\n📝 Next Steps:');
-  console.log(`1. Open ${FRONTEND_URL}/live in your browser`);
-  console.log(`2. The call should auto-discover (call ID: ${callId})`);
-  console.log('3. Transcripts should appear in the right panel');
-  console.log('4. KB articles and intent should be detected automatically\n');
+  console.log(`1. Open this URL in your browser (callId pre-filled):`);
+  console.log(`   ${FRONTEND_URL}/live?callId=${callId}`);
+  console.log(`\n   Or manually add ?callId=${callId} to the URL`);
+  console.log('\n2. Transcripts should appear in the right panel');
+  console.log('3. KB articles and intent should be detected automatically');
+  console.log('\n💡 Note: If auto-discovery doesn\'t work, use the URL with callId parameter above\n');
 
   // Cleanup
   if (redis) {
