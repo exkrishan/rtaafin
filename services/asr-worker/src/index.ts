@@ -22,21 +22,20 @@ require('dotenv').config({ path: require('path').join(__dirname, '../../../.env.
 
 const PORT = parseInt(process.env.PORT || '3001', 10);
 
-// Deepgram-optimized chunk sizing configuration
-// Deepgram recommends 20-250ms chunks for optimal real-time performance
-// CRITICAL: Minimum chunk size for reliable transcription is 100ms (not 20ms)
-// 20ms is the absolute minimum Deepgram accepts, but 100ms+ is needed for accuracy
-// Initial chunk: 200ms minimum for reliable transcription start
-const INITIAL_CHUNK_DURATION_MS = parseInt(process.env.INITIAL_CHUNK_DURATION_MS || '200', 10);
-// Continuous chunks: 100ms for real-time streaming
-const CONTINUOUS_CHUNK_DURATION_MS = parseInt(process.env.CONTINUOUS_CHUNK_DURATION_MS || '100', 10);
-// Maximum chunk size: 250ms per Deepgram recommendation
-const MAX_CHUNK_DURATION_MS = parseInt(process.env.MAX_CHUNK_DURATION_MS || '250', 10);
-// Minimum audio duration before processing (reduced from 500ms to 200ms)
-const MIN_AUDIO_DURATION_MS = parseInt(process.env.MIN_AUDIO_DURATION_MS || '200', 10);
-// CRITICAL: Minimum chunk size for continuous streaming (increased from 20ms to 100ms)
-// Deepgram needs at least 100ms of contiguous audio for reliable transcription
-const ASR_CHUNK_MIN_MS = parseInt(process.env.ASR_CHUNK_MIN_MS || '100', 10);
+// Real-time chunk sizing configuration - optimized for minimal latency
+// CRITICAL: Reduced all buffers to 20ms minimum for real-time transcription
+// This enables transcripts to be generated as soon as audio chunks arrive from websocket
+// Initial chunk: 20ms minimum (reduced from 200ms for real-time processing)
+const INITIAL_CHUNK_DURATION_MS = parseInt(process.env.INITIAL_CHUNK_DURATION_MS || '20', 10);
+// Continuous chunks: 20ms for real-time streaming (reduced from 100ms)
+const CONTINUOUS_CHUNK_DURATION_MS = parseInt(process.env.CONTINUOUS_CHUNK_DURATION_MS || '20', 10);
+// Maximum chunk size: 100ms (reduced from 250ms for faster processing)
+const MAX_CHUNK_DURATION_MS = parseInt(process.env.MAX_CHUNK_DURATION_MS || '100', 10);
+// Minimum audio duration before processing: 20ms (reduced from 200ms for real-time)
+const MIN_AUDIO_DURATION_MS = parseInt(process.env.MIN_AUDIO_DURATION_MS || '20', 10);
+// CRITICAL: Minimum chunk size for continuous streaming: 20ms (reduced from 100ms)
+// This allows immediate processing of audio chunks as they arrive
+const ASR_CHUNK_MIN_MS = parseInt(process.env.ASR_CHUNK_MIN_MS || '20', 10);
 
 // Legacy buffer window (kept for backward compatibility, but not used for Deepgram)
 const BUFFER_WINDOW_MS = parseInt(process.env.BUFFER_WINDOW_MS || '1000', 10);
@@ -934,11 +933,11 @@ class AsrWorker {
       }
       
         if (!buffer.hasSentInitialChunk) {
-        // First chunk: Wait for initial chunk duration (200ms, reduced from 500ms)
-        // CRITICAL: Also check time since buffer creation to prevent long delays
-        // If audio arrives slowly, don't wait forever - send after 1 second max
+        // First chunk: Real-time processing with 20ms minimum (reduced from 200ms)
+        // CRITICAL: Reduced max wait to 200ms for real-time transcription
+        // This enables transcripts to be generated as soon as audio chunks arrive
         const timeSinceBufferCreation = Date.now() - buffer.lastProcessed;
-        const MAX_INITIAL_WAIT_MS = 1000; // Send first chunk within 1 second max
+        const MAX_INITIAL_WAIT_MS = 200; // Send first chunk within 200ms max (reduced from 1000ms)
         const hasEnoughAudio = totalAudioDurationMs >= INITIAL_CHUNK_DURATION_MS;
         const hasWaitedTooLong = timeSinceBufferCreation >= MAX_INITIAL_WAIT_MS;
         
@@ -987,7 +986,7 @@ class AsrWorker {
           chunksCount: buffer.chunks.length,
           totalAudioDurationMs: totalAudioDurationMs.toFixed(0),
           timeSinceLastSend: timeSinceLastSend,
-          note: 'Timer checks every 500ms and sends when needed',
+          note: 'Timer checks every 100ms and sends when needed for real-time transcription',
         });
       }
     } catch (error: any) {
@@ -1135,15 +1134,15 @@ class AsrWorker {
       clearInterval(existingTimer);
       console.debug(`[ASRWorker] 🔄 Restarting timer for ${interactionId}`);
     } else {
-      console.info(`[ASRWorker] 🚀 Starting timer for ${interactionId} (checks every 500ms)`, {
+      console.info(`[ASRWorker] 🚀 Starting timer for ${interactionId} (checks every 100ms)`, {
         interaction_id: interactionId,
         provider: ASR_PROVIDER,
-        note: 'Timer will check every 500ms if audio should be sent to ASR provider',
+        note: 'Timer will check every 100ms if audio should be sent to ASR provider for real-time transcription',
       });
     }
 
-    // Start new timer: check every 500ms (reduced frequency to match new send frequency)
-    const PROCESSING_TIMER_INTERVAL_MS = 500; // Check every 500ms (increased from 200ms to reduce overhead)
+    // Start new timer: check every 100ms for real-time processing
+    const PROCESSING_TIMER_INTERVAL_MS = 100; // Check every 100ms (reduced from 500ms for real-time)
     const timer = setInterval(async () => {
       const buffer = this.buffers.get(interactionId);
       if (!buffer) {
@@ -1208,22 +1207,18 @@ class AsrWorker {
 
       const timeSinceLastContinuousSend = Date.now() - buffer.lastContinuousSendTime;
       
-      // Provider-specific thresholds
-      // TESTING: Changed from 2000ms to 500ms to test continuous streaming
-      // Hypothesis: ElevenLabs may accumulate audio internally, so we can send smaller chunks continuously
-      // Previous: "transcript processing begins after the first 2 seconds of audio are sent"
-      // Testing: Send 500ms chunks continuously and see if ElevenLabs accumulates internally
+      // Provider-specific thresholds - optimized for real-time processing
+      // CRITICAL: Reduced all thresholds to 20ms minimum for real-time transcription
+      // This enables transcripts to be generated as soon as audio chunks arrive
       const isElevenLabs = ASR_PROVIDER === 'elevenlabs';
-      // TESTING: Changed from 2000ms to 500ms to test continuous streaming
-      // Previous: ElevenLabs requires 2000ms (2 seconds) minimum per official documentation
-      // Testing: Try 500ms to see if continuous streaming works (chunks accumulate on ElevenLabs side)
-      const MIN_CHUNK_DURATION_MS = isElevenLabs ? 500 : 250; // ElevenLabs: 500ms (TESTING), Deepgram: 250ms
-      const MAX_TIME_BETWEEN_SENDS_MS = isElevenLabs ? 2000 : 1000; // ElevenLabs: 2s (reduced from 5s), Deepgram: 1s
-      const TIMEOUT_FALLBACK_MS = isElevenLabs ? 5000 : 2000; // ElevenLabs: 5s, Deepgram: 2s
-      const TIMEOUT_FALLBACK_MIN_MS = isElevenLabs ? 500 : 150; // ElevenLabs: 500ms (TESTING), Deepgram: 150ms
+      // Real-time configuration: 20ms minimum for both providers
+      const MIN_CHUNK_DURATION_MS = 20; // Real-time: 20ms for both ElevenLabs and Deepgram
+      const MAX_TIME_BETWEEN_SENDS_MS = isElevenLabs ? 200 : 200; // Real-time: 200ms max wait (reduced from 2000ms)
+      const TIMEOUT_FALLBACK_MS = isElevenLabs ? 500 : 500; // Real-time: 500ms timeout (reduced from 5000ms)
+      const TIMEOUT_FALLBACK_MIN_MS = 20; // Real-time: 20ms minimum for both providers
       
-      // Provider-specific max chunk size: Allow larger chunks for ElevenLabs to enable accumulation
-      const MAX_CHUNK_DURATION_MS_PROVIDER = isElevenLabs ? 5000 : MAX_CHUNK_DURATION_MS; // ElevenLabs: 5000ms (allow accumulation), Deepgram: 250ms
+      // Provider-specific max chunk size: Reduced for real-time processing
+      const MAX_CHUNK_DURATION_MS_PROVIDER = MAX_CHUNK_DURATION_MS; // Use global max (100ms)
       
       const isTooLongSinceLastSend = timeSinceLastContinuousSend >= MAX_TIME_BETWEEN_SENDS_MS;
       const hasMinimumChunkSize = currentAudioDurationMs >= MIN_CHUNK_DURATION_MS;
@@ -1387,13 +1382,13 @@ class AsrWorker {
     }
 
     try {
-      // Provider-specific thresholds (must match timer settings)
+      // Provider-specific thresholds (must match timer settings) - optimized for real-time
       const isElevenLabs = ASR_PROVIDER === 'elevenlabs';
-      // CRITICAL FIX: ElevenLabs requires 2 seconds of audio before transcription starts
-      // Per ElevenLabs documentation: "Transcript processing starts after the first 2 seconds of audio are sent"
-      const MIN_INITIAL_CHUNK_DURATION_MS = isElevenLabs ? 2000 : 250; // ElevenLabs: 2000ms (required), Deepgram: 250ms
-      const MIN_CONTINUOUS_CHUNK_DURATION_MS = isElevenLabs ? 500 : 250; // ElevenLabs: 500ms (after initial), Deepgram: 250ms
-      const MAX_WAIT_MS = isElevenLabs ? 2000 : 1000; // ElevenLabs: 2s (reduced from 5s), Deepgram: 1s
+      // CRITICAL: Reduced to 20ms minimum for real-time transcription
+      // This enables immediate processing of audio chunks as they arrive
+      const MIN_INITIAL_CHUNK_DURATION_MS = 20; // Real-time: 20ms for both providers (reduced from 2000ms)
+      const MIN_CONTINUOUS_CHUNK_DURATION_MS = 20; // Real-time: 20ms for both providers (reduced from 500ms)
+      const MAX_WAIT_MS = 200; // Real-time: 200ms max wait (reduced from 2000ms)
       
       // Calculate total audio in buffer
       // CRITICAL: Correct calculation for PCM16 audio
@@ -1411,10 +1406,10 @@ class AsrWorker {
       const timeSinceBufferCreation = Date.now() - buffer.lastProcessed;
       
       // Determine required duration based on mode and provider
-      // CRITICAL: These must match the timer settings above
+      // CRITICAL: These must match the timer settings above - optimized for real-time
       let requiredDuration: number;
-      const TIMEOUT_FALLBACK_MS = isElevenLabs ? 5000 : 2000; // ElevenLabs: 5s, Deepgram: 2000ms
-      const TIMEOUT_FALLBACK_MIN_MS = isElevenLabs ? 500 : 150; // ElevenLabs: 500ms (fallback), Deepgram: 150ms
+      const TIMEOUT_FALLBACK_MS = 500; // Real-time: 500ms timeout for both providers (reduced from 5000ms)
+      const TIMEOUT_FALLBACK_MIN_MS = 20; // Real-time: 20ms minimum for both providers
       
       if (!buffer.hasSentInitialChunk) {
         // Initial chunk: Require provider-specific minimum (2000ms for ElevenLabs, 250ms for others)
@@ -1434,10 +1429,10 @@ class AsrWorker {
         const VERY_LONG_TIMEOUT_MS = isElevenLabs ? 10000 : 10000; // 10s for both
         
         if (isElevenLabs) {
-          // Continuous mode: Can use smaller chunks (500ms) after initial 2-second chunk
-          // ElevenLabs accumulates audio internally, so we can send smaller chunks continuously
+          // Continuous mode: Real-time processing with 20ms minimum chunks
+          // This enables immediate transcription as audio arrives
           if (timeSinceLastSend >= VERY_LONG_TIMEOUT_MS && totalAudioDurationMs >= MIN_CONTINUOUS_CHUNK_DURATION_MS) {
-            // Very long timeout: send if we have minimum (500ms)
+            // Very long timeout: send if we have minimum (20ms)
             requiredDuration = MIN_CONTINUOUS_CHUNK_DURATION_MS;
             console.warn(`[ASRWorker] ⚠️ Very long timeout (${timeSinceLastSend}ms): sending ${totalAudioDurationMs.toFixed(0)}ms chunk (minimum: ${MIN_CONTINUOUS_CHUNK_DURATION_MS}ms) for ElevenLabs`, {
               interaction_id: buffer.interactionId,
@@ -1445,57 +1440,57 @@ class AsrWorker {
               timeSinceLastSend,
               totalAudioDurationMs: totalAudioDurationMs.toFixed(0),
               chunksInBuffer: buffer.chunks.length,
-              note: 'Continuous mode: Using 500ms minimum after initial 2-second chunk',
+              note: 'Real-time mode: Using 20ms minimum for immediate transcription',
             });
           } else if (timeSinceLastSend >= NORMAL_TIMEOUT_MS && totalAudioDurationMs >= MIN_CONTINUOUS_CHUNK_DURATION_MS) {
-            // Normal timeout: send if we have minimum (500ms)
+            // Normal timeout: send if we have minimum (20ms)
             requiredDuration = MIN_CONTINUOUS_CHUNK_DURATION_MS;
             console.info(`[ASRWorker] ⏰ Max wait reached: sending ${totalAudioDurationMs.toFixed(0)}ms chunk after ${timeSinceLastSend}ms wait`, {
               interaction_id: buffer.interactionId,
               provider: ASR_PROVIDER,
               timeSinceLastSend,
               totalAudioDurationMs: totalAudioDurationMs.toFixed(0),
-              note: 'Continuous mode: Using 500ms minimum after initial 2-second chunk',
+              note: 'Real-time mode: Using 20ms minimum for immediate transcription',
             });
           } else {
-            // Not enough audio yet - wait for minimum (500ms)
+            // Not enough audio yet - wait for minimum (20ms)
             requiredDuration = MIN_CONTINUOUS_CHUNK_DURATION_MS;
           }
         } else {
-          // Deepgram: Can handle smaller chunks (250ms minimum)
-          // Keep existing logic for Deepgram with 200ms fallback
-          if (timeSinceLastSend >= NORMAL_TIMEOUT_MS && totalAudioDurationMs >= 200) {
-            // Normal timeout: allow 200ms to prevent deadlock when audio arrives slowly
-            requiredDuration = 200;
-            console.warn(`[ASRWorker] ⚠️ Normal timeout: sending ${totalAudioDurationMs.toFixed(0)}ms chunk (minimum: 200ms) to prevent deadlock and restore transcription after ${timeSinceLastSend}ms wait`, {
+          // Deepgram: Real-time processing with 20ms minimum chunks
+          // This enables immediate transcription as audio arrives
+          if (timeSinceLastSend >= NORMAL_TIMEOUT_MS && totalAudioDurationMs >= 20) {
+            // Normal timeout: send with 20ms minimum for real-time processing
+            requiredDuration = 20;
+            console.warn(`[ASRWorker] ⚠️ Normal timeout: sending ${totalAudioDurationMs.toFixed(0)}ms chunk (minimum: 20ms) for real-time transcription after ${timeSinceLastSend}ms wait`, {
               interaction_id: buffer.interactionId,
               provider: ASR_PROVIDER,
               timeSinceLastSend,
               totalAudioDurationMs: totalAudioDurationMs.toFixed(0),
               chunksInBuffer: buffer.chunks.length,
-              note: 'Allowing smaller chunk to prevent timer/buffer deadlock and restore transcription flow',
+              note: 'Real-time mode: Using 20ms minimum for immediate transcription',
             });
-          } else if (timeSinceLastSend >= VERY_LONG_TIMEOUT_MS && totalAudioDurationMs >= 200) {
-            // Very long timeout: allow sending with just 200ms to prevent complete stall
-            requiredDuration = 200;
-            console.warn(`[ASRWorker] ⚠️ Very long timeout: sending ${totalAudioDurationMs.toFixed(0)}ms chunk (minimum: 200ms) to prevent complete stall and restore real-time transcription after ${timeSinceLastSend}ms wait`, {
+          } else if (timeSinceLastSend >= VERY_LONG_TIMEOUT_MS && totalAudioDurationMs >= 20) {
+            // Very long timeout: send with 20ms minimum for real-time processing
+            requiredDuration = 20;
+            console.warn(`[ASRWorker] ⚠️ Very long timeout: sending ${totalAudioDurationMs.toFixed(0)}ms chunk (minimum: 20ms) for real-time transcription after ${timeSinceLastSend}ms wait`, {
               interaction_id: buffer.interactionId,
               provider: ASR_PROVIDER,
               timeSinceLastSend,
               totalAudioDurationMs: totalAudioDurationMs.toFixed(0),
               chunksInBuffer: buffer.chunks.length,
-              note: 'Allowing smaller chunk to restore real-time transcription flow',
+              note: 'Real-time mode: Using 20ms minimum for immediate transcription',
             });
           } else if (timeSinceLastSend >= TIMEOUT_FALLBACK_MS && totalAudioDurationMs >= TIMEOUT_FALLBACK_MIN_MS) {
-            // Timeout risk: send what we have (even if < minimum) to prevent timeout
+            // Timeout risk: send what we have (20ms minimum) for real-time processing
             requiredDuration = TIMEOUT_FALLBACK_MIN_MS;
-            console.warn(`[ASRWorker] ⚠️ Timeout risk: sending ${totalAudioDurationMs.toFixed(0)}ms chunk (minimum: ${TIMEOUT_FALLBACK_MIN_MS}ms) to prevent ${ASR_PROVIDER} timeout after ${timeSinceLastSend}ms wait`, {
+            console.warn(`[ASRWorker] ⚠️ Timeout risk: sending ${totalAudioDurationMs.toFixed(0)}ms chunk (minimum: ${TIMEOUT_FALLBACK_MIN_MS}ms) for real-time transcription after ${timeSinceLastSend}ms wait`, {
               interaction_id: buffer.interactionId,
               provider: ASR_PROVIDER,
               timeSinceLastSend,
               totalAudioDurationMs: totalAudioDurationMs.toFixed(0),
               chunksInBuffer: buffer.chunks.length,
-              note: 'This should be rare - chunks should accumulate to 250ms+ before this triggers',
+              note: 'Real-time mode: Using 20ms minimum for immediate transcription',
             });
           } else if (timeSinceLastSend >= MAX_WAIT_MS && totalAudioDurationMs >= MIN_CONTINUOUS_CHUNK_DURATION_MS) {
             // Normal timeout: waited max time and have minimum audio - send
@@ -1505,9 +1500,10 @@ class AsrWorker {
               provider: ASR_PROVIDER,
               timeSinceLastSend,
               totalAudioDurationMs: totalAudioDurationMs.toFixed(0),
+              note: 'Real-time mode: Using 20ms minimum for immediate transcription',
             });
           } else {
-            // Normal case: wait for provider-specific minimum
+            // Normal case: wait for 20ms minimum for real-time processing
             requiredDuration = MIN_CONTINUOUS_CHUNK_DURATION_MS;
           }
         }
