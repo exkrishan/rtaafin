@@ -128,6 +128,13 @@ export function useRealtimeTranscript(
       return;
     }
 
+    // CRITICAL FIX: Log when callId is discovered/changed to help debug reconnection
+    console.log('[useRealtimeTranscript] 🔄 CallId changed, reconnecting immediately', {
+      callId,
+      previousCallId: eventSourceRef.current ? 'had connection' : 'no connection',
+      timestamp: new Date().toISOString(),
+    });
+
     // Reset state
     shouldReconnectRef.current = true;
     reconnectAttemptsRef.current = 0;

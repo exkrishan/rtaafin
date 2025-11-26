@@ -138,7 +138,11 @@ function LivePageContent() {
                   if (prevCallId === interactionId) {
                     return prevCallId; // No change needed
                   }
-                  console.log('[Live] ✅ CallId updated - SSE will reconnect with new callId:', interactionId);
+                  console.log('[Live] ✅ CallId updated - SSE will reconnect immediately with new callId:', {
+                    previousCallId: prevCallId || '(empty)',
+                    newCallId: interactionId,
+                    note: 'useRealtimeTranscript hook will detect the change and reconnect automatically',
+                  });
                   return interactionId;
                 });
                 

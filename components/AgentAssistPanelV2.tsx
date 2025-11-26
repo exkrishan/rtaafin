@@ -379,12 +379,20 @@ export default function AgentAssistPanelV2({
   // Skip SSE if useSse is false (demo mode)
   useEffect(() => {
     if (!useSse) {
-      console.log('[AgentAssistPanel] SSE disabled (demo mode)');
+      // CRITICAL FIX: Only log "demo mode" if we have interactionId but SSE is disabled
+      // If no interactionId, we're just waiting for auto-discovery - don't log confusing message
+      if (interactionId) {
+        console.log('[AgentAssistPanel] SSE disabled (demo mode)', { interactionId });
+      } else {
+        // Don't log anything - we're just waiting for callId during auto-discovery
+        // This prevents confusing messages that make users think something is broken
+      }
       return;
     }
     
     if (!interactionId) {
-      console.log('[AgentAssistPanel] SSE not starting - no interactionId');
+      // CRITICAL FIX: Use debug level - this is expected during auto-discovery
+      console.debug('[AgentAssistPanel] SSE not starting - no interactionId (auto-discovery in progress)');
       return;
     }
 
