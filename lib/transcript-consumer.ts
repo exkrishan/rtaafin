@@ -53,6 +53,11 @@ class TranscriptConsumer {
   private deadLetterQueue: FailedTranscript[] = []; // In-memory dead-letter queue
   private maxDeadLetterSize: number = 1000; // Max failed transcripts to keep in memory
   private retryInterval: NodeJS.Timeout | null = null;
+  
+  // CRITICAL FIX: Track discovery failures for backoff
+  private discoveryFailureCount: number = 0;
+  private lastDiscoveryFailureTime: number = 0;
+  private readonly DISCOVERY_BACKOFF_MS = 30000; // 30 seconds backoff after failures
 
   constructor() {
     this.pubsub = createPubSubAdapterFromEnv();
@@ -519,9 +524,8 @@ class TranscriptConsumer {
     // Run discovery immediately
     await this.discoverAndSubscribeToNewStreams();
 
-    // Start periodic discovery (every 5 seconds for faster real-time discovery)
-    // CRITICAL FIX: Reduced from 30s to 5s to catch new transcript streams faster
-    this.discoveryInterval = setInterval(async () => {
+    // CRITICAL FIX: Use dynamic interval that backs off when Redis is down
+    const runDiscovery = async () => {
       if (!this.isRunning) {
         if (this.discoveryInterval) {
           clearInterval(this.discoveryInterval);
@@ -532,12 +536,29 @@ class TranscriptConsumer {
 
       try {
         await this.discoverAndSubscribeToNewStreams();
-        // CRITICAL FIX: Clean up subscriptions for ended calls to prevent memory leaks
         await this.cleanupEndedCallSubscriptions();
+        
+        // Success - reset failure count and use normal interval (5 seconds)
+        this.discoveryFailureCount = 0;
+        
+        if (this.discoveryInterval) {
+          clearInterval(this.discoveryInterval);
+        }
+        this.discoveryInterval = setTimeout(runDiscovery, 5000);
       } catch (error: any) {
-        console.error('[TranscriptConsumer] Stream discovery error:', error);
+        // Failure - increment failure count and use longer interval (30 seconds) to reduce spam
+        this.discoveryFailureCount++;
+        this.lastDiscoveryFailureTime = Date.now();
+        
+        if (this.discoveryInterval) {
+          clearInterval(this.discoveryInterval);
+        }
+        this.discoveryInterval = setTimeout(runDiscovery, 30000);
       }
-    }, 5000); // CRITICAL FIX: Reduced from 30000ms (30s) to 5000ms (5s) for faster discovery
+    };
+    
+    // Start with normal interval
+    this.discoveryInterval = setTimeout(runDiscovery, 5000);
 
     console.info('[TranscriptConsumer] Stream discovery started (auto-subscribe mode)');
   }
@@ -551,6 +572,13 @@ class TranscriptConsumer {
       // Get call registry to check which calls are ended
       const { getCallRegistry } = await import('@/lib/call-registry');
       const callRegistry = getCallRegistry();
+      
+      // CRITICAL FIX: Check if call registry is available before using
+      const health = await callRegistry.checkHealth();
+      if (!health.accessible) {
+        // Registry not available - skip cleanup silently
+        return;
+      }
       
       // Get all active calls (only active ones)
       const activeCalls = await callRegistry.getActiveCalls(1000); // Get up to 1000 to check all
@@ -595,7 +623,18 @@ class TranscriptConsumer {
         });
       }
     } catch (error: any) {
-      // Non-critical - log but don't fail
+      // CRITICAL FIX: Don't log connection errors as warnings
+      const isConnectionError = 
+        error.message?.includes('Connection is closed') ||
+        error.message?.includes('Redis client not initialized') ||
+        error.message?.includes('not accessible');
+      
+      if (isConnectionError) {
+        // Silently skip cleanup when Redis is unavailable
+        return;
+      }
+      
+      // Only log non-connection errors
       console.warn('[TranscriptConsumer] Cleanup error (non-critical):', {
         error: error.message || String(error),
       });
@@ -614,16 +653,42 @@ class TranscriptConsumer {
       // Access Redis client from adapter
       const redisAdapter = this.pubsub as any;
       
-      // Check if we have direct Redis access
-      if (redisAdapter.redis) {
-        const redis = redisAdapter.redis;
-        
-        // Use SCAN instead of KEYS for better performance (non-blocking)
-        let cursor = '0';
-        const streamPattern = 'transcript.*';
-        const discoveredStreams = new Set<string>();
-        let scanCount = 0;
-        
+      // CRITICAL FIX: Check if Redis is actually connected before using it
+      if (!redisAdapter.redis) {
+        // Redis not initialized - skip discovery
+        this.discoveryFailureCount++;
+        this.lastDiscoveryFailureTime = Date.now();
+        return;
+      }
+      
+      const redis = redisAdapter.redis;
+      
+      // CRITICAL FIX: Check connection status before using
+      if (redis.status !== 'ready' && redis.status !== 'connecting') {
+        // Connection is closed or in error state - skip discovery
+        this.discoveryFailureCount++;
+        this.lastDiscoveryFailureTime = Date.now();
+        return; // Skip this discovery cycle
+      }
+      
+      // CRITICAL FIX: Check if we're in backoff period
+      if (this.discoveryFailureCount > 0) {
+        const timeSinceLastFailure = Date.now() - this.lastDiscoveryFailureTime;
+        if (timeSinceLastFailure < this.DISCOVERY_BACKOFF_MS) {
+          // Still in backoff - skip discovery
+          return;
+        }
+        // Backoff expired - reset counter
+        this.discoveryFailureCount = 0;
+      }
+      
+      // Use SCAN instead of KEYS for better performance (non-blocking)
+      let cursor = '0';
+      const streamPattern = 'transcript.*';
+      const discoveredStreams = new Set<string>();
+      let scanCount = 0;
+      
+      try {
         do {
           const result = await redis.scan(
             cursor,
@@ -656,6 +721,9 @@ class TranscriptConsumer {
           }
         } while (cursor !== '0'); // Redis SCAN always returns string cursor
         
+        // Success - reset failure count
+        this.discoveryFailureCount = 0;
+        
         // Subscribe to discovered streams
         let newSubscriptions = 0;
         for (const key of discoveredStreams) {
@@ -687,23 +755,36 @@ class TranscriptConsumer {
             totalSubscriptions: this.subscriptions.size,
           });
         }
-      } else {
-        // Fallback: Manual subscription mode
-        // Components should call subscribeToInteraction() when a call starts
-        // This is expected in some configurations where Redis client is not directly accessible
-        if (this.subscriptions.size === 0) {
-          console.debug('[TranscriptConsumer] Redis client not accessible, using manual subscription mode');
-          console.debug('[TranscriptConsumer] Use POST /api/transcripts/subscribe with interactionId to subscribe');
-        }
+      } catch (scanError: any) {
+        // Redis operation failed - increment failure count
+        this.discoveryFailureCount++;
+        this.lastDiscoveryFailureTime = Date.now();
+        throw scanError; // Re-throw to be caught by outer catch
       }
     } catch (error: any) {
-      // Don't log as error - discovery is best-effort and may fail in some configurations
-      // Only log if it's a critical error
-      if (error.message && !error.message.includes('not accessible')) {
-        console.warn('[TranscriptConsumer] Stream discovery error', {
-          error: error.message || String(error),
-        });
+      // CRITICAL FIX: Don't spam errors for connection issues
+      const isConnectionError = 
+        error.message?.includes('Connection is closed') ||
+        error.message?.includes('Redis client not initialized') ||
+        error.message?.includes('not accessible');
+      
+      if (isConnectionError) {
+        // Connection errors are expected when Redis is down - log as debug/warn
+        if (this.discoveryFailureCount <= 3) {
+          // Only log first few failures, then silence
+          console.debug('[TranscriptConsumer] Stream discovery skipped (Redis unavailable)', {
+            failureCount: this.discoveryFailureCount,
+            backoff: this.discoveryFailureCount > 0 ? `${this.DISCOVERY_BACKOFF_MS / 1000}s` : 'none',
+          });
+        }
+        // Don't re-throw - just skip this discovery cycle
+        return;
       }
+      
+      // Only log non-connection errors
+      console.warn('[TranscriptConsumer] Stream discovery error', {
+        error: error.message || String(error),
+      });
     }
   }
 

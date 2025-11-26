@@ -157,12 +157,60 @@ Use specific intents: credit_card_block, credit_card_fraud, credit_card_replacem
 
       if (!response.ok) {
         const errorText = await response.text();
+        
+        // CRITICAL FIX: Parse error JSON properly to extract actual error message
+        let errorMessage = `Gemini API error: ${response.status} ${response.statusText}`;
+        let errorDetails: any = null;
+        
+        try {
+          errorDetails = JSON.parse(errorText);
+          if (errorDetails?.error?.message) {
+            errorMessage = `Gemini API error: ${errorDetails.error.message}`;
+          } else if (errorDetails?.error) {
+            errorMessage = `Gemini API error: ${JSON.stringify(errorDetails.error)}`;
+          }
+        } catch {
+          // If error text is not JSON, use it directly
+          if (errorText) {
+            errorMessage += ` - ${errorText.substring(0, 200)}`;
+          }
+        }
+        
+        // Handle specific error types
+        if (response.status === 429) {
+          console.warn('[intent] ⚠️ Gemini API rate limit exceeded - returning unknown intent', {
+            status: response.status,
+            error: errorDetails?.error?.message || errorText.substring(0, 100),
+          });
+          return { intent: 'unknown', confidence: 0 };
+        }
+        
+        if (response.status === 403) {
+          console.error('[intent] ❌ Gemini API access forbidden - check API key and quota', {
+            status: response.status,
+            error: errorDetails?.error?.message || errorText.substring(0, 100),
+          });
+          return { intent: 'unknown', confidence: 0 };
+        }
+        
+        if (response.status === 400) {
+          console.error('[intent] ❌ Gemini API bad request - check model name and prompt', {
+            status: response.status,
+            error: errorDetails?.error?.message || errorText.substring(0, 100),
+            model: actualModel,
+          });
+          return { intent: 'unknown', confidence: 0 };
+        }
+        
+        // Log other errors with parsed details
         console.error('[intent] Gemini API error:', {
           status: response.status,
           statusText: response.statusText,
-          error: errorText,
-          url: url.substring(0, 100) + '...',
+          error: errorMessage,
+          errorDetails: errorDetails?.error || errorText.substring(0, 200),
+          model: actualModel,
         });
+        
         return { intent: 'unknown', confidence: 0 };
       }
 
