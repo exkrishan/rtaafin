@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "NODE_OPTIONS='--max-old-space-size=400' next start",
+    "start": "NODE_OPTIONS='--max-old-space-size=300' next start",
     "lint": "echo \"lint skipped (temporary Phase 0 bypass)\"; exit 0",
     "format": "prettier --write \"**/*.{ts,tsx,js,json,md}\"",
     "prepare": "husky install || true",

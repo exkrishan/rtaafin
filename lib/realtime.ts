@@ -21,7 +21,8 @@ interface SseClientEntry {
 const clients = new Map<string, SseClientEntry>();
 
 // CRITICAL FIX: Limit SSE clients to prevent memory issues and OOM crashes
-const MAX_SSE_CLIENTS = 100; // Maximum number of concurrent SSE connections
+// Reduced from 100 to 50 for 512MB Render instances
+const MAX_SSE_CLIENTS = 50; // Maximum number of concurrent SSE connections
 
 // Keep-alive interval (send comment every 30s to prevent timeout)
 const HEARTBEAT_INTERVAL_MS = 30000;

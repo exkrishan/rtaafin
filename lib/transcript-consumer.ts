@@ -51,7 +51,7 @@ class TranscriptConsumer {
   private baseUrl: string;
   private nextJsApiUrl: string;
   private deadLetterQueue: FailedTranscript[] = []; // In-memory dead-letter queue
-  private maxDeadLetterSize: number = 1000; // Max failed transcripts to keep in memory
+  private maxDeadLetterSize: number = 500; // Max failed transcripts to keep in memory (reduced from 1000 for 512MB instances)
   private retryInterval: NodeJS.Timeout | null = null;
   
   // CRITICAL FIX: Track discovery failures for backoff
@@ -161,7 +161,8 @@ class TranscriptConsumer {
 
     // CRITICAL FIX: Safety limit to prevent memory issues and 502 errors
     // If we have too many subscriptions, clean up old ones first
-    const MAX_SUBSCRIPTIONS = 50; // Limit to 50 active subscriptions
+    // Reduced from 50 to 30 for 512MB Render instances
+    const MAX_SUBSCRIPTIONS = 30; // Limit to 30 active subscriptions
     if (this.subscriptions.size >= MAX_SUBSCRIPTIONS) {
       console.warn('[TranscriptConsumer] ⚠️ Subscription limit reached, cleaning up old subscriptions', {
         currentCount: this.subscriptions.size,

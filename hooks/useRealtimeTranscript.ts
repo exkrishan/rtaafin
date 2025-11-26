@@ -42,9 +42,9 @@ export function useRealtimeTranscript(
   }
 ): UseRealtimeTranscriptResult {
   // CRITICAL: Limit transcript array size to prevent memory issues (OOM crashes)
-  // 500 transcripts = ~150 KB per call, safe for 512MB instances with multiple concurrent calls
-  // Reduced from 1000 to 500 to prevent OOM crashes on Render.com Starter plan (512MB RAM)
-  const MAX_TRANSCRIPTS = 500;
+  // 300 transcripts = ~90 KB per call, safe for 512MB instances with multiple concurrent calls
+  // Reduced from 500 to 300 to prevent OOM crashes on Render.com Starter plan (512MB RAM)
+  const MAX_TRANSCRIPTS = 300;
   
   const [transcripts, setTranscripts] = useState<TranscriptUtterance[]>([]);
   const [isConnected, setIsConnected] = useState(false);
