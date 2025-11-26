@@ -86,8 +86,14 @@ async function sendTranscriptChunk(
   text: string,
   tenantId: string = 'default'
 ): Promise<boolean> {
+  const url = `${frontendUrl}/api/calls/ingest-transcript`;
+  
   try {
-    const response = await fetch(`${frontendUrl}/api/calls/ingest-transcript`, {
+    // Add timeout using AbortController
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+    
+    const response = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -99,11 +105,20 @@ async function sendTranscriptChunk(
         ts: new Date().toISOString(),
         text,
       }),
+      signal: controller.signal,
     });
+    
+    clearTimeout(timeoutId);
 
     if (!response.ok) {
-      const error = await response.json().catch(() => ({}));
-      console.error(`❌ Failed to send transcript chunk ${seq}:`, error.error || response.statusText);
+      const errorText = await response.text().catch(() => 'Unable to read error response');
+      let errorData;
+      try {
+        errorData = JSON.parse(errorText);
+      } catch {
+        errorData = { error: errorText || response.statusText };
+      }
+      console.error(`❌ Failed to send transcript chunk ${seq} (HTTP ${response.status}):`, errorData.error || response.statusText);
       return false;
     }
 
@@ -116,7 +131,26 @@ async function sendTranscriptChunk(
 
     return true;
   } catch (error: any) {
-    console.error(`❌ Error sending transcript chunk ${seq}:`, error.message);
+    // More detailed error information
+    const errorDetails: string[] = [];
+    if (error.code) errorDetails.push(`Code: ${error.code}`);
+    if (error.cause) errorDetails.push(`Cause: ${error.cause.message || error.cause}`);
+    if (error.message) errorDetails.push(`Message: ${error.message}`);
+    if (error.name === 'AbortError') {
+      errorDetails.push('Request timed out after 30 seconds');
+    }
+    
+    console.error(`❌ Error sending transcript chunk ${seq} to ${url}:`);
+    console.error(`   ${errorDetails.length > 0 ? errorDetails.join(', ') : error.message || 'Unknown error'}`);
+    
+    // Check if it's a network error
+    if (error.message?.includes('fetch failed') || error.code === 'ENOTFOUND' || error.code === 'ECONNREFUSED' || error.name === 'AbortError') {
+      console.error(`   💡 Tip: The frontend might be sleeping (Render free tier). Try:`);
+      console.error(`      1. Open ${frontendUrl}/live in a browser first to wake it up`);
+      console.error(`      2. Wait 10-20 seconds for the service to fully start`);
+      console.error(`      3. Run this script again`);
+    }
+    
     return false;
   }
 }
@@ -170,13 +204,26 @@ async function main() {
     console.log('⚠️  Continuing anyway - frontend may not auto-discover, but transcripts will still be sent\n');
   }
 
-  // Step 2: Wait a moment for auto-discovery to pick up the call
-  console.log('Step 2: Waiting for auto-discovery...');
+  // Step 2: Verify frontend is accessible
+  console.log('Step 2: Verifying frontend accessibility...');
+  try {
+    const healthCheck = await fetch(`${FRONTEND_URL}/api/health`).catch(() => null);
+    if (healthCheck && healthCheck.ok) {
+      console.log('✅ Frontend is accessible');
+    } else {
+      console.log('⚠️  Frontend health check failed, but continuing...');
+    }
+  } catch (error: any) {
+    console.log(`⚠️  Could not verify frontend health: ${error.message}`);
+    console.log('   Continuing anyway - endpoint might still work...');
+  }
+  
+  console.log('Step 3: Waiting for auto-discovery...');
   await sleep(2000); // Give frontend 2 seconds to discover the call
   console.log('✅ Ready to send transcripts\n');
 
-  // Step 3: Send transcript chunks
-  console.log('Step 3: Sending transcript chunks...\n');
+  // Step 4: Send transcript chunks
+  console.log('Step 4: Sending transcript chunks...\n');
   
   let successCount = 0;
   for (let i = 0; i < sampleTranscript.length; i++) {
@@ -195,7 +242,7 @@ async function main() {
     }
   }
 
-  // Step 4: Update last activity
+  // Step 5: Update last activity
   if (redis) {
     try {
       const key = `call:metadata:${callId}`;
