@@ -61,6 +61,16 @@ async function testWithAudioFile(filePath: string) {
     duration: `${(audio.length / (sampleRate * 2)).toFixed(2)}s`,
   });
 
+  // CRITICAL: Warn if using 8kHz (testing showed 0% transcription success)
+  if (sampleRate === 8000) {
+    console.warn(`\n⚠️  WARNING: Audio file is 8kHz`);
+    console.warn(`   Testing showed 0% transcription success at 8kHz`);
+    console.warn(`   Recommendation: Use 16kHz audio for better results`);
+    console.warn(`   ElevenLabs works best with 16kHz sample rate\n`);
+  } else if (sampleRate === 16000) {
+    console.log(`✅ Using 16kHz sample rate (optimal for ElevenLabs)\n`);
+  }
+
   await testProvider(audio, sampleRate, 'file-test');
 }
 
@@ -69,14 +79,16 @@ async function testWithGeneratedAudio() {
   console.log('🎤 Testing ElevenLabs Speech-to-Text with generated test audio');
   console.log(`${'='.repeat(80)}\n`);
 
-  const sampleRate = 8000;
-  const durationMs = 3000; // 3 seconds
+  // CRITICAL FIX: Use 16kHz instead of 8kHz (8kHz has 0% transcription success)
+  const sampleRate = 16000;
+  const durationMs = 10000; // 10 seconds (enough for testing)
   const frequency = 440; // A4 note
 
   console.log(`📊 Generating test audio:`, {
     duration: `${durationMs}ms`,
-    sampleRate: `${sampleRate} Hz`,
+    sampleRate: `${sampleRate} Hz (16kHz - optimal for ElevenLabs)`,
     frequency: `${frequency} Hz`,
+    note: 'Using 16kHz as 8kHz produces 0% transcription success',
   });
 
   const audio = generateTestAudio(durationMs, sampleRate, frequency);
@@ -95,22 +107,40 @@ async function testProvider(audio: Buffer, sampleRate: number, interactionId: st
 
   try {
     console.log('🚀 Starting transcription...\n');
+    console.log('📋 Chunking strategy:');
+    console.log('   - First chunk: 2000ms (ElevenLabs requires 2 seconds minimum)');
+    console.log('   - Subsequent chunks: 500ms (optimal for continuous streaming)');
+    console.log('');
 
-    // Split audio into chunks (simulate real-time streaming)
-    const chunkSizeMs = 250; // 250ms chunks
-    const bytesPerSample = 2; // 16-bit = 2 bytes
-    const bytesPerChunk = Math.floor((chunkSizeMs / 1000) * sampleRate * bytesPerSample);
+    // CRITICAL FIX: ElevenLabs requires 2 seconds of audio before transcription starts
+    // Per our fixes: MIN_INITIAL_CHUNK_DURATION_MS = 2000ms, MIN_CONTINUOUS_CHUNK_DURATION_MS = 500ms
+    const MIN_INITIAL_CHUNK_DURATION_MS = 2000; // ElevenLabs requirement
+    const MIN_CONTINUOUS_CHUNK_DURATION_MS = 500; // Optimal for continuous streaming
+    const bytesPerSample = 2; // 16-bit = 2 bytes per sample
+    
+    // Calculate bytes needed for initial chunk (2 seconds)
+    const bytesPerInitialChunk = Math.floor((MIN_INITIAL_CHUNK_DURATION_MS / 1000) * sampleRate * bytesPerSample);
+    // Calculate bytes needed for continuous chunks (500ms)
+    const bytesPerContinuousChunk = Math.floor((MIN_CONTINUOUS_CHUNK_DURATION_MS / 1000) * sampleRate * bytesPerSample);
 
     const transcripts: Transcript[] = [];
     let seq = 1;
+    let offset = 0;
+    let hasSentInitialChunk = false;
 
     // Process audio in chunks
-    for (let offset = 0; offset < audio.length; offset += bytesPerChunk) {
-      const chunk = audio.slice(offset, offset + bytesPerChunk);
+    while (offset < audio.length) {
+      // Determine chunk size based on whether we've sent initial chunk
+      const chunkSizeBytes = hasSentInitialChunk ? bytesPerContinuousChunk : bytesPerInitialChunk;
+      const chunkSizeMs = hasSentInitialChunk ? MIN_CONTINUOUS_CHUNK_DURATION_MS : MIN_INITIAL_CHUNK_DURATION_MS;
+      
+      // Get chunk
+      const chunk = audio.slice(offset, offset + chunkSizeBytes);
       if (chunk.length === 0) break;
 
       const durationMs = (chunk.length / bytesPerSample / sampleRate) * 1000;
-      console.log(`📤 Sending chunk ${seq} (${durationMs.toFixed(0)}ms, ${chunk.length} bytes)...`);
+      const chunkType = hasSentInitialChunk ? 'continuous' : 'initial';
+      console.log(`📤 Sending chunk ${seq} (${chunkType}, ${durationMs.toFixed(0)}ms, ${chunk.length} bytes)...`);
 
       try {
         const transcript = await provider.sendAudioChunk(chunk, {
@@ -131,12 +161,19 @@ async function testProvider(audio: Buffer, sampleRate: number, interactionId: st
           console.log(`   (empty transcript)`);
         }
 
+        // Mark initial chunk as sent
+        if (!hasSentInitialChunk) {
+          hasSentInitialChunk = true;
+          console.log(`   ✅ Initial chunk sent - ElevenLabs can now start transcription`);
+        }
+
         // Small delay between chunks to simulate real-time
         await new Promise(resolve => setTimeout(resolve, chunkSizeMs));
       } catch (error: any) {
         console.error(`❌ Error processing chunk ${seq}:`, error.message);
       }
 
+      offset += chunkSizeBytes;
       seq++;
     }
 
@@ -188,6 +225,7 @@ main().catch((error) => {
   console.error('Fatal error:', error);
   process.exit(1);
 });
+
 
 
 

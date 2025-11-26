@@ -1,234 +1,216 @@
+#!/usr/bin/env tsx
 /**
  * Diagnostic script to check transcript flow end-to-end
- * 
- * Checks:
- * 1. Transcript consumer status
- * 2. Transcript parsing in ElevenLabs provider
- * 3. callId/interactionId mapping
- * 4. SSE connection status
+ * Usage: npx tsx scripts/diagnose-transcript-flow.ts [interactionId]
  */
 
-const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
-const ASR_WORKER_URL = process.env.ASR_WORKER_URL || 'http://localhost:3001';
+const INTERACTION_ID = process.argv[2] || 'call_4a39b1a4946a1c7e0bc01a1c2fa17ced';
+const FRONTEND_URL = process.env.UI_URL || 'https://frontend-8jdd.onrender.com';
+const ASR_WORKER_URL = process.env.ASR_WORKER_URL || 'https://asr-worker.onrender.com';
+const INGEST_URL = process.env.INGEST_URL || 'https://ingestservice.onrender.com';
 
-interface DiagnosticResult {
-  check: string;
-  status: 'pass' | 'fail' | 'warning';
-  message: string;
-  details?: any;
-}
-
-async function checkTranscriptConsumerStatus(): Promise<DiagnosticResult> {
+async function checkTranscriptConsumer() {
+  console.log('\n📊 Checking Transcript Consumer Status...');
+  console.log('='.repeat(60));
+  
   try {
     const response = await fetch(`${FRONTEND_URL}/api/transcripts/status`);
-    if (!response.ok) {
-      return {
-        check: 'Transcript Consumer Status',
-        status: 'fail',
-        message: `Status endpoint returned ${response.status}`,
-      };
-    }
-    
     const data = await response.json();
+    
+    console.log('Status:', data);
     
     if (!data.isRunning) {
-      return {
-        check: 'Transcript Consumer Status',
-        status: 'fail',
-        message: 'Transcript consumer is not running',
-        details: data,
-      };
+      console.log('❌ Transcript consumer is NOT running!');
+      console.log('   This means transcripts won\'t reach the frontend.');
+      console.log('   The consumer should auto-start via instrumentation.ts');
+      console.log('   Check frontend logs for instrumentation errors.');
+      return false;
+    } else {
+      console.log('✅ Transcript consumer is running');
+      console.log(`   Subscriptions: ${data.subscriptionCount}`);
+      if (data.subscriptions && data.subscriptions.length > 0) {
+        console.log('   Active subscriptions:');
+        data.subscriptions.forEach((sub: any) => {
+          console.log(`     - ${sub.interactionId} (${sub.transcriptCount} transcripts)`);
+        });
+      }
+      return true;
     }
-    
-    return {
-      check: 'Transcript Consumer Status',
-      status: 'pass',
-      message: `Consumer is running, ${data.subscriptionCount || 0} active subscription(s)`,
-      details: data,
-    };
   } catch (error: any) {
-    return {
-      check: 'Transcript Consumer Status',
-      status: 'fail',
-      message: `Failed to connect: ${error.message}`,
-    };
+    console.error('❌ Failed to check transcript consumer:', error.message);
+    return false;
   }
 }
 
-async function checkASRWorkerHealth(): Promise<DiagnosticResult> {
+async function checkCallRegistry() {
+  console.log('\n📋 Checking Call Registry...');
+  console.log('='.repeat(60));
+  
+  try {
+    const response = await fetch(`${FRONTEND_URL}/api/calls/active?limit=10`);
+    const data = await response.json();
+    
+    console.log('Active calls:', data.count);
+    console.log('Latest call:', data.latestCall || 'none');
+    
+    if (data.calls && data.calls.length > 0) {
+      console.log('\nRegistered calls:');
+      data.calls.forEach((call: any) => {
+        console.log(`  - ${call.interactionId} (${call.status})`);
+        if (call.interactionId === INTERACTION_ID) {
+          console.log('    ✅ Your call is registered!');
+        }
+      });
+    } else {
+      console.log('⚠️  No calls registered');
+      console.log('   This could mean:');
+      console.log('   - Ingest service failed to register the call');
+      console.log('   - Call registry module not working');
+      console.log('   - Redis connection issue in ingest service');
+    }
+    
+    const isRegistered = data.calls?.some((c: any) => c.interactionId === INTERACTION_ID) || 
+                        data.latestCall === INTERACTION_ID;
+    
+    return isRegistered;
+  } catch (error: any) {
+    console.error('❌ Failed to check call registry:', error.message);
+    return false;
+  }
+}
+
+async function checkASRWorker() {
+  console.log('\n🎤 Checking ASR Worker...');
+  console.log('='.repeat(60));
+  
   try {
     const response = await fetch(`${ASR_WORKER_URL}/health`);
-    if (!response.ok) {
-      return {
-        check: 'ASR Worker Health',
-        status: 'fail',
-        message: `Health endpoint returned ${response.status}`,
-      };
+    const text = await response.text();
+    
+    if (text === 'Not Found') {
+      console.log('❌ ASR Worker health endpoint not found');
+      console.log('   URL:', ASR_WORKER_URL);
+      return false;
     }
     
-    const data = await response.json();
-    
-    return {
-      check: 'ASR Worker Health',
-      status: 'pass',
-      message: `ASR Worker is healthy, provider: ${data.provider || 'unknown'}`,
-      details: data,
-    };
+    try {
+      const data = JSON.parse(text);
+      console.log('Status:', data.status || 'unknown');
+      console.log('Provider:', data.provider || 'unknown');
+      console.log('Active buffers:', data.activeBuffers || 0);
+      console.log('Active connections:', data.activeConnections || 0);
+      
+      if (data.activeBuffers > 0) {
+        console.log('✅ ASR Worker is processing audio');
+      } else {
+        console.log('⚠️  ASR Worker has no active buffers');
+        console.log('   This could mean:');
+        console.log('   - Audio was already processed');
+        console.log('   - Audio was not received');
+        console.log('   - Call was marked as ended');
+      }
+      
+      return true;
+    } catch (parseError) {
+      console.log('⚠️  ASR Worker returned non-JSON response:', text.substring(0, 100));
+      return false;
+    }
   } catch (error: any) {
-    return {
-      check: 'ASR Worker Health',
-      status: 'fail',
-      message: `Failed to connect: ${error.message}`,
-    };
+    console.error('❌ Failed to check ASR Worker:', error.message);
+    return false;
   }
 }
 
-async function checkTranscriptParsing(): Promise<DiagnosticResult> {
-  // This is a code analysis check
-  // The issue: logs show hasTranscript: false but transcriptPreview shows text
-  // This suggests data.text exists but data.transcript doesn't
+async function checkIngestService() {
+  console.log('\n📥 Checking Ingest Service...');
+  console.log('='.repeat(60));
   
-  return {
-    check: 'Transcript Parsing Logic',
-    status: 'warning',
-    message: 'Code uses data.transcript || data.text, but logs suggest data.text is not being extracted correctly',
-    details: {
-      issue: 'Logs show transcriptPreview with text but hasTranscript: false',
-      expected: 'data.text should be extracted when data.transcript is undefined',
-      recommendation: 'Check if ElevenLabs SDK is transforming the data structure',
-    },
-  };
-}
-
-async function checkIngestTranscriptAPI(): Promise<DiagnosticResult> {
   try {
-    // Test if the API is accessible
-    const response = await fetch(`${FRONTEND_URL}/api/calls/ingest-transcript`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        callId: 'test-diagnostic',
-        seq: 1,
-        ts: new Date().toISOString(),
-        text: 'Test transcript',
-      }),
-    });
-    
-    if (!response.ok) {
-      const errorText = await response.text();
-      return {
-        check: 'Ingest Transcript API',
-        status: 'fail',
-        message: `API returned ${response.status}: ${errorText}`,
-      };
-    }
-    
+    const response = await fetch(`${INGEST_URL}/health`);
     const data = await response.json();
     
-    return {
-      check: 'Ingest Transcript API',
-      status: 'pass',
-      message: 'API is accessible and responding',
-      details: {
-        intent: data.intent,
-        articlesCount: data.articles?.length || 0,
-      },
-    };
+    console.log('Status:', data.status);
+    console.log('PubSub:', data.pubsub ? '✅ Connected' : '❌ Not connected');
+    
+    if (data.exotelMetrics) {
+      console.log('Exotel Metrics:');
+      console.log(`  Frames in: ${data.exotelMetrics.framesIn}`);
+      console.log(`  Bytes in: ${data.exotelMetrics.bytesIn}`);
+      console.log(`  Active buffers: ${data.exotelMetrics.activeBuffers}`);
+    }
+    
+    return data.status === 'healthy';
   } catch (error: any) {
-    return {
-      check: 'Ingest Transcript API',
-      status: 'fail',
-      message: `Failed to connect: ${error.message}`,
-    };
+    console.error('❌ Failed to check Ingest Service:', error.message);
+    return false;
   }
+}
+
+async function checkTranscriptsInRedis() {
+  console.log('\n🔍 Checking for Transcripts in Redis...');
+  console.log('='.repeat(60));
+  console.log('⚠️  This requires Redis access - checking via transcript consumer status');
+  console.log('   If transcript consumer is running, it should discover transcripts');
+  console.log('   Check frontend logs for:');
+  console.log('   - "[TranscriptConsumer] Auto-discovered transcript stream"');
+  console.log('   - "[TranscriptConsumer] Forwarding transcript to ingest API"');
 }
 
 async function main() {
-  console.log('🔍 Diagnosing Transcript Flow...\n');
+  console.log('🔍 Transcript Flow Diagnostic');
+  console.log('='.repeat(60));
+  console.log(`Interaction ID: ${INTERACTION_ID}`);
+  console.log(`Frontend URL: ${FRONTEND_URL}`);
+  console.log(`ASR Worker URL: ${ASR_WORKER_URL}`);
+  console.log(`Ingest URL: ${INGEST_URL}`);
   
-  const results: DiagnosticResult[] = [];
+  const results = {
+    transcriptConsumer: await checkTranscriptConsumer(),
+    callRegistry: await checkCallRegistry(),
+    asrWorker: await checkASRWorker(),
+    ingestService: await checkIngestService(),
+  };
   
-  // Check 1: Transcript Consumer Status
-  console.log('1️⃣ Checking Transcript Consumer Status...');
-  const consumerStatus = await checkTranscriptConsumerStatus();
-  results.push(consumerStatus);
-  console.log(`   ${consumerStatus.status === 'pass' ? '✅' : consumerStatus.status === 'warning' ? '⚠️' : '❌'} ${consumerStatus.message}`);
-  if (consumerStatus.details) {
-    console.log(`   Details:`, JSON.stringify(consumerStatus.details, null, 2));
-  }
-  console.log();
+  await checkTranscriptsInRedis();
   
-  // Check 2: ASR Worker Health
-  console.log('2️⃣ Checking ASR Worker Health...');
-  const asrHealth = await checkASRWorkerHealth();
-  results.push(asrHealth);
-  console.log(`   ${asrHealth.status === 'pass' ? '✅' : asrHealth.status === 'warning' ? '⚠️' : '❌'} ${asrHealth.message}`);
-  if (asrHealth.details) {
-    console.log(`   Provider: ${asrHealth.details.provider}`);
-    console.log(`   Active Buffers: ${asrHealth.details.activeBuffers || 0}`);
-  }
-  console.log();
+  console.log('\n📊 Summary');
+  console.log('='.repeat(60));
+  console.log('Transcript Consumer:', results.transcriptConsumer ? '✅ Running' : '❌ Not Running');
+  console.log('Call Registry:', results.callRegistry ? '✅ Registered' : '❌ Not Registered');
+  console.log('ASR Worker:', results.asrWorker ? '✅ Healthy' : '❌ Unhealthy');
+  console.log('Ingest Service:', results.ingestService ? '✅ Healthy' : '❌ Unhealthy');
   
-  // Check 3: Transcript Parsing
-  console.log('3️⃣ Checking Transcript Parsing Logic...');
-  const parsingCheck = await checkTranscriptParsing();
-  results.push(parsingCheck);
-  console.log(`   ${parsingCheck.status === 'pass' ? '✅' : parsingCheck.status === 'warning' ? '⚠️' : '❌'} ${parsingCheck.message}`);
-  if (parsingCheck.details) {
-    console.log(`   Issue: ${parsingCheck.details.issue}`);
-    console.log(`   Recommendation: ${parsingCheck.details.recommendation}`);
-  }
-  console.log();
+  console.log('\n💡 Recommendations:');
+  console.log('='.repeat(60));
   
-  // Check 4: Ingest Transcript API
-  console.log('4️⃣ Checking Ingest Transcript API...');
-  const apiCheck = await checkIngestTranscriptAPI();
-  results.push(apiCheck);
-  console.log(`   ${apiCheck.status === 'pass' ? '✅' : apiCheck.status === 'warning' ? '⚠️' : '❌'} ${apiCheck.message}`);
-  if (apiCheck.details) {
-    console.log(`   Intent: ${apiCheck.details.intent}`);
-    console.log(`   Articles: ${apiCheck.details.articlesCount}`);
-  }
-  console.log();
-  
-  // Summary
-  console.log('📊 Summary:');
-  const passCount = results.filter(r => r.status === 'pass').length;
-  const failCount = results.filter(r => r.status === 'fail').length;
-  const warnCount = results.filter(r => r.status === 'warning').length;
-  
-  console.log(`   ✅ Pass: ${passCount}`);
-  console.log(`   ⚠️  Warning: ${warnCount}`);
-  console.log(`   ❌ Fail: ${failCount}`);
-  console.log();
-  
-  // Recommendations
-  if (failCount > 0 || warnCount > 0) {
-    console.log('🔧 Recommendations:');
-    
-    if (consumerStatus.status === 'fail') {
-      console.log('   1. Start transcript consumer:');
-      console.log(`      curl -X POST ${FRONTEND_URL}/api/transcripts/start`);
-      console.log();
-    }
-    
-    if (consumerStatus.status === 'pass' && consumerStatus.details?.subscriptionCount === 0) {
-      console.log('   2. Subscribe to transcript stream:');
-      console.log(`      curl -X POST ${FRONTEND_URL}/api/transcripts/subscribe \\`);
-      console.log(`        -H "Content-Type: application/json" \\`);
-      console.log(`        -d '{"interactionId": "ab7cbdeac69d2a44ef890ecf164e19bh"}'`);
-      console.log();
-    }
-    
-    if (parsingCheck.status === 'warning') {
-      console.log('   3. Fix transcript parsing - check if ElevenLabs SDK transforms data structure');
-      console.log('      The code expects data.transcript but receives data.text');
-      console.log();
-    }
+  if (!results.transcriptConsumer) {
+    console.log('1. ❌ CRITICAL: Transcript consumer is not running');
+    console.log('   - Check frontend logs for instrumentation errors');
+    console.log('   - Verify REDIS_URL and PUBSUB_ADAPTER env vars are set');
+    console.log('   - Check if instrumentation.ts is being executed');
   }
   
-  process.exit(failCount > 0 ? 1 : 0);
+  if (!results.callRegistry) {
+    console.log('2. ⚠️  Call is not registered in call registry');
+    console.log('   - Check ingest service logs for registration errors');
+    console.log('   - Verify call-registry module is loaded correctly');
+    console.log('   - Check Redis connection in ingest service');
+  }
+  
+  if (!results.asrWorker) {
+    console.log('3. ⚠️  ASR Worker health check failed');
+    console.log('   - Check ASR Worker logs');
+    console.log('   - Verify ASR Worker is deployed and running');
+  }
+  
+  console.log('\n📝 Next Steps:');
+  console.log('='.repeat(60));
+  console.log('1. Check frontend logs for transcript consumer errors');
+  console.log('2. Check ASR worker logs for transcript processing');
+  console.log('3. Check ingest service logs for call registration');
+  console.log('4. Verify Redis is accessible from all services');
+  console.log(`5. Open UI: ${FRONTEND_URL}/test-agent-assist`);
+  console.log(`   Interaction ID: ${INTERACTION_ID}`);
 }
 
 main().catch(console.error);
-

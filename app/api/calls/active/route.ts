@@ -21,10 +21,10 @@ export async function GET(req: Request) {
     
     // IMPROVEMENT: Reduced timeout to 3 seconds (cache will handle most requests faster)
     // With caching, most requests should be < 100ms, so 3s timeout is generous
-    const activeCallsPromise = callRegistry.getActiveCalls(limit);
-    const timeoutPromise = new Promise<typeof activeCallsPromise>((_, reject) => 
+        const activeCallsPromise = callRegistry.getActiveCalls(limit);
+        const timeoutPromise = new Promise<typeof activeCallsPromise>((_, reject) => 
       setTimeout(() => reject(new Error('getActiveCalls timeout after 3 seconds')), 3000)
-    );
+        );
     
     let activeCalls;
     try {
@@ -66,21 +66,21 @@ export async function GET(req: Request) {
         } catch {
           // FIX: Use warn instead of error to reduce log noise (timeouts are expected with slow Redis)
           console.warn('[active-calls] ⚠️ getActiveCalls() timed out after 3 seconds', {
-            limit,
-            duration: Date.now() - requestStartTime,
-            timestamp: new Date().toISOString(),
-          });
-          // Fix 2.1: Return graceful error response (200 with error flag) instead of 503
-          return NextResponse.json({
-            ok: false,
-            error: 'Request timeout - Redis operation took too long',
-            calls: [],
-            count: 0,
-            timeout: true,
-          }, { status: 200 }); // Return 200 so frontend can parse JSON
-        }
+          limit,
+          duration: Date.now() - requestStartTime,
+          timestamp: new Date().toISOString(),
+        });
+        // Fix 2.1: Return graceful error response (200 with error flag) instead of 503
+        return NextResponse.json({
+          ok: false,
+          error: 'Request timeout - Redis operation took too long',
+          calls: [],
+          count: 0,
+          timeout: true,
+        }, { status: 200 }); // Return 200 so frontend can parse JSON
+      }
       } else {
-        throw error; // Re-throw if it's not a timeout
+      throw error; // Re-throw if it's not a timeout
       }
     }
 

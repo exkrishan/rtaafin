@@ -87,3 +87,4 @@ To verify the fix works:
 3. **Monitor logs** for auto-discovery and switching events
 4. **Consider adding UI feedback** showing "Connecting to call..." during auto-discovery
 
+

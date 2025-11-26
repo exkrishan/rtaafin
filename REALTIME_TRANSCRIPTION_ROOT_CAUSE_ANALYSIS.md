@@ -183,3 +183,4 @@ To verify the current system is working optimally:
 
 If all checkboxes pass, the system is working as designed. The 2-second delay is a fundamental limitation of ElevenLabs, not a bug in our code.
 
+

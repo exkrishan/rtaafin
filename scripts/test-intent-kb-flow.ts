@@ -6,7 +6,7 @@ const BASE_URL = 'http://localhost:3000';
 
 async function testIntentDetection() {
   console.log('\n🧪 Testing Intent Detection:\n');
-  
+
   const testText = "Customer: I need to block my credit card due to fraud";
   
   try {
@@ -41,11 +41,11 @@ async function testIntentDetection() {
 
 async function testIngestTranscript() {
   console.log('\n📝 Testing Ingest Transcript (Full Flow):\n');
-  
+
   const testCallId = `test-call-${Date.now()}`;
   const testText = "Customer: I need to block my credit card due to fraud";
   
-  try {
+    try {
     const response = await fetch(`${BASE_URL}/api/calls/ingest-transcript`, {
       method: 'POST',
       headers: { 
@@ -132,7 +132,7 @@ async function main() {
   console.log('\n' + '='.repeat(60));
   console.log('📊 Summary:');
   console.log('='.repeat(60));
-  
+
   if (intentTest?.result?.intent === 'unknown') {
     console.log('   ❌ Intent Detection: FAILING (returning "unknown")');
     console.log('   ⚠️  This is blocking KB article surfacing!');

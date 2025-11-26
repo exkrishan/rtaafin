@@ -31,3 +31,4 @@ The UI is defaulting to `test-call-123` when auto-discovery fails, causing a `ca
 - Show "Connected to [interactionId]" when connected
 - Show "No transcripts yet - waiting for audio..." during the 2-second buffering period
 
+

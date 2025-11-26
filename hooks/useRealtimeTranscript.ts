@@ -116,7 +116,7 @@ export function useRealtimeTranscript(
       eventSourceRef.current = eventSource;
       // The rest of the connection logic will be handled by the useEffect
     }
-  }, [callId, cleanup]);
+  }, [callId]); // CRITICAL FIX: Removed cleanup from dependencies to prevent infinite loop
 
   useEffect(() => {
     // Don't connect if no callId
@@ -503,7 +503,7 @@ export function useRealtimeTranscript(
       cleanup();
       lastSeqRef.current = 0; // Reset last seq
     };
-  }, [callId, autoReconnect, reconnectDelay, cleanup]); // CRITICAL: No callbacks in dependency array - use refs instead
+  }, [callId, autoReconnect, reconnectDelay]); // CRITICAL FIX: Removed cleanup from dependencies to prevent infinite render loop
 
   return {
     transcripts,
