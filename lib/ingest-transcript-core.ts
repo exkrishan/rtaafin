@@ -219,7 +219,46 @@ export async function ingestTranscriptCore(
       // Continue processing even if Supabase fails
     }
 
+    // CRITICAL FIX: Helper function to detect speaker from text patterns
+    function detectSpeaker(text: string, seq: number): 'agent' | 'customer' {
+      const lowerText = text.toLowerCase().trim();
+      
+      // Agent indicators (common agent phrases)
+      const agentPatterns = [
+        /^(hi|hello|good morning|good afternoon|good evening|thank you for calling|how may i help|how can i assist)/i,
+        /^(i can|i will|i'll|let me|i understand|i see|i'll help|i can help)/i,
+        /^(is there anything else|anything else i can|have a great day|thank you for calling|you're welcome)/i,
+        /^(please hold|one moment|let me check|i'll transfer|i'll connect)/i,
+      ];
+      
+      // Customer indicators (common customer phrases)
+      const customerPatterns = [
+        /^(i need|i want|i would like|i'm calling|i have|i noticed|i saw|i received)/i,
+        /^(my card|my account|my balance|my transaction|my statement)/i,
+        /^(can you|could you|please|help me|i need help)/i,
+        /^(there's|there is|something|someone|fraud|unauthorized|stolen|lost)/i,
+      ];
+      
+      // Check agent patterns first (more specific)
+      for (const pattern of agentPatterns) {
+        if (pattern.test(text)) {
+          return 'agent';
+        }
+      }
+      
+      // Check customer patterns
+      for (const pattern of customerPatterns) {
+        if (pattern.test(text)) {
+          return 'customer';
+        }
+      }
+      
+      // Fallback: alternate based on seq (better than always 'customer')
+      return seq % 2 === 0 ? 'customer' : 'agent';
+    }
+
     // Broadcast transcript line to real-time listeners
+    // CRITICAL FIX: Broadcast IMMEDIATELY (don't wait for intent detection)
     try {
       // Task 1.2: Enhanced logging before broadcast
       console.log('[DEBUG] Broadcasting transcript with callId:', params.callId, {
@@ -231,13 +270,16 @@ export async function ingestTranscriptCore(
         timestamp: new Date().toISOString(),
       });
       
+      // CRITICAL FIX: Use speaker detection instead of hardcoded 'customer'
+      const detectedSpeaker = detectSpeaker(params.text, params.seq);
+      
       const broadcastPayload = {
         type: 'transcript_line' as const,
         callId: params.callId,
         seq: params.seq,
         ts: params.ts,
         text: params.text,
-        speaker: 'customer', // Default until we implement speaker diarization
+        speaker: detectedSpeaker, // Use detected speaker instead of hardcoded 'customer'
       };
       
       console.info('[ingest-transcript-core] 📤 Broadcasting transcript_line', {
@@ -245,7 +287,7 @@ export async function ingestTranscriptCore(
         seq: params.seq,
         textLength: params.text.length,
         textPreview: params.text.substring(0, 50),
-        speaker: 'customer',
+        speaker: detectedSpeaker,
         timestamp: new Date().toISOString(),
         note: 'UI should be connected with this exact callId to receive this event',
       });
@@ -256,6 +298,7 @@ export async function ingestTranscriptCore(
         seq: params.seq,
         textLength: params.text.length,
         textPreview: params.text.substring(0, 50),
+        speaker: detectedSpeaker,
         timestamp: new Date().toISOString(),
       });
     } catch (broadcastErr) {
@@ -268,169 +311,31 @@ export async function ingestTranscriptCore(
       // Don't fail the request
     }
 
-    // Intent detection and KB article recommendations
-    let intent = 'unknown';
-    let confidence = 0.0;
-    let articles: KBArticle[] = [];
-
+    // CRITICAL FIX: Intent detection and KB surfacing - make it NON-BLOCKING
+    // This prevents latency from blocking transcript broadcasting
     const MIN_TEXT_LENGTH_FOR_INTENT = 10;
     const shouldDetectIntent = params.text.trim().length >= MIN_TEXT_LENGTH_FOR_INTENT;
 
-    try {
-      if (shouldDetectIntent) {
-        console.info('[ingest-transcript-core] Detecting intent for seq:', params.seq, {
-          textLength: params.text.length,
-          textPreview: params.text.substring(0, 100),
+    // Fire and forget - don't await intent detection (non-blocking)
+    if (shouldDetectIntent) {
+      detectIntentAndSurfaceKB(validatedCallId, params.text, params.seq, tenantId)
+        .catch(err => {
+          console.error('[ingest-transcript-core] Intent detection failed (non-blocking):', err);
         });
-        const intentResult = await detectIntent(params.text);
-        intent = intentResult.intent;
-        confidence = intentResult.confidence;
-      } else {
-        console.debug('[ingest-transcript-core] Skipping intent detection (text too short)', {
-          seq: params.seq,
-          textLength: params.text.length,
-          text: params.text,
-          minLength: MIN_TEXT_LENGTH_FOR_INTENT,
+    } else {
+      // Even for short text, try to surface KB articles using transcript text
+      surfaceKBFromText(validatedCallId, params.text, params.seq, tenantId)
+        .catch(err => {
+          console.error('[ingest-transcript-core] KB surfacing failed (non-blocking):', err);
         });
-      }
-
-      console.info('[ingest-transcript-core] Intent detected:', { 
-        intent, 
-        confidence,
-        wasSuccessful: intent !== 'unknown',
-      });
-
-      // Store intent in database
-      try {
-        const { error: intentError } = await (supabase as any).from('intents').insert({
-          call_id: validatedCallId,
-          seq: params.seq,
-          intent,
-          confidence,
-          created_at: new Date().toISOString(),
-        });
-
-        if (intentError) {
-          console.error('[ingest-transcript-core] Failed to store intent:', intentError);
-        } else {
-          console.info('[ingest-transcript-core] Intent stored in database');
-        }
-      } catch (intentDbErr) {
-        console.error('[ingest-transcript-core] Intent DB error:', intentDbErr);
-      }
-
-      // Fetch relevant KB articles based on intent
-      if (intent && intent !== 'unknown') {
-        try {
-          console.info('[ingest-transcript-core] Fetching KB articles for intent:', intent);
-
-          const config = await getEffectiveConfig({ tenantId });
-          const kbAdapter = await getKbAdapter(tenantId);
-          const searchTerms = expandIntentToSearchTerms(intent, params.text);
-          
-          console.info('[ingest-transcript-core] Expanded search terms:', searchTerms);
-
-          const allArticles: typeof articles = [];
-          const seenIds = new Set<string>();
-
-          // Strategy 1: Search with full intent
-          const fullIntentResults = await kbAdapter.search(intent, {
-            tenantId,
-            max: config.kb.maxArticles,
-            context: [params.text],
-          });
-          
-          for (const article of fullIntentResults) {
-            if (!seenIds.has(article.id)) {
-              allArticles.push(article);
-              seenIds.add(article.id);
-            }
-          }
-
-          // Strategy 2: Search with expanded terms
-          for (const term of searchTerms) {
-            if (term.length < 3) continue;
-            
-            const termResults = await kbAdapter.search(term, {
-              tenantId,
-              max: Math.floor(config.kb.maxArticles / searchTerms.length) || 3,
-              context: [params.text],
-            });
-
-            for (const article of termResults) {
-              if (!seenIds.has(article.id) && allArticles.length < config.kb.maxArticles) {
-                allArticles.push(article);
-                seenIds.add(article.id);
-              }
-            }
-          }
-
-          articles = allArticles.slice(0, config.kb.maxArticles);
-
-          console.info('[ingest-transcript-core] Found KB articles:', {
-            count: articles.length,
-            provider: articles[0]?.source || 'none',
-            maxArticles: config.kb.maxArticles,
-            searchTerms,
-          });
-        } catch (kbErr) {
-          console.error('[ingest-transcript-core] KB fetch error:', kbErr);
-          // Continue without articles
-        }
-      }
-
-      // Broadcast intent update to real-time listeners
-      try {
-        const intentUpdatePayload = {
-          type: 'intent_update' as const,
-          callId: validatedCallId,
-          seq: params.seq,
-          intent,
-          confidence,
-          articles,
-        };
-        
-        console.info('[ingest-transcript-core] 📤 Broadcasting intent_update', {
-          callId: validatedCallId,
-          seq: params.seq,
-          intent,
-          confidence,
-          articlesCount: articles.length,
-          timestamp: new Date().toISOString(),
-          note: 'UI should be connected with this exact callId to receive this event',
-        });
-        
-        broadcastEvent(intentUpdatePayload);
-        
-        console.info('[ingest-transcript-core] ✅ Broadcast intent_update', {
-          callId: validatedCallId,
-          seq: params.seq,
-          intent,
-          confidence,
-          articlesCount: articles.length,
-          timestamp: new Date().toISOString(),
-        });
-      } catch (broadcastErr) {
-        console.error('[ingest-transcript-core] ❌ Failed to broadcast intent_update:', {
-          error: broadcastErr,
-          callId: validatedCallId,
-          seq: params.seq,
-          timestamp: new Date().toISOString(),
-        });
-        // Don't fail the request
-      }
-    } catch (intentErr) {
-      console.error('[ingest-transcript-core] Intent detection error:', intentErr);
-      // Fallback to unknown intent
-      intent = 'unknown';
-      confidence = 0.0;
     }
 
+    // Return immediately (don't wait for intent detection)
     return {
       ok: true,
-      intent,
-      confidence,
-      articles,
+      intent: 'unknown', // Will be updated asynchronously via intent_update event
+      confidence: 0.0,
+      articles: [], // Will be updated asynchronously via intent_update event
     };
   } catch (err: any) {
     console.error('[ingest-transcript-core] Error:', err);
@@ -438,6 +343,237 @@ export async function ingestTranscriptCore(
       ok: false,
       error: err.message || String(err),
     };
+  }
+}
+
+/**
+ * CRITICAL FIX: Async function for intent detection and KB surfacing
+ * This runs in the background and doesn't block transcript broadcasting
+ */
+async function detectIntentAndSurfaceKB(
+  callId: string,
+  text: string,
+  seq: number,
+  tenantId: string
+): Promise<void> {
+  let intent = 'unknown';
+  let confidence = 0.0;
+  let articles: KBArticle[] = [];
+
+  try {
+    console.info('[ingest-transcript-core] Detecting intent for seq:', seq, {
+      textLength: text.length,
+      textPreview: text.substring(0, 100),
+    });
+    
+    const intentResult = await detectIntent(text);
+    intent = intentResult.intent;
+    confidence = intentResult.confidence;
+
+    console.info('[ingest-transcript-core] Intent detected:', { 
+      intent, 
+      confidence,
+      wasSuccessful: intent !== 'unknown',
+    });
+
+    // Store intent in database
+    try {
+      const { error: intentError } = await (supabase as any).from('intents').insert({
+        call_id: callId,
+        seq,
+        intent,
+        confidence,
+        created_at: new Date().toISOString(),
+      });
+
+      if (intentError) {
+        console.error('[ingest-transcript-core] Failed to store intent:', intentError);
+      } else {
+        console.info('[ingest-transcript-core] Intent stored in database');
+      }
+    } catch (intentDbErr) {
+      console.error('[ingest-transcript-core] Intent DB error:', intentDbErr);
+    }
+
+    // Fetch relevant KB articles based on intent
+    if (intent && intent !== 'unknown') {
+      try {
+        console.info('[ingest-transcript-core] Fetching KB articles for intent:', intent);
+
+        const config = await getEffectiveConfig({ tenantId });
+        const kbAdapter = await getKbAdapter(tenantId);
+        const searchTerms = expandIntentToSearchTerms(intent, text);
+        
+        console.info('[ingest-transcript-core] Expanded search terms:', searchTerms);
+
+        const allArticles: typeof articles = [];
+        const seenIds = new Set<string>();
+
+        // Strategy 1: Search with full intent
+        const fullIntentResults = await kbAdapter.search(intent, {
+          tenantId,
+          max: config.kb.maxArticles,
+          context: [text],
+        });
+        
+        for (const article of fullIntentResults) {
+          if (!seenIds.has(article.id)) {
+            allArticles.push(article);
+            seenIds.add(article.id);
+          }
+        }
+
+        // Strategy 2: Search with expanded terms
+        for (const term of searchTerms) {
+          if (term.length < 3) continue;
+          
+          const termResults = await kbAdapter.search(term, {
+            tenantId,
+            max: Math.floor(config.kb.maxArticles / searchTerms.length) || 3,
+            context: [text],
+          });
+
+          for (const article of termResults) {
+            if (!seenIds.has(article.id) && allArticles.length < config.kb.maxArticles) {
+              allArticles.push(article);
+              seenIds.add(article.id);
+            }
+          }
+        }
+
+        articles = allArticles.slice(0, config.kb.maxArticles);
+
+        console.info('[ingest-transcript-core] Found KB articles:', {
+          count: articles.length,
+          provider: articles[0]?.source || 'none',
+          maxArticles: config.kb.maxArticles,
+          searchTerms,
+        });
+      } catch (kbErr) {
+        console.error('[ingest-transcript-core] KB fetch error:', kbErr);
+        // Continue without articles
+      }
+    } else {
+      // CRITICAL FIX: Even if intent is unknown, try to surface KB articles using transcript text
+      await surfaceKBFromText(callId, text, seq, tenantId);
+    }
+
+    // Broadcast intent update to real-time listeners
+    try {
+      const intentUpdatePayload = {
+        type: 'intent_update' as const,
+        callId,
+        seq,
+        intent,
+        confidence,
+        articles,
+      };
+      
+      console.info('[ingest-transcript-core] 📤 Broadcasting intent_update', {
+        callId,
+        seq,
+        intent,
+        confidence,
+        articlesCount: articles.length,
+        timestamp: new Date().toISOString(),
+        note: 'UI should be connected with this exact callId to receive this event',
+      });
+      
+      broadcastEvent(intentUpdatePayload);
+      
+      console.info('[ingest-transcript-core] ✅ Broadcast intent_update', {
+        callId,
+        seq,
+        intent,
+        confidence,
+        articlesCount: articles.length,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (broadcastErr) {
+      console.error('[ingest-transcript-core] ❌ Failed to broadcast intent_update:', {
+        error: broadcastErr,
+        callId,
+        seq,
+        timestamp: new Date().toISOString(),
+      });
+    }
+  } catch (intentErr) {
+    console.error('[ingest-transcript-core] Intent detection error:', intentErr);
+    // Fallback: try to surface KB from text even if intent detection fails
+    await surfaceKBFromText(callId, text, seq, tenantId).catch(() => {
+      // Ignore errors in fallback
+    });
+  }
+}
+
+/**
+ * CRITICAL FIX: Surface KB articles even when intent is unknown
+ * Uses transcript text to search for relevant articles
+ */
+async function surfaceKBFromText(
+  callId: string,
+  text: string,
+  seq: number,
+  tenantId: string
+): Promise<void> {
+  try {
+    console.info('[ingest-transcript-core] Fetching KB articles from transcript text (intent unknown)');
+    
+    const config = await getEffectiveConfig({ tenantId });
+    const kbAdapter = await getKbAdapter(tenantId);
+    
+    // Extract keywords from transcript (top keywords by length and relevance)
+    const words = text
+      .toLowerCase()
+      .split(/\s+/)
+      .filter(word => word.length > 3) // Filter short words
+      .filter(word => !['that', 'this', 'with', 'from', 'have', 'been', 'will', 'would'].includes(word)) // Filter common words
+      .slice(0, 10); // Top 10 keywords
+    
+    if (words.length === 0) {
+      console.debug('[ingest-transcript-core] No keywords extracted from text');
+      return;
+    }
+    
+    const searchQuery = words.join(' ');
+    console.info('[ingest-transcript-core] Searching KB with keywords:', { searchQuery, keywords: words });
+    
+    const articles = await kbAdapter.search(searchQuery, {
+      tenantId,
+      max: config.kb.maxArticles,
+      context: [text],
+    });
+    
+    if (articles.length > 0) {
+      console.info('[ingest-transcript-core] Found KB articles from text search:', {
+        count: articles.length,
+        provider: articles[0]?.source || 'none',
+      });
+      
+      // Broadcast KB articles even without intent
+      const intentUpdatePayload = {
+        type: 'intent_update' as const,
+        callId,
+        seq,
+        intent: 'unknown',
+        confidence: 0,
+        articles,
+      };
+      
+      broadcastEvent(intentUpdatePayload);
+      
+      console.info('[ingest-transcript-core] ✅ Broadcast KB articles (intent unknown)', {
+        callId,
+        seq,
+        articlesCount: articles.length,
+        timestamp: new Date().toISOString(),
+      });
+    } else {
+      console.debug('[ingest-transcript-core] No KB articles found for text search');
+    }
+  } catch (err) {
+    console.error('[ingest-transcript-core] KB text search error:', err);
+    // Don't throw - this is a best-effort operation
   }
 }
 
