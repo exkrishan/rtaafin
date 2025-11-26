@@ -89,6 +89,12 @@ async function sendTranscriptChunk(
   const url = `${frontendUrl}/api/calls/ingest-transcript`;
   
   try {
+    // Import https for custom agent (handles TLS certificate issues)
+    const https = await import('https');
+    const agent = new https.Agent({
+      rejectUnauthorized: false, // Allow self-signed certificates (for testing/demo)
+    });
+    
     // Add timeout using AbortController
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
@@ -106,6 +112,8 @@ async function sendTranscriptChunk(
         text,
       }),
       signal: controller.signal,
+      // @ts-ignore - agent is valid for Node.js fetch
+      agent,
     });
     
     clearTimeout(timeoutId);
