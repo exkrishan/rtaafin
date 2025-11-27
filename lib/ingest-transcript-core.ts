@@ -640,7 +640,7 @@ async function surfaceKBFromText(
     
     if (words.length === 0) {
       console.debug('[ingest-transcript-core] No keywords extracted from text');
-      return;
+      return []; // Return empty array instead of undefined
     }
     
     const searchQuery = words.join(' ');
