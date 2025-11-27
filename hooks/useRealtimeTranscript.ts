@@ -253,6 +253,27 @@ export function useRealtimeTranscript(
       return;
     }
 
+    // CRITICAL FIX: Trigger subscription to ensure backend is listening to this call's transcripts
+    // This is required because auto-discovery is disabled in TranscriptConsumer
+    const triggerSubscription = async (id: string) => {
+      try {
+        console.log('[API-CALL] 🔔 Triggering transcript subscription', { callId: id });
+        // Don't await this to avoid blocking the UI flow
+        fetch('/api/transcripts/subscribe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ interactionId: id }),
+        }).catch(err => {
+          console.warn('[useRealtimeTranscript] Background subscription trigger failed', err);
+        });
+      } catch (err) {
+        console.error('[useRealtimeTranscript] Failed to trigger subscription', err);
+      }
+    };
+
+    // Trigger subscription immediately
+    triggerSubscription(callId);
+
     // POLLING MODE: Skip SSE and use polling only
     if (pollMode) {
       console.log('[useRealtimeTranscript] 📊 Polling mode enabled - skipping SSE', { callId });
@@ -487,6 +508,7 @@ export function useRealtimeTranscript(
 
       // Connection opened successfully
       eventSource.onopen = () => {
+        
         clearTimeout(connectionTimeoutRef.current);
         reconnectAttemptsRef.current = 0; // Reset on successful connection
         

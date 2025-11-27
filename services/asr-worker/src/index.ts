@@ -675,7 +675,7 @@ class AsrWorker {
         const responseTimeMs = Date.now() - startTime;
         
         // Log results
-        console.info(`[ASRWorker] ✅ ElevenLabs response received`, {
+        console.info(`[ASRWORKER] ✅ ElevenLabs response received`, {
           interaction_id: interactionId,
           chunks_sent: numChunks,
           audio_duration_ms: totalAudioMs.toFixed(0),
@@ -687,11 +687,11 @@ class AsrWorker {
         
         // Publish transcript if not empty
         if (transcript.text && transcript.text.trim()) {
-          await this.publishTranscript(interactionId, transcript);
+          await this.publishTranscript(interactionId, transcript, seq);
         }
         
       } catch (error: any) {
-        console.error(`[ASRWorker] ❌ Timer processing error for ${interactionId}:`, error);
+        console.error(`[ASRWORKER] ❌ Timer processing error for ${interactionId}:`, error);
         this.metrics.recordError(error.message || String(error));
       }
     }, TIMER_INTERVAL_MS);
@@ -702,19 +702,31 @@ class AsrWorker {
   /**
    * Publish transcript to the transcript ingestion topic
    */
-  private async publishTranscript(interactionId: string, transcript: any): Promise<void> {
+  private async publishTranscript(interactionId: string, transcript: any, seq: number): Promise<void> {
     try {
-      await this.pubsub.publish('transcript_ingestion', {
+      const topic = transcriptTopic(interactionId);
+      const type = (transcript.isFinal || transcript.type === 'final') ? 'final' : 'partial';
+      
+      const transcriptMsg: TranscriptMessage = {
         interaction_id: interactionId,
         tenant_id: 'default',
+        seq: seq,
+        type: type,
         text: transcript.text,
-        is_final: transcript.isFinal || transcript.type === 'final',
         confidence: transcript.confidence || 0.9,
         timestamp_ms: Date.now(),
-        provider: ASR_PROVIDER,
+      };
+
+      await this.pubsub.publish(topic, transcriptMsg);
+      
+      console.info(`[ASRWORKER] 📤 Published transcript to topic ${topic}`, {
+        interaction_id: interactionId,
+        seq: seq,
+        type: type,
+        textLength: transcript.text?.length || 0
       });
     } catch (error: any) {
-      console.error(`[ASRWorker] Error publishing transcript:`, error);
+      console.error(`[ASRWORKER] Error publishing transcript:`, error);
       this.metrics.recordError(error.message || String(error));
     }
   }
