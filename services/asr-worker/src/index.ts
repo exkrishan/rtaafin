@@ -449,8 +449,11 @@ class AsrWorker {
         };
         this.buffers.set(interactionId, buffer);
         
-        // Start 5-second timer for this interaction
-        this.startBufferProcessingTimer(interactionId);
+      // Start 5-second timer for this interaction
+      // this.startBufferProcessingTimer(interactionId);
+      
+      // Check buffer size immediately
+      // this.checkAndProcessBuffer(interactionId);
       }
 
       // Add chunk to buffer
@@ -473,6 +476,9 @@ class AsrWorker {
           total_audio_ms: totalAudioMs.toFixed(0),
         });
       }
+
+      // Check and process buffer if it exceeds threshold
+      await this.checkAndProcessBuffer(interactionId);
     } catch (error: any) {
       console.error('[ASRWorker] Error buffering audio:', error);
       this.metrics.recordError(error.message || String(error));
@@ -604,6 +610,81 @@ class AsrWorker {
    * The timer checks every 200ms if we should send audio, regardless of when chunks arrive.
    * This ensures continuous audio flow even if chunks arrive every 3 seconds.
    */
+  /**
+   * Process buffered audio if it exceeds the minimum duration
+   * This replaces the timer-based approach for lower latency
+   */
+  private async checkAndProcessBuffer(interactionId: string): Promise<void> {
+    const buffer = this.buffers.get(interactionId);
+    if (!buffer || buffer.chunks.length === 0) return;
+
+    // Calculate total audio duration
+    const totalBytes = buffer.chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+    const totalAudioMs = (totalBytes / 2 / buffer.sampleRate) * 1000;
+
+    // CRITICAL: Only send if we have enough audio (300ms)
+    // This prevents "commit_throttled" errors and 10s timeouts from ElevenLabs
+    const MIN_SEND_DURATION_MS = 300;
+
+    if (totalAudioMs < MIN_SEND_DURATION_MS) {
+      return; // Keep buffering
+    }
+
+    try {
+      // Get all buffered chunks
+      const chunksToProcess = [...buffer.chunks];
+      const numChunks = chunksToProcess.length;
+      
+      // Merge all chunks into a single buffer
+      const mergedAudio = Buffer.concat(chunksToProcess);
+      
+      // Clear the buffer (we're sending everything)
+      buffer.chunks = [];
+      buffer.timestamps = [];
+      buffer.sequences = [];
+      
+      // Create a single sequence number for this merged chunk
+      const seq = Math.floor(Date.now() / 1000);
+      
+      console.info(`[ASRWorker] 🚀 Sending buffered audio (threshold reached)`, {
+        interaction_id: interactionId,
+        chunks_found: numChunks,
+        total_audio_ms: totalAudioMs.toFixed(0),
+        threshold_ms: MIN_SEND_DURATION_MS,
+      });
+      
+      // Send to ElevenLabs and measure response time
+      const startTime = Date.now();
+      const transcript = await this.asrProvider.sendAudioChunk(mergedAudio, {
+        interactionId,
+        seq,
+        sampleRate: buffer.sampleRate,
+      });
+      const responseTimeMs = Date.now() - startTime;
+      
+      // Log results
+      console.info(`[ASRWORKER] ✅ ElevenLabs response received`, {
+        interaction_id: interactionId,
+        chunks_sent: numChunks,
+        audio_duration_ms: totalAudioMs.toFixed(0),
+        response_time_ms: responseTimeMs,
+        transcript_text: transcript.text || '(empty)',
+        transcript_type: transcript.type,
+        transcript_length: transcript.text?.length || 0,
+      });
+      
+      // CRITICAL FIX: Filter empty transcripts before publishing
+      const hasText = transcript.text && transcript.text.trim().length > 0;
+      if (hasText) {
+        await this.publishTranscript(interactionId, transcript, seq);
+      }
+      
+    } catch (error: any) {
+      console.error(`[ASRWORKER] ❌ Buffer processing error for ${interactionId}:`, error);
+      this.metrics.recordError(error.message || String(error));
+    }
+  }
+
   /**
    * Simple timer-based processing: runs every 5 seconds
    * Merges all buffered chunks and sends to ElevenLabs
