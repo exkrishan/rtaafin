@@ -196,7 +196,7 @@ Original error: ${error.message}`;
       if (rawTranscripts && rawTranscripts.length > 0) {
         // Parse and combine transcripts from Redis List
         const transcripts = rawTranscripts
-          .map((item) => {
+          .map((item: string) => {
             try {
               return JSON.parse(item);
             } catch (e) {
