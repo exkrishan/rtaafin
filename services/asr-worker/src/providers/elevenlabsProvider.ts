@@ -85,6 +85,7 @@ export class ElevenLabsProvider implements AsrProvider {
   private languageCode: string;
   private circuitBreaker?: ElevenLabsCircuitBreaker;
   private connectionHealthMonitor?: ConnectionHealthMonitor;
+  private transcriptCallback?: (transcript: Transcript, interactionId: string, seq: number) => void; // Callback for free flow mode
   private metrics: ElevenLabsMetrics = {
     connectionsCreated: 0,
     connectionsReused: 0,
@@ -754,7 +755,21 @@ export class ElevenLabsProvider implements AsrProvider {
         if (matchedResolver) {
           matchedResolver.resolver(transcript);
         } else {
-          state.transcriptQueue.push(transcript);
+          // FREE FLOW MODE: If callback is set, publish transcript immediately
+          // This handles async transcripts that arrive without a matching resolver
+          if (this.transcriptCallback) {
+            const transcriptSeq = data.seq || data.sequence || Date.now();
+            console.debug(`[ElevenLabsProvider] 🆓 Free flow mode - publishing transcript via callback`, {
+              interactionId,
+              transcriptSeq,
+              textLength: transcriptText.trim().length,
+              note: 'Transcript arrived asynchronously, publishing directly',
+            });
+            this.transcriptCallback(transcript, interactionId, transcriptSeq);
+          } else {
+            // No callback - queue for later processing
+            state.transcriptQueue.push(transcript);
+          }
         }
       } else {
         // Empty transcript - common causes and troubleshooting
@@ -1321,7 +1336,26 @@ export class ElevenLabsProvider implements AsrProvider {
       throw error;
     }
 
-    // Wait for transcript with dynamic timeout based on chunk size
+    // FREE FLOW MODE: If commitImmediately is true, use fire-and-forget pattern
+    // Don't wait for transcript response - let event handler process transcripts asynchronously
+    if (commitImmediately) {
+      console.debug(`[ElevenLabsProvider] 🆓 Fire-and-forget mode - sending audio without waiting for response`, {
+        interactionId,
+        seq,
+        audioDurationMs: durationMs.toFixed(2),
+        note: 'Transcripts will be processed asynchronously via event handlers',
+      });
+      
+      // Return immediately with empty transcript
+      // The actual transcript will be published via the transcriptCallback when it arrives
+      return Promise.resolve({
+        type: 'partial',
+        text: '',
+        isFinal: false,
+      });
+    }
+    
+    // STANDARD MODE: Wait for transcript with dynamic timeout based on chunk size
     // CRITICAL FIX: Small chunks (< 200ms) need longer timeout as they may take longer to process
     // This prevents premature timeouts for small chunks that are still being processed
     const SMALL_CHUNK_THRESHOLD_MS = 200;
@@ -1482,6 +1516,17 @@ export class ElevenLabsProvider implements AsrProvider {
       
       console.info(`[ElevenLabsProvider] Connection closed for ${interactionId}`);
     }
+  }
+
+  /**
+   * Set callback for free flow mode - transcripts will be published immediately when received
+   * @param callback - Function to call when transcripts arrive (transcript, interactionId, seq)
+   */
+  setTranscriptCallback(
+    callback: (transcript: Transcript, interactionId: string, seq: number) => void
+  ): void {
+    this.transcriptCallback = callback;
+    console.info('[ElevenLabsProvider] ✅ Transcript callback set for free flow mode');
   }
 
   /**

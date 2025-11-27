@@ -147,6 +147,18 @@ class AsrWorker {
         circuitBreaker: this.circuitBreaker,
         connectionHealthMonitor: this.connectionHealthMonitor,
       });
+      
+      // Set up transcript callback for free flow mode (ElevenLabs only)
+      // This allows transcripts to be published immediately when they arrive asynchronously
+      if (ASR_PROVIDER === 'elevenlabs' && 'setTranscriptCallback' in this.asrProvider) {
+        (this.asrProvider as any).setTranscriptCallback((transcript: any, interactionId: string, seq: number) => {
+          // Publish transcript immediately when it arrives in free flow mode
+          this.publishTranscript(interactionId, transcript, seq).catch((err: any) => {
+            console.error(`[ASRWorker] Error publishing transcript from callback:`, err);
+          });
+        });
+        console.info('[ASRWorker] ✅ Transcript callback set for free flow mode');
+      }
     } catch (error: any) {
       console.error('[ASRWorker] ❌ Failed to create ASR provider:', error.message);
       console.error('[ASRWorker] Provider type:', ASR_PROVIDER);
@@ -755,32 +767,28 @@ class AsrWorker {
         console.debug('[ASRWorker] Audio dump failed (non-critical)', { error: err.message });
       });
       
-        // Send to ElevenLabs and measure response time
-        // commitImmediately: true ensures transcript is returned right away after sending
+        // Send to ElevenLabs in fire-and-forget mode (free flow)
+        // commitImmediately: true enables fire-and-forget - transcripts will arrive asynchronously via event handlers
         const startTime = Date.now();
         const transcript = await this.asrProvider.sendAudioChunk(mergedAudio, {
           interactionId,
-        seq,
-        sampleRate: buffer.sampleRate,
-          commitImmediately: true, // Commit immediately to get transcript right away
+          seq,
+          sampleRate: buffer.sampleRate,
+          commitImmediately: true, // Fire-and-forget mode - transcripts arrive asynchronously
         });
         const responseTimeMs = Date.now() - startTime;
         
-        // Log results
-        console.info(`[ASRWORKER] ✅ ElevenLabs response received`, {
+        // Log results (in free flow mode, transcript will be empty as it returns immediately)
+        console.info(`[ASRWORKER] ✅ Audio sent to ElevenLabs (free flow mode)`, {
           interaction_id: interactionId,
           chunks_sent: numChunks,
           audio_duration_ms: totalAudioMs.toFixed(0),
           response_time_ms: responseTimeMs,
-          transcript_text: transcript.text || '(empty)',
-          transcript_type: transcript.type,
-          transcript_length: transcript.text?.length || 0,
+          note: 'Transcripts will arrive asynchronously via event handlers and be published automatically',
         });
         
-        // Publish transcript if not empty
-        if (transcript.text && transcript.text.trim()) {
-          await this.publishTranscript(interactionId, transcript, seq);
-        }
+        // In free flow mode, transcripts are published via the callback when they arrive
+        // No need to publish here as sendAudioChunk returns immediately with empty transcript
         
       } catch (error: any) {
         console.error(`[ASRWORKER] ❌ Timer processing error for ${interactionId}:`, error);
