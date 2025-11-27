@@ -14,6 +14,88 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 
+// Helper function to estimate memory usage
+const estimateMemorySize = (obj: any): number => {
+  try {
+    const str = JSON.stringify(obj);
+    return new Blob([str]).size;
+  } catch (e) {
+    return 0;
+  }
+};
+
+// Helper function to log memory usage
+const logMemoryUsage = (label: string, data: any, callId?: string) => {
+  const size = estimateMemorySize(data);
+  const sizeKB = (size / 1024).toFixed(2);
+  const sizeMB = (size / 1024 / 1024).toFixed(4);
+  console.log(`[MEMORY] 💾 ${label}`, {
+    callId: callId || 'unknown',
+    size_bytes: size,
+    size_kb: `${sizeKB} KB`,
+    size_mb: `${sizeMB} MB`,
+    item_count: Array.isArray(data) ? data.length : 1,
+    timestamp: new Date().toISOString(),
+  });
+};
+
+// Helper function to log performance
+const logPerformance = (label: string, fn: () => void, callId?: string) => {
+  const startTime = performance.now();
+  const startMemory = (performance as any).memory?.usedJSHeapSize || 0;
+  fn();
+  const endTime = performance.now();
+  const endMemory = (performance as any).memory?.usedJSHeapSize || 0;
+  const duration = endTime - startTime;
+  const memoryDelta = endMemory - startMemory;
+  
+  console.log(`[PERF] ⚡ ${label}`, {
+    callId: callId || 'unknown',
+    duration_ms: duration.toFixed(2),
+    memory_delta_bytes: memoryDelta,
+    memory_delta_kb: (memoryDelta / 1024).toFixed(2),
+    timestamp: new Date().toISOString(),
+  });
+  
+  if (duration > 100) {
+    console.warn(`[PERF] ⚠️ Slow operation detected: ${label} took ${duration.toFixed(2)}ms`, {
+      callId,
+      threshold: '100ms',
+    });
+  }
+};
+
+// Global memory monitoring (runs every 10 seconds)
+if (typeof window !== 'undefined' && (performance as any).memory) {
+  setInterval(() => {
+    const memory = (performance as any).memory;
+    const usedMB = (memory.usedJSHeapSize / 1024 / 1024).toFixed(2);
+    const totalMB = (memory.totalJSHeapSize / 1024 / 1024).toFixed(2);
+    const limitMB = (memory.jsHeapSizeLimit / 1024 / 1024).toFixed(2);
+    const usagePercent = ((memory.usedJSHeapSize / memory.jsHeapSizeLimit) * 100).toFixed(2);
+    
+    console.log('[MEMORY-GLOBAL] 📊 Browser memory usage', {
+      used_heap_mb: usedMB,
+      total_heap_mb: totalMB,
+      limit_mb: limitMB,
+      usage_percent: `${usagePercent}%`,
+      timestamp: new Date().toISOString(),
+    });
+    
+    if (memory.usedJSHeapSize / memory.jsHeapSizeLimit > 0.9) {
+      console.error('[MEMORY-GLOBAL] ⚠️ CRITICAL: Memory usage above 90%!', {
+        used_mb: usedMB,
+        limit_mb: limitMB,
+        usage_percent: `${usagePercent}%`,
+      });
+    }
+  }, 10000); // Every 10 seconds
+}
+
+// Polling mode flag: when true, uses polling instead of SSE streaming
+// Set to false to enable SSE streaming mode
+const pollMode = true;
+
 export interface TranscriptUtterance {
   id: string;
   text: string;
@@ -57,6 +139,31 @@ export function useRealtimeTranscript(
   const reconnectAttemptsRef = useRef(0);
   const pollIntervalRef = useRef<NodeJS.Timeout | undefined>(undefined);
   const lastSeqRef = useRef<number>(0); // Track last seq to only fetch new transcripts
+  
+  // Log initial state creation
+  useEffect(() => {
+    console.log('[MEMORY] 🆕 useRealtimeTranscript hook initialized', {
+      callId: callId || 'null',
+      maxTranscripts: MAX_TRANSCRIPTS,
+      pollMode,
+      timestamp: new Date().toISOString(),
+    });
+  }, []);
+  
+  // Log transcript state changes
+  useEffect(() => {
+    if (transcripts.length > 0) {
+      logMemoryUsage('Transcripts state updated', transcripts, callId || undefined);
+      const totalTextLength = transcripts.reduce((sum, t) => sum + (t.text?.length || 0), 0);
+      console.log('[MEMORY] 📊 Transcript array details', {
+        callId: callId || 'null',
+        count: transcripts.length,
+        total_text_length: totalTextLength,
+        avg_text_length: Math.round(totalTextLength / transcripts.length),
+        memory_estimate_kb: (estimateMemorySize(transcripts) / 1024).toFixed(2),
+      });
+    }
+  }, [transcripts, callId]);
   
   const {
     onTranscript,
@@ -121,6 +228,10 @@ export function useRealtimeTranscript(
   useEffect(() => {
     // Don't connect if no callId
     if (!callId) {
+      console.log('[MEMORY] 🧹 Clearing transcripts (no callId)', {
+        previousCount: transcripts.length,
+        timestamp: new Date().toISOString(),
+      });
       setIsConnected(false);
       setError(null);
       setTranscripts([]);
@@ -128,8 +239,164 @@ export function useRealtimeTranscript(
       return;
     }
 
+    // POLLING MODE: Skip SSE and use polling only
+    if (pollMode) {
+      console.log('[useRealtimeTranscript] 📊 Polling mode enabled - skipping SSE', { callId });
+      
+      // Clean up any existing SSE connection
+      cleanup();
+      
+      // Start polling immediately
+      const startPolling = () => {
+        if (pollIntervalRef.current) {
+          return; // Already polling
+        }
+        
+        console.log('[useRealtimeTranscript] 🔄 Starting polling (pollMode=true)', { callId });
+        
+        const poll = async () => {
+          const pollStartTime = performance.now();
+          try {
+            const fetchStartTime = performance.now();
+            const response = await fetch(`/api/transcripts/latest?callId=${encodeURIComponent(callId!)}`);
+            const fetchDuration = performance.now() - fetchStartTime;
+            
+            console.log('[PERF] 🌐 Fetch request completed', {
+              callId,
+              duration_ms: fetchDuration.toFixed(2),
+              status: response.status,
+            });
+            
+            if (!response.ok) {
+              console.warn('[useRealtimeTranscript] Polling request failed', { status: response.status, callId });
+              setIsConnected(false);
+              setError(`Polling failed: HTTP ${response.status}`);
+              return;
+            }
+            
+            const parseStartTime = performance.now();
+            const data = await response.json();
+            const parseDuration = performance.now() - parseStartTime;
+            
+            logMemoryUsage('API response data', data, callId);
+            console.log('[PERF] 📦 JSON parse completed', {
+              callId,
+              duration_ms: parseDuration.toFixed(2),
+              transcript_count: data.transcripts?.length || 0,
+            });
+            
+            if (data.ok && data.transcripts && Array.isArray(data.transcripts)) {
+              logPerformance('Transcript processing (polling mode)', () => {
+                setTranscripts((prev) => {
+                  const processStartTime = performance.now();
+                  
+                  // Log previous state
+                  logMemoryUsage('Previous transcripts state', prev, callId);
+                  
+                  // Sort transcripts by seq or timestamp
+                  const sortStartTime = performance.now();
+                  const sorted = [...data.transcripts].sort((a: TranscriptUtterance, b: TranscriptUtterance) => {
+                    if (a.seq && b.seq) return a.seq - b.seq;
+                    if (a.seq) return -1;
+                    if (b.seq) return 1;
+                    return new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime();
+                  });
+                  const sortDuration = performance.now() - sortStartTime;
+                  
+                  console.log('[PERF] 🔀 Array sort completed', {
+                    callId,
+                    duration_ms: sortDuration.toFixed(2),
+                    items_sorted: sorted.length,
+                  });
+                  
+                  // Limit to MAX_TRANSCRIPTS
+                  const limited = sorted.length > MAX_TRANSCRIPTS 
+                    ? sorted.slice(-MAX_TRANSCRIPTS)
+                    : sorted;
+                  
+                  if (limited.length !== sorted.length) {
+                    console.warn('[MEMORY] ✂️ Transcripts pruned', {
+                      callId,
+                      before: sorted.length,
+                      after: limited.length,
+                      pruned: sorted.length - limited.length,
+                    });
+                  }
+                  
+                  // Only update if transcripts actually changed (avoid unnecessary re-renders)
+                  const compareStartTime = performance.now();
+                  const prevStr = JSON.stringify(prev.map(t => ({ id: t.id, seq: t.seq, text: t.text })));
+                  const newStr = JSON.stringify(limited.map(t => ({ id: t.id, seq: t.seq, text: t.text })));
+                  const compareDuration = performance.now() - compareStartTime;
+                  
+                  console.log('[PERF] 🔍 Transcript comparison completed', {
+                    callId,
+                    duration_ms: compareDuration.toFixed(2),
+                    prev_str_length: prevStr.length,
+                    new_str_length: newStr.length,
+                  });
+                  
+                  if (prevStr !== newStr) {
+                    logMemoryUsage('New transcripts state (after update)', limited, callId);
+                    const totalDuration = performance.now() - processStartTime;
+                    console.log('[PERF] ✅ Complete transcript update', {
+                      callId,
+                      total_duration_ms: totalDuration.toFixed(2),
+                      count: limited.length,
+                      prevCount: prev.length,
+                    });
+                    return limited;
+                  }
+                  
+                  console.log('[PERF] ⏭️ Transcripts unchanged, skipping update', {
+                    callId,
+                    count: prev.length,
+                  });
+                  return prev;
+                });
+              }, callId);
+              
+              setIsConnected(true);
+              setError(null);
+            } else {
+              console.warn('[useRealtimeTranscript] Polling: Invalid response format', { callId, data });
+              setIsConnected(false);
+            }
+            
+            const totalPollDuration = performance.now() - pollStartTime;
+            console.log('[PERF] 🎯 Complete poll cycle', {
+              callId,
+              total_duration_ms: totalPollDuration.toFixed(2),
+            });
+          } catch (err: any) {
+            console.error('[useRealtimeTranscript] Polling error', { error: err.message, callId });
+            setIsConnected(false);
+            setError(`Polling error: ${err.message}`);
+          }
+        };
+        
+        // Poll immediately, then every 2 seconds
+        poll();
+        pollIntervalRef.current = setInterval(poll, 2000);
+        setIsConnected(true); // Mark as connected when polling starts
+      };
+      
+      startPolling();
+      
+      // Cleanup on unmount or callId change
+      return () => {
+        console.log('[MEMORY] 🧹 Cleaning up polling (callId changed or unmount)', {
+          callId,
+          transcriptsCount: transcripts.length,
+          timestamp: new Date().toISOString(),
+        });
+        cleanup();
+      };
+    }
+
+    // STREAMING MODE: Use SSE (only when pollMode = false)
     // CRITICAL FIX: Log when callId is discovered/changed to help debug reconnection
-    console.log('[useRealtimeTranscript] 🔄 CallId changed, reconnecting immediately', {
+    console.log('[useRealtimeTranscript] 🔄 CallId changed, reconnecting immediately (SSE mode)', {
       callId,
       previousCallId: eventSourceRef.current ? 'had connection' : 'no connection',
       timestamp: new Date().toISOString(),
@@ -237,8 +504,18 @@ export function useRealtimeTranscript(
 
       // Listen for transcript_line events
       eventSource.addEventListener('transcript_line', (event) => {
+        const eventStartTime = performance.now();
         try {
+          const parseStartTime = performance.now();
           const data = JSON.parse(event.data);
+          const parseDuration = performance.now() - parseStartTime;
+          
+          console.log('[PERF] 📨 SSE event parse', {
+            callId,
+            duration_ms: parseDuration.toFixed(2),
+            data_size: event.data?.length || 0,
+          });
+          
           const eventCallId = data.callId || data.interaction_id || data.interactionId;
           
           // Skip system messages
@@ -322,34 +599,49 @@ export function useRealtimeTranscript(
             seq: data.seq,
             confidence: data.confidence || 0.95,
           };
+          
+          logMemoryUsage('New utterance created', utterance, callId);
 
           // Add to transcripts (check for duplicates)
-          setTranscripts((prev) => {
-            const exists = prev.some(
-              (u) => u.id === utterance.id || (data.seq && u.seq === data.seq)
-            );
-            if (exists) {
-              console.debug('[useRealtimeTranscript] Skipping duplicate utterance', {
-                id: utterance.id,
-                seq: data.seq,
-              });
-              return prev;
-            }
-            
-            // CRITICAL FIX: Limit transcript array size to prevent memory issues (OOM crashes)
-            // Keep only the most recent MAX_TRANSCRIPTS to prevent unbounded growth
-            const newTranscripts = [...prev, utterance];
-            if (newTranscripts.length > MAX_TRANSCRIPTS) {
-              const pruned = newTranscripts.slice(-MAX_TRANSCRIPTS);
-              console.warn('[useRealtimeTranscript] ⚠️ Pruned transcripts to prevent memory issues', {
-                before: newTranscripts.length,
-                after: pruned.length,
-                callId,
-                note: `Keeping only the most recent ${MAX_TRANSCRIPTS} transcripts`,
-              });
-              return pruned;
-            }
-            return newTranscripts;
+          logPerformance('Transcript state update (SSE)', () => {
+            setTranscripts((prev) => {
+              logMemoryUsage('Previous transcripts (before SSE update)', prev, callId);
+              
+              const exists = prev.some(
+                (u) => u.id === utterance.id || (data.seq && u.seq === data.seq)
+              );
+              if (exists) {
+                console.debug('[useRealtimeTranscript] Skipping duplicate utterance', {
+                  id: utterance.id,
+                  seq: data.seq,
+                });
+                return prev;
+              }
+              
+              // CRITICAL FIX: Limit transcript array size to prevent memory issues (OOM crashes)
+              // Keep only the most recent MAX_TRANSCRIPTS to prevent unbounded growth
+              const newTranscripts = [...prev, utterance];
+              if (newTranscripts.length > MAX_TRANSCRIPTS) {
+                const pruned = newTranscripts.slice(-MAX_TRANSCRIPTS);
+                logMemoryUsage('Pruned transcripts (SSE)', pruned, callId);
+                console.warn('[useRealtimeTranscript] ⚠️ Pruned transcripts to prevent memory issues', {
+                  before: newTranscripts.length,
+                  after: pruned.length,
+                  callId,
+                  note: `Keeping only the most recent ${MAX_TRANSCRIPTS} transcripts`,
+                });
+                return pruned;
+              }
+              
+              logMemoryUsage('Updated transcripts (SSE)', newTranscripts, callId);
+              return newTranscripts;
+            });
+          }, callId);
+          
+          const totalEventDuration = performance.now() - eventStartTime;
+          console.log('[PERF] ✅ Complete SSE event processing', {
+            callId,
+            total_duration_ms: totalEventDuration.toFixed(2),
           });
 
           // Call callback if provided (via ref to avoid dependency issues)
@@ -489,9 +781,9 @@ export function useRealtimeTranscript(
         }
       };
       
-      // Poll immediately, then every 1 second (reduced from 2s for faster updates)
+      // Poll immediately, then every 2 seconds (polling fallback - only used when SSE fails)
       poll();
-      pollIntervalRef.current = setInterval(poll, 1000);
+      pollIntervalRef.current = setInterval(poll, 2000);
     };
 
     // Initial connection
@@ -504,6 +796,17 @@ export function useRealtimeTranscript(
       lastSeqRef.current = 0; // Reset last seq
     };
   }, [callId, autoReconnect, reconnectDelay]); // CRITICAL FIX: Removed cleanup from dependencies to prevent infinite render loop
+
+  // Log component render
+  useEffect(() => {
+    console.log('[RENDER] 🎨 useRealtimeTranscript render', {
+      callId: callId || 'null',
+      transcriptsCount: transcripts.length,
+      isConnected,
+      hasError: !!error,
+      timestamp: new Date().toISOString(),
+    });
+  });
 
   return {
     transcripts,

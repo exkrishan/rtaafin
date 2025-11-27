@@ -5,6 +5,28 @@ import CustomerDetailsHeader, { Customer } from './CustomerDetailsHeader';
 import { showToast } from './ToastContainer';
 import { useRealtimeTranscript } from '@/hooks/useRealtimeTranscript';
 
+// Helper function to estimate memory usage
+const estimateMemorySize = (obj: any): number => {
+  try {
+    const str = JSON.stringify(obj);
+    return new Blob([str]).size;
+  } catch (e) {
+    return 0;
+  }
+};
+
+// Helper function to log memory usage
+const logMemoryUsage = (label: string, data: any, interactionId?: string) => {
+  const size = estimateMemorySize(data);
+  console.log(`[MEMORY-UI] 💾 ${label}`, {
+    interactionId: interactionId || 'unknown',
+    size_bytes: size,
+    size_kb: (size / 1024).toFixed(2),
+    item_count: Array.isArray(data) ? data.length : 1,
+    timestamp: new Date().toISOString(),
+  });
+};
+
 // Re-export Customer type for convenience
 export type { Customer } from './CustomerDetailsHeader';
 
@@ -195,6 +217,9 @@ export default function AgentAssistPanelV2({
             }));
             
             setKbArticles(prev => {
+              const updateStartTime = performance.now();
+              logMemoryUsage('Previous KB articles (before update)', prev, interactionId);
+              
               const existingIds = new Set(prev.map(a => a.id));
               const newArticles = articlesWithIntent
                 .filter((a: KBArticle) => !existingIds.has(a.id))
@@ -202,13 +227,34 @@ export default function AgentAssistPanelV2({
                   ...a,
                   timestamp: Date.now(), // Add timestamp for sorting
                 }));
+              
               // Sort by timestamp (newest first), then merge with existing
+              const sortStartTime = performance.now();
               const allArticles = [...newArticles, ...prev];
-              return allArticles.sort((a, b) => {
+              const sorted = allArticles.sort((a, b) => {
                 const aTime = (a as any).timestamp || 0;
                 const bTime = (b as any).timestamp || 0;
                 return bTime - aTime; // Newest first
               });
+              const sortDuration = performance.now() - sortStartTime;
+              
+              console.log('[PERF-UI] 🔀 KB articles sort', {
+                interactionId,
+                duration_ms: sortDuration.toFixed(2),
+                items_sorted: sorted.length,
+              });
+              
+              logMemoryUsage('Updated KB articles (after update)', sorted, interactionId);
+              
+              const totalDuration = performance.now() - updateStartTime;
+              console.log('[PERF-UI] ✅ KB articles update completed', {
+                interactionId,
+                total_duration_ms: totalDuration.toFixed(2),
+                newCount: newArticles.length,
+                totalCount: sorted.length,
+              });
+              
+              return sorted;
             });
             
             articlesWithIntent.forEach((article: KBArticle) => {
@@ -242,7 +288,16 @@ export default function AgentAssistPanelV2({
   // The onTranscript callback only fires for SSE events, not polling
   useEffect(() => {
     if (hookTranscripts && hookTranscripts.length > 0) {
-      // Convert hook transcripts to our format
+      const syncStartTime = performance.now();
+      console.log('[PERF-UI] 🔄 Starting utterance sync', {
+        interactionId,
+        hookTranscriptsCount: hookTranscripts.length,
+        currentUtterancesCount: utterances.length,
+      });
+      
+      logMemoryUsage('Hook transcripts (input)', hookTranscripts, interactionId);
+      
+      const convertStartTime = performance.now();
       const newUtterances: TranscriptUtterance[] = hookTranscripts.map((t) => ({
         utterance_id: t.id,
         speaker: t.speaker,
@@ -251,24 +306,75 @@ export default function AgentAssistPanelV2({
         timestamp: t.timestamp,
         isPartial: false,
       }));
+      const convertDuration = performance.now() - convertStartTime;
       
-      // Merge with existing utterances, avoiding duplicates
+      console.log('[PERF-UI] 🔀 Utterance conversion', {
+        interactionId,
+        duration_ms: convertDuration.toFixed(2),
+        count: newUtterances.length,
+      });
+      
+      logMemoryUsage('Converted utterances', newUtterances, interactionId);
+      
       setUtterances((prev) => {
+        logMemoryUsage('Previous utterances state', prev, interactionId);
+        
+        const mergeStartTime = performance.now();
         const existingIds = new Set(prev.map((u) => u.utterance_id));
         const toAdd = newUtterances.filter((u) => !existingIds.has(u.utterance_id));
+        const mergeDuration = performance.now() - mergeStartTime;
+        
+        console.log('[PERF-UI] 🔍 Utterance merge check', {
+          interactionId,
+          duration_ms: mergeDuration.toFixed(2),
+          existing_count: prev.length,
+          new_count: newUtterances.length,
+          to_add_count: toAdd.length,
+        });
         
         if (toAdd.length > 0) {
-          console.log('[AgentAssistPanel] ✅ Syncing utterances from hook', {
-            newCount: toAdd.length,
-            totalCount: prev.length + toAdd.length,
+          const merged = [...prev, ...toAdd];
+          logMemoryUsage('Merged utterances state', merged, interactionId);
+          
+          const totalSyncDuration = performance.now() - syncStartTime;
+          console.log('[PERF-UI] ✅ Utterance sync completed', {
             interactionId,
+            total_duration_ms: totalSyncDuration.toFixed(2),
+            newCount: toAdd.length,
+            totalCount: merged.length,
           });
-          return [...prev, ...toAdd];
+          
+          return merged;
         }
+        
+        console.log('[PERF-UI] ⏭️ No new utterances to add', {
+          interactionId,
+          existing_count: prev.length,
+        });
         return prev;
       });
     }
   }, [hookTranscripts, interactionId]);
+  
+  // Log state changes
+  useEffect(() => {
+    logMemoryUsage('Utterances state updated', utterances, interactionId);
+  }, [utterances, interactionId]);
+  
+  useEffect(() => {
+    logMemoryUsage('KB articles state updated', kbArticles, interactionId);
+  }, [kbArticles, interactionId]);
+  
+  // Log component render
+  useEffect(() => {
+    console.log('[RENDER-UI] 🎨 AgentAssistPanelV2 render', {
+      interactionId,
+      utterancesCount: utterances.length,
+      kbArticlesCount: kbArticles.length,
+      isCollapsed,
+      timestamp: new Date().toISOString(),
+    });
+  });
 
   // Persist collapse state in sessionStorage
   useEffect(() => {
@@ -363,6 +469,11 @@ export default function AgentAssistPanelV2({
       // Store callback to clear KB articles and utterances (for restart functionality)
       (window as any).__clearKbArticles = () => {
         console.log('[AgentAssistPanel] 🗑️ Clearing KB articles and utterances');
+        console.log('[MEMORY-UI] 🧹 Clearing KB articles and utterances', {
+          interactionId,
+          kbArticlesCount: kbArticles.length,
+          utterancesCount: utterances.length,
+        });
         setKbArticles([]);
         setUtterances([]);
       };
@@ -655,11 +766,22 @@ export default function AgentAssistPanelV2({
         ...r,
         timestamp: Date.now(),
       }));
-      setKbArticles(resultsWithTimestamp.sort((a: any, b: any) => {
+      const sortStartTime = performance.now();
+      const sorted = resultsWithTimestamp.sort((a: any, b: any) => {
         const aTime = a.timestamp || 0;
         const bTime = b.timestamp || 0;
         return bTime - aTime; // Newest first
-      }));
+      });
+      const sortDuration = performance.now() - sortStartTime;
+      
+      console.log('[PERF-UI] 🔀 KB search results sort', {
+        interactionId,
+        duration_ms: sortDuration.toFixed(2),
+        items_sorted: sorted.length,
+      });
+      
+      logMemoryUsage('KB search results (before setting state)', sorted, interactionId);
+      setKbArticles(sorted);
       emitTelemetry?.('manual_kb_search_triggered', {
         interaction_id: interactionId,
         query: manualSearchQuery,
@@ -686,11 +808,22 @@ export default function AgentAssistPanelV2({
         ...r,
         timestamp: Date.now(),
       }));
-      setKbArticles(resultsWithTimestamp.sort((a: any, b: any) => {
+      const sortStartTime = performance.now();
+      const sorted = resultsWithTimestamp.sort((a: any, b: any) => {
         const aTime = a.timestamp || 0;
         const bTime = b.timestamp || 0;
         return bTime - aTime; // Newest first
-      }));
+      });
+      const sortDuration = performance.now() - sortStartTime;
+      
+      console.log('[PERF-UI] 🔀 KB search results sort', {
+        interactionId,
+        duration_ms: sortDuration.toFixed(2),
+        items_sorted: sorted.length,
+      });
+      
+      logMemoryUsage('KB search results (before setting state)', sorted, interactionId);
+      setKbArticles(sorted);
       emitTelemetry?.('manual_kb_search_triggered', {
         interaction_id: interactionId,
         query: text,
