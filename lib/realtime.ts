@@ -220,14 +220,9 @@ function sendEvent(res: any, event: RealtimeEvent): void {
         res.flush();
       }
       
-      // Log successful send for transcript_line events (for debugging)
-      if (event.type === 'transcript_line') {
-        console.log('[realtime] 📤 Sent transcript_line event to client', {
-          callId: event.callId,
-          seq: event.seq,
-          textLength: event.text?.length || 0,
-        });
-      }
+      // CRITICAL MEMORY FIX: Removed per-event logging to prevent memory exhaustion
+      // With 300ms chunks, this was logging 200+ times per minute per call
+      // Creating millions of log objects that accumulate in memory
     } catch (writeErr: any) {
       // CRITICAL FIX: Handle write errors gracefully
       // If stream is closed, remove client from registry
@@ -295,16 +290,9 @@ export function broadcastEvent(event: RealtimeEvent): void {
     });
   }
 
-  // Minimal info logging - only for transcript_line events to reduce memory pressure
-  if (event.type === 'transcript_line' && sentCount > 0) {
-    console.info('[realtime] 📡 Broadcast event', {
-      type: event.type,
-      callId: targetCallId,
-      seq: event.seq,
-      recipients: sentCount,
-      totalClients: clients.size,
-    });
-  }
+  // CRITICAL MEMORY FIX: Remove per-event broadcast logging
+  // With 300ms chunks + multiple clients, this creates too many log objects
+  // Only log summary stats periodically instead (handled by periodic cleanup)
 }
 
 /**

@@ -62,6 +62,11 @@ class TranscriptConsumer {
   // CRITICAL FIX: Throttle manual discovery triggers to prevent too-frequent calls
   private lastManualDiscoveryTime: number = 0;
   private readonly MIN_MANUAL_DISCOVERY_INTERVAL_MS = 2000; // 2 seconds minimum between manual triggers
+  
+  // CRITICAL MEMORY FIX: Rate-limit subscription logging to prevent memory exhaustion
+  private lastSubscriptionLogTime: number = 0;
+  private subscriptionsLoggedSinceLastReport: number = 0;
+  private readonly SUBSCRIPTION_LOG_INTERVAL_MS = 30000; // Log subscription activity every 30 seconds max
 
   constructor() {
     this.pubsub = createPubSubAdapterFromEnv();
@@ -210,11 +215,18 @@ class TranscriptConsumer {
         transcriptCount: 0,
       });
 
-      console.info('[TranscriptConsumer] ✅ Subscribed to transcript topic', { 
-        interactionId, 
-        topic,
-        totalSubscriptions: this.subscriptions.size,
-      });
+      // CRITICAL MEMORY FIX: Rate-limit subscription logging
+      const now = Date.now();
+      this.subscriptionsLoggedSinceLastReport++;
+      if (now - this.lastSubscriptionLogTime >= this.SUBSCRIPTION_LOG_INTERVAL_MS) {
+        console.info('[TranscriptConsumer] ✅ Subscription activity (last 30s)', { 
+          newSubscriptions: this.subscriptionsLoggedSinceLastReport,
+          totalSubscriptions: this.subscriptions.size,
+          note: 'Logging rate-limited to prevent memory exhaustion',
+        });
+        this.lastSubscriptionLogTime = now;
+        this.subscriptionsLoggedSinceLastReport = 0;
+      }
     } catch (error: any) {
       console.error('[TranscriptConsumer] Failed to subscribe to transcript topic', {
         interactionId,
@@ -738,10 +750,7 @@ class TranscriptConsumer {
             
             if (!this.subscriptions.has(interactionId)) {
               try {
-                console.info('[TranscriptConsumer] Auto-discovered transcript stream', { 
-                  interactionId,
-                  stream: key,
-                });
+                // CRITICAL MEMORY FIX: Don't log every auto-discovery (already logged in subscription activity summary)
                 await this.subscribeToInteraction(interactionId);
                 newSubscriptions++;
               } catch (subError: any) {
@@ -1044,19 +1053,64 @@ export function getTranscriptConsumerStatus() {
  * Trigger stream discovery manually (for health checks and manual triggers)
  * CRITICAL FIX: Added throttle guard to prevent too-frequent calls
  */
+// Track throttle logging to reduce memory pressure
+let lastThrottleLogTime = 0;
+const THROTTLE_LOG_INTERVAL_MS = 60000; // Log throttle messages max once per minute
+let throttledCallCount = 0; // Track how many calls were throttled
+
+// CRITICAL MEMORY FIX: Add hard rate limit at function entry to prevent runaway loops
+let discoveryCallCount = 0;
+let discoveryCallResetTime = Date.now();
+const MAX_DISCOVERY_CALLS_PER_MINUTE = 30; // Maximum 30 discovery attempts per minute
+
 export async function triggerStreamDiscovery(): Promise<void> {
+  const now = Date.now();
+  
+  // CRITICAL MEMORY FIX: Hard rate limit at function entry
+  // Reset counter every minute
+  if (now - discoveryCallResetTime >= 60000) {
+    if (discoveryCallCount > MAX_DISCOVERY_CALLS_PER_MINUTE) {
+      console.warn('[TranscriptConsumer] ⚠️ Discovery was rate-limited in last minute', {
+        totalCalls: discoveryCallCount,
+        throttledCalls: throttledCallCount,
+        limit: MAX_DISCOVERY_CALLS_PER_MINUTE,
+        note: 'This indicates excessive discovery triggering - investigate the caller',
+      });
+    }
+    discoveryCallCount = 0;
+    throttledCallCount = 0;
+    discoveryCallResetTime = now;
+  }
+  
+  discoveryCallCount++;
+  
+  // Hard limit: If we've exceeded max calls per minute, immediately return
+  if (discoveryCallCount > MAX_DISCOVERY_CALLS_PER_MINUTE) {
+    throttledCallCount++;
+    // Silent return - no logging to prevent memory exhaustion
+    return;
+  }
+  
   const consumer = getTranscriptConsumer();
   if (consumer['isRunning']) {
-    const now = Date.now();
     const lastTrigger = consumer['lastManualDiscoveryTime'] || 0;
     const timeSinceLastTrigger = now - lastTrigger;
     
     // Throttle: Don't trigger more than once every 2 seconds
     if (timeSinceLastTrigger < consumer['MIN_MANUAL_DISCOVERY_INTERVAL_MS']) {
-      console.debug('[TranscriptConsumer] Discovery throttled (too soon after last trigger)', {
-        timeSinceLastTrigger: `${timeSinceLastTrigger}ms`,
-        minInterval: `${consumer['MIN_MANUAL_DISCOVERY_INTERVAL_MS']}ms`,
-      });
+      throttledCallCount++;
+      // CRITICAL MEMORY FIX: Only log throttle messages once per minute to prevent memory exhaustion
+      // Hundreds of throttle logs per second were creating millions of string objects
+      const timeSinceLastLog = now - lastThrottleLogTime;
+      if (timeSinceLastLog >= THROTTLE_LOG_INTERVAL_MS) {
+        console.debug('[TranscriptConsumer] Discovery throttled (logging once per minute to save memory)', {
+          timeSinceLastTrigger: `${timeSinceLastTrigger}ms`,
+          minInterval: `${consumer['MIN_MANUAL_DISCOVERY_INTERVAL_MS']}ms`,
+          throttledInLastMinute: throttledCallCount,
+          note: 'This message is rate-limited to once per minute to prevent memory leaks',
+        });
+        lastThrottleLogTime = now;
+      }
       return;
     }
     
