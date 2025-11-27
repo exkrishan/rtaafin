@@ -62,12 +62,10 @@ export class ExotelHandler {
   }
 
   handleMessage(ws: WebSocket & { exotelState?: ExotelConnectionState }, message: string): void {
-    // Check feature flag - skip processing if bridge is disabled
-    if (!this.exoBridgeEnabled) {
-      console.debug('[exotel] Bridge disabled, skipping message processing');
-      return;
-    }
-
+    // CRITICAL FIX: Always process messages (start, media, stop) regardless of bridge feature flag
+    // The bridge feature flag should only control bridge-specific functionality, not core audio ingestion
+    // Media events must always be published to Redis for ASR worker processing
+    
     try {
       const data: ExotelMessage = JSON.parse(message);
 
@@ -84,6 +82,7 @@ export class ExotelHandler {
           break;
 
         case 'media':
+          // CRITICAL: Always process media events - they must be published to Redis
           this.handleMedia(ws, data as ExotelMediaEvent);
           break;
 
