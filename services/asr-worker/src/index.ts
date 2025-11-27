@@ -152,12 +152,34 @@ class AsrWorker {
       // This allows transcripts to be published immediately when they arrive asynchronously
       if (ASR_PROVIDER === 'elevenlabs' && 'setTranscriptCallback' in this.asrProvider) {
         (this.asrProvider as any).setTranscriptCallback((transcript: any, interactionId: string, seq: number) => {
+          console.info(`[ASRWorker] 📨 Transcript callback invoked`, {
+            interaction_id: interactionId,
+            seq,
+            textLength: transcript.text?.length || 0,
+            textPreview: transcript.text?.substring(0, 50) || '(empty)',
+            type: transcript.type,
+            note: 'Publishing transcript to Redis List',
+          });
           // Publish transcript immediately when it arrives in free flow mode
           this.publishTranscript(interactionId, transcript, seq).catch((err: any) => {
-            console.error(`[ASRWorker] Error publishing transcript from callback:`, err);
+            console.error(`[ASRWorker] ❌ Error publishing transcript from callback:`, {
+              interaction_id: interactionId,
+              seq,
+              error: err.message,
+            });
           });
         });
-        console.info('[ASRWorker] ✅ Transcript callback set for free flow mode');
+        console.info('[ASRWorker] ✅ Transcript callback set for free flow mode', {
+          provider: ASR_PROVIDER,
+          hasCallback: true,
+          note: 'Transcripts will be published automatically when received from ElevenLabs',
+        });
+      } else {
+        console.warn('[ASRWorker] ⚠️ Transcript callback not set', {
+          provider: ASR_PROVIDER,
+          hasMethod: 'setTranscriptCallback' in (this.asrProvider as any),
+          note: 'Free flow mode may not work correctly',
+        });
       }
     } catch (error: any) {
       console.error('[ASRWorker] ❌ Failed to create ASR provider:', error.message);

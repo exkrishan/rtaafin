@@ -358,7 +358,12 @@ export class ElevenLabsProvider implements AsrProvider {
         // Wait for session to start after connection opens
         const sessionStartedPromise = new Promise<void>((resolve) => {
           connection.on(RealtimeEvents.SESSION_STARTED, (data: any) => {
-            console.info(`[ElevenLabsProvider] ✅ Session started for ${interactionId}`, data);
+            console.info(`[ElevenLabsProvider] ✅ Session started for ${interactionId}`, {
+              interactionId,
+              sessionData: data,
+              hasCallback: !!this.transcriptCallback,
+              note: 'Connection ready - can now send audio and receive transcripts',
+            });
             newState.isReady = true;
             
             // Update connection state in health monitor if available
@@ -386,6 +391,12 @@ export class ElevenLabsProvider implements AsrProvider {
           this.handleTranscript(interactionId, { ...data, isFinal: false });
         };
         connection.on(RealtimeEvents.PARTIAL_TRANSCRIPT, handlers.partial);
+        console.info(`[ElevenLabsProvider] ✅ PARTIAL_TRANSCRIPT event handler registered for ${interactionId}`, {
+          interactionId,
+          eventName: RealtimeEvents.PARTIAL_TRANSCRIPT,
+          hasHandler: !!handlers.partial,
+          note: 'Will receive partial transcripts asynchronously',
+        });
 
         handlers.committed = (data: any) => {
           console.info(`[ElevenLabsProvider] 📨 Received COMMITTED_TRANSCRIPT event for ${interactionId}:`, {
@@ -759,15 +770,34 @@ export class ElevenLabsProvider implements AsrProvider {
           // This handles async transcripts that arrive without a matching resolver
           if (this.transcriptCallback) {
             const transcriptSeq = data.seq || data.sequence || Date.now();
-            console.debug(`[ElevenLabsProvider] 🆓 Free flow mode - publishing transcript via callback`, {
+            console.info(`[ElevenLabsProvider] 🆓 Free flow mode - publishing transcript via callback`, {
               interactionId,
               transcriptSeq,
               textLength: transcriptText.trim().length,
-              note: 'Transcript arrived asynchronously, publishing directly',
+              textPreview: transcriptText.trim().substring(0, 50),
+              hasCallback: !!this.transcriptCallback,
+              note: 'Transcript arrived asynchronously, publishing directly via callback',
             });
-            this.transcriptCallback(transcript, interactionId, transcriptSeq);
+            try {
+              this.transcriptCallback(transcript, interactionId, transcriptSeq);
+              console.info(`[ElevenLabsProvider] ✅ Callback executed successfully`, {
+                interactionId,
+                transcriptSeq,
+              });
+            } catch (callbackError: any) {
+              console.error(`[ElevenLabsProvider] ❌ Callback execution failed`, {
+                interactionId,
+                transcriptSeq,
+                error: callbackError.message,
+              });
+            }
           } else {
             // No callback - queue for later processing
+            console.warn(`[ElevenLabsProvider] ⚠️ No callback set - queuing transcript`, {
+              interactionId,
+              queueLength: state.transcriptQueue.length,
+              note: 'Transcript will be processed later via processQueuedTranscripts',
+            });
             state.transcriptQueue.push(transcript);
           }
         }
@@ -1221,6 +1251,19 @@ export class ElevenLabsProvider implements AsrProvider {
       if (ws && ws.readyState !== 1) { // 1 = OPEN
         throw new Error(`WebSocket not open (readyState: ${ws.readyState}) for ${interactionId}`);
       }
+      
+      console.info(`[ElevenLabsProvider] 📤 Sending audio payload to ElevenLabs`, {
+        interactionId,
+        seq,
+        audioSize: audio.length,
+        base64Size: audioBase64.length,
+        durationMs: durationMs.toFixed(2),
+        sampleRate,
+        commit: sendPayload.commit,
+        websocketReady: ws?.readyState === 1,
+        hasCallback: !!this.transcriptCallback,
+        note: 'Waiting for PARTIAL_TRANSCRIPT event response from ElevenLabs',
+      });
       
       stateToUse.connection.send(sendPayload);
       this.metrics.audioChunksSent++;
