@@ -5,6 +5,10 @@ import KBSuggestions, { KBArticle } from './KBSuggestions';
 import AutoDispositionModal, { Suggestion } from './AutoDispositionModal';
 import { useRealtimeTranscript } from '@/hooks/useRealtimeTranscript';
 
+// Polling mode flag - must match useRealtimeTranscript.ts
+// When true, disables ALL SSE connections to prevent request blocking
+const POLLING_MODE = true;
+
 export interface TranscriptLine {
   text: string;
   ts?: string;
@@ -120,6 +124,15 @@ export default function TranscriptPanel({
 
   // Listen for call_end and intent_update events (not handled by hook)
   useEffect(() => {
+    // CRITICAL: Disable SSE when polling mode is active
+    if (POLLING_MODE) {
+      console.log('[TranscriptPanel] 🚫 SSE disabled (polling mode active)', { 
+        callId,
+        note: 'call_end and intent_update events will be handled via polling or other mechanisms',
+      });
+      return;
+    }
+    
     if (!callId) {
       return;
     }

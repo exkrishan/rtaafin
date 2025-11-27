@@ -211,6 +211,14 @@ export function useRealtimeTranscript(
 
   // Manual reconnect function
   const reconnect = useCallback(() => {
+    // CRITICAL: In polling mode, reconnect just restarts polling, doesn't create SSE
+    if (pollMode) {
+      console.log('[useRealtimeTranscript] 🔄 Reconnect called (polling mode) - restarting polling', { callId });
+      cleanup();
+      // Polling will restart automatically via useEffect when callId is set
+      return;
+    }
+    
     cleanup();
     shouldReconnectRef.current = true;
     reconnectAttemptsRef.current = 0;
@@ -219,6 +227,12 @@ export function useRealtimeTranscript(
     if (callId) {
       // Force reconnection by clearing and re-establishing
       const url = `/api/events/stream?callId=${encodeURIComponent(callId)}`;
+      console.log('[API-CALL] 🔌 Reconnect: Creating SSE connection', {
+        callId,
+        endpoint: '/api/events/stream',
+        url,
+        timestamp: new Date().toISOString(),
+      });
       const eventSource = new EventSource(url);
       eventSourceRef.current = eventSource;
       // The rest of the connection logic will be handled by the useEffect
@@ -253,12 +267,24 @@ export function useRealtimeTranscript(
         }
         
         console.log('[useRealtimeTranscript] 🔄 Starting polling (pollMode=true)', { callId });
+        console.log('[API-CALL] 📞 Polling mode: Will call /api/transcripts/latest every 2 seconds', {
+          callId,
+          endpoint: '/api/transcripts/latest',
+          interval: '2000ms',
+          note: 'SSE connections are disabled in polling mode',
+        });
         
         const poll = async () => {
           const pollStartTime = performance.now();
           try {
             const fetchStartTime = performance.now();
-            const response = await fetch(`/api/transcripts/latest?callId=${encodeURIComponent(callId!)}`);
+            const apiUrl = `/api/transcripts/latest?callId=${encodeURIComponent(callId!)}`;
+            console.log('[API-CALL] 🌐 Making polling request', {
+              callId,
+              url: apiUrl,
+              timestamp: new Date().toISOString(),
+            });
+            const response = await fetch(apiUrl);
             const fetchDuration = performance.now() - fetchStartTime;
             
             console.log('[PERF] 🌐 Fetch request completed', {
@@ -395,6 +421,11 @@ export function useRealtimeTranscript(
     }
 
     // STREAMING MODE: Use SSE (only when pollMode = false)
+    // CRITICAL: Skip SSE completely when pollMode is true
+    if (pollMode) {
+      console.warn('[useRealtimeTranscript] ⚠️ pollMode=true but reached SSE code - this should not happen!', { callId });
+      return; // Exit early - should not reach here
+    }
     // CRITICAL FIX: Log when callId is discovered/changed to help debug reconnection
     console.log('[useRealtimeTranscript] 🔄 CallId changed, reconnecting immediately (SSE mode)', {
       callId,
@@ -413,6 +444,13 @@ export function useRealtimeTranscript(
 
       const url = `/api/events/stream?callId=${encodeURIComponent(callId)}`;
       console.log('[useRealtimeTranscript] 🔌 Connecting to SSE', { callId, url });
+      console.log('[API-CALL] 🔌 Creating SSE connection (streaming mode)', {
+        callId,
+        endpoint: '/api/events/stream',
+        url,
+        timestamp: new Date().toISOString(),
+        warning: 'This should not happen when pollMode=true',
+      });
       
       const eventSource = new EventSource(url);
       eventSourceRef.current = eventSource;

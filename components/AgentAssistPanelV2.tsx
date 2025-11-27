@@ -5,6 +5,10 @@ import CustomerDetailsHeader, { Customer } from './CustomerDetailsHeader';
 import { showToast } from './ToastContainer';
 import { useRealtimeTranscript } from '@/hooks/useRealtimeTranscript';
 
+// Polling mode flag - must match useRealtimeTranscript.ts
+// When true, disables ALL SSE connections to prevent request blocking
+const POLLING_MODE = true;
+
 // Helper function to estimate memory usage
 const estimateMemorySize = (obj: any): number => {
   try {
@@ -487,8 +491,23 @@ export default function AgentAssistPanelV2({
 
   // Listen to SSE for transcript and KB updates
   // Always listen when interactionId is available, even if collapsed (so data is ready when expanded)
-  // Skip SSE if useSse is false (demo mode)
+  // Skip SSE if useSse is false (demo mode) OR if polling mode is enabled
   useEffect(() => {
+    // CRITICAL: Disable ALL SSE connections when polling mode is active
+    if (POLLING_MODE) {
+      console.log('[AgentAssistPanel] 🚫 SSE disabled (polling mode active)', { 
+        interactionId,
+        note: 'All SSE connections disabled to prevent request blocking. call_end events will be handled via polling.',
+      });
+      console.log('[API-CALL] 🚫 Blocked SSE connection attempt', {
+        interactionId,
+        endpoint: '/api/events/stream',
+        reason: 'POLLING_MODE=true',
+        timestamp: new Date().toISOString(),
+      });
+      return;
+    }
+    
     if (!useSse) {
       // CRITICAL FIX: Only log "demo mode" if we have interactionId but SSE is disabled
       // If no interactionId, we're just waiting for auto-discovery - don't log confusing message
@@ -525,6 +544,13 @@ export default function AgentAssistPanelV2({
     });
     const url = `/api/events/stream?callId=${encodeURIComponent(interactionId)}`;
     console.log('[DEBUG] SSE URL:', url);
+    console.log('[API-CALL] 🔌 Creating SSE connection', {
+      interactionId,
+      endpoint: '/api/events/stream',
+      url,
+      timestamp: new Date().toISOString(),
+      warning: 'This should not happen when POLLING_MODE=true',
+    });
     eventSource = new EventSource(url);
 
     eventSource.onopen = () => {
