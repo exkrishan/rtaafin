@@ -161,7 +161,19 @@ function LivePageContent() {
             });
           }
         } else {
-          console.debug('[Live] No active calls found, keeping current callId');
+          // CRITICAL FIX: Clear callId when no active calls are found
+          // This prevents polling from continuing with ended call IDs
+          setCallId(prevCallId => {
+            if (prevCallId) {
+              console.log('[Live] 🛑 No active calls found - clearing callId', {
+                previousCallId: prevCallId,
+                note: 'This will stop transcript polling for the ended call',
+              });
+              return '';
+            }
+            return prevCallId;
+          });
+          setLastDiscoveredCallId(null);
         }
       } catch (err: any) {
         // Handle timeout and network errors with exponential backoff

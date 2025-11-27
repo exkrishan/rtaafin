@@ -139,6 +139,8 @@ export function useRealtimeTranscript(
   const reconnectAttemptsRef = useRef(0);
   const pollIntervalRef = useRef<NodeJS.Timeout | undefined>(undefined);
   const lastSeqRef = useRef<number>(0); // Track last seq to only fetch new transcripts
+  const consecutiveEmptyResponsesRef = useRef<number>(0); // Track consecutive empty responses
+  const MAX_CONSECUTIVE_EMPTY_RESPONSES = 6; // Stop polling after 6 empty responses (30 seconds)
   
   // Log initial state creation
   useEffect(() => {
@@ -250,8 +252,13 @@ export function useRealtimeTranscript(
       setError(null);
       setTranscripts([]);
       cleanup();
+      // Reset consecutive empty responses counter
+      consecutiveEmptyResponsesRef.current = 0;
       return;
     }
+    
+    // Reset consecutive empty responses counter when callId changes
+    consecutiveEmptyResponsesRef.current = 0;
 
     // CRITICAL FIX: Trigger subscription to ensure backend is listening to this call's transcripts
     // This is required because auto-discovery is disabled in TranscriptConsumer
@@ -333,6 +340,43 @@ export function useRealtimeTranscript(
             });
             
             if (data.ok && data.transcripts && Array.isArray(data.transcripts)) {
+              // CRITICAL FIX: Check for empty transcripts and stop polling after consecutive empty responses
+              const hasTranscripts = data.transcripts.length > 0;
+              
+              if (hasTranscripts) {
+                // Reset counter when transcripts are found
+                consecutiveEmptyResponsesRef.current = 0;
+              } else {
+                // Increment counter for empty responses
+                consecutiveEmptyResponsesRef.current += 1;
+                console.log('[useRealtimeTranscript] ⚠️ Empty transcript response', {
+                  callId,
+                  consecutiveEmpty: consecutiveEmptyResponsesRef.current,
+                  maxAllowed: MAX_CONSECUTIVE_EMPTY_RESPONSES,
+                  note: 'Call may have ended - will stop polling after max consecutive empty responses',
+                });
+                
+                // Stop polling if we've received too many consecutive empty responses
+                if (consecutiveEmptyResponsesRef.current >= MAX_CONSECUTIVE_EMPTY_RESPONSES) {
+                  console.warn('[useRealtimeTranscript] 🛑 Stopping polling - too many consecutive empty responses', {
+                    callId,
+                    consecutiveEmpty: consecutiveEmptyResponsesRef.current,
+                    maxAllowed: MAX_CONSECUTIVE_EMPTY_RESPONSES,
+                    note: 'Call appears to have ended. Polling stopped to prevent unnecessary API calls.',
+                  });
+                  
+                  // Stop polling
+                  if (pollIntervalRef.current) {
+                    clearInterval(pollIntervalRef.current);
+                    pollIntervalRef.current = undefined;
+                  }
+                  
+                  setIsConnected(false);
+                  setError('Call ended - no transcripts received');
+                  return; // Exit early, don't process empty transcripts
+                }
+              }
+              
               logPerformance('Transcript processing (polling mode)', () => {
                 setTranscripts((prev) => {
                   const processStartTime = performance.now();
