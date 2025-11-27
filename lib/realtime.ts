@@ -21,8 +21,8 @@ interface SseClientEntry {
 const clients = new Map<string, SseClientEntry>();
 
 // CRITICAL FIX: Limit SSE clients to prevent memory issues and OOM crashes
-// Reduced from 100 to 50 for 512MB Render instances
-const MAX_SSE_CLIENTS = 50; // Maximum number of concurrent SSE connections
+// Reduced from 100 to 50, then to 20 for 512MB Render instances
+const MAX_SSE_CLIENTS = 20; // Maximum number of concurrent SSE connections (CRITICAL: reduced for 512MB)
 
 // Keep-alive interval (send comment every 30s to prevent timeout)
 const HEARTBEAT_INTERVAL_MS = 30000;
@@ -412,8 +412,8 @@ let staleClientCleanupTimer: NodeJS.Timeout | null = null;
 export function startStaleClientCleanup(): void {
   if (staleClientCleanupTimer) return; // Already running
   
-  const CLEANUP_INTERVAL_MS = 60000; // Check every minute
-  const MAX_CLIENT_AGE_MS = 3600000; // 1 hour
+  const CLEANUP_INTERVAL_MS = 30000; // Check every 30 seconds (CRITICAL MEMORY FIX: reduced from 60s)
+  const MAX_CLIENT_AGE_MS = 600000; // 10 minutes (CRITICAL MEMORY FIX: reduced from 1 hour)
   
   staleClientCleanupTimer = setInterval(() => {
     const now = Date.now();

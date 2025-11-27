@@ -51,7 +51,7 @@ class TranscriptConsumer {
   private baseUrl: string;
   private nextJsApiUrl: string;
   private deadLetterQueue: FailedTranscript[] = []; // In-memory dead-letter queue
-  private maxDeadLetterSize: number = 500; // Max failed transcripts to keep in memory (reduced from 1000 for 512MB instances)
+  private maxDeadLetterSize: number = 50; // Max failed transcripts to keep in memory (reduced from 500 for 512MB instances - CRITICAL MEMORY FIX)
   private retryInterval: NodeJS.Timeout | null = null;
   
   // CRITICAL FIX: Track discovery failures for backoff
@@ -606,11 +606,11 @@ class TranscriptConsumer {
       for (const [interactionId, subscription] of this.subscriptions.entries()) {
         // Check if call is ended (not in active calls list)
         if (!activeCallIds.has(interactionId)) {
-          // Also check if subscription is old (created more than 1 hour ago)
+          // CRITICAL MEMORY FIX: Reduce age threshold from 1 hour to 10 minutes for faster cleanup
           const ageMs = Date.now() - subscription.createdAt.getTime();
-          const oneHourMs = 60 * 60 * 1000;
+          const tenMinutesMs = 10 * 60 * 1000; // 10 minutes (reduced from 1 hour)
           
-          if (ageMs > oneHourMs) {
+          if (ageMs > tenMinutesMs) {
             subscriptionsToCleanup.push(interactionId);
           }
         }
