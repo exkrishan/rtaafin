@@ -7,7 +7,10 @@
  */
 
 import { NextResponse } from 'next/server';
-import { supabase } from '@/lib/supabase';
+import Redis from 'ioredis';
+
+// Initialize Redis client
+const redis = new Redis(process.env.REDIS_URL || process.env.REDISCLOUD_URL || 'redis://localhost:6379');
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -33,50 +36,29 @@ export async function GET(req: Request) {
       );
     }
 
-    // Fetch all transcript chunks from Supabase
-    const { data: transcriptData, error: transcriptError } = await supabase
-      .from('ingest_events')
-      .select('seq, text, ts, created_at')
-      .eq('call_id', callId)
-      .order('seq', { ascending: true });
+    // POC: Fetch all transcripts from Redis List
+    const listKey = `transcripts:${callId}`;
+    const rawTranscripts = await redis.lrange(listKey, 0, -1);
 
-    if (transcriptError) {
-      console.error('[transcripts/latest] Failed to fetch transcripts', {
-        error: transcriptError.message,
-        callId,
-      });
-      return NextResponse.json(
-        { ok: false, error: transcriptError.message },
-        { status: 500 }
-      );
-    }
-
-    if (!transcriptData || !Array.isArray(transcriptData) || transcriptData.length === 0) {
-      return NextResponse.json({
-        ok: true,
-        callId,
-        transcripts: [],
-        count: 0,
-      });
-    }
-
-    // Convert database format to TranscriptUtterance format
-    const transcripts: TranscriptUtterance[] = transcriptData
-      .filter((event: any) => event.text && event.text.trim().length > 0)
-      .map((event: any, index: number) => {
-        // Determine speaker (alternate for demo, or use actual speaker detection if available)
-        const speaker: 'agent' | 'customer' = index % 2 === 0 ? 'customer' : 'agent';
-        
+    // Parse and map transcripts
+    const transcripts: TranscriptUtterance[] = rawTranscripts.map((item, index) => {
+      try {
+        const t = JSON.parse(item);
         return {
-          id: `${callId}-${event.seq}`,
-          text: event.text.trim(),
-          speaker,
-          timestamp: event.ts || event.created_at || new Date().toISOString(),
-          seq: event.seq,
+          id: `${callId}-${t.seq}`,
+          text: t.text,
+          speaker: index % 2 === 0 ? 'customer' : 'agent', // Alternate speaker for now
+          timestamp: new Date(t.timestamp_ms).toISOString(),
+          seq: t.seq,
+          confidence: t.confidence
         };
-      });
+      } catch (e) {
+        console.error('[transcripts/latest] Error parsing transcript item:', e);
+        return null;
+      }
+    }).filter(Boolean) as TranscriptUtterance[];
 
-    console.info('[transcripts/latest] ✅ Fetched transcripts', {
+    console.info('[transcripts/latest] ✅ Fetched transcripts from Redis', {
       callId,
       count: transcripts.length,
     });

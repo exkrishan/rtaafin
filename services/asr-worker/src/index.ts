@@ -6,6 +6,7 @@
  */
 
 import { createServer } from 'http';
+import Redis from 'ioredis';
 import { createPubSubAdapterFromEnv } from '@rtaa/pubsub';
 import { audioTopic, transcriptTopic, callEndTopic } from '@rtaa/pubsub/topics';
 import { createAsrProvider } from './providers';
@@ -61,6 +62,7 @@ interface AudioBuffer {
 
 class AsrWorker {
   private pubsub: ReturnType<typeof createPubSubAdapterFromEnv>;
+  private redis: Redis;
   private asrProvider: ReturnType<typeof createAsrProvider>;
   private buffers: Map<string, AudioBuffer> = new Map();
   private metrics: MetricsCollector;
@@ -76,6 +78,7 @@ class AsrWorker {
 
   constructor() {
     this.pubsub = createPubSubAdapterFromEnv();
+    this.redis = new Redis(process.env.REDIS_URL || process.env.REDISCLOUD_URL || 'redis://localhost:6379');
     
     // Check Exotel Bridge feature flag
     const exoBridgeEnabled = process.env.EXO_BRIDGE_ENABLED === 'true';
@@ -717,9 +720,12 @@ class AsrWorker {
         timestamp_ms: Date.now(),
       };
 
-      await this.pubsub.publish(topic, transcriptMsg);
+      // POC CHANGE: Push to Redis List instead of publishing to stream
+      // await this.pubsub.publish(topic, transcriptMsg);
+      const listKey = `transcripts:${interactionId}`;
+      await this.redis.rpush(listKey, JSON.stringify(transcriptMsg));
       
-      console.info(`[ASRWORKER] 📤 Published transcript to topic ${topic}`, {
+      console.info(`[ASRWORKER] 📤 Pushed transcript to Redis List ${listKey}`, {
         interaction_id: interactionId,
         seq: seq,
         type: type,
@@ -780,29 +786,9 @@ class AsrWorker {
         this.metrics.recordFirstPartial(buffer.interactionId);
       }
 
-      // Publish transcript message (only non-empty transcripts reach here)
-      const transcriptMsg: TranscriptMessage = {
-        interaction_id: buffer.interactionId,
-        tenant_id: buffer.tenantId,
-        seq,
-        type: transcript.type,
-        text: transcript.text.trim(), // Ensure trimmed text
-        confidence: transcript.confidence || 0.9,
-        timestamp_ms: Date.now(),
-      };
+      // Use the centralized publishTranscript method
+      await this.publishTranscript(buffer.interactionId, transcript, seq);
 
-      const topic = transcriptTopic(buffer.interactionId);
-      await this.pubsub.publish(topic, transcriptMsg);
-
-      // Enhanced logging for successful publish
-      const textPreview = transcript.text.substring(0, 50);
-      console.info(`[ASRWorker] ✅ Published ${transcript.type} transcript`, {
-        interaction_id: buffer.interactionId,
-        text: textPreview,
-        textLength: transcript.text.length,
-        seq,
-        provider: process.env.ASR_PROVIDER || 'mock',
-      });
     } catch (error: any) {
       console.error(`[ASRWorker] Error handling transcript response:`, error);
       this.metrics.recordError(error.message || String(error));

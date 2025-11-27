@@ -288,10 +288,10 @@ export function useRealtimeTranscript(
         }
         
         console.log('[useRealtimeTranscript] 🔄 Starting polling (pollMode=true)', { callId });
-        console.log('[API-CALL] 📞 Polling mode: Will call /api/transcripts/latest every 2 seconds', {
+        console.log('[API-CALL] 📞 Polling mode: Will call /api/transcripts/latest every 5 seconds', {
           callId,
           endpoint: '/api/transcripts/latest',
-          interval: '2000ms',
+          interval: '5000ms',
           note: 'SSE connections are disabled in polling mode',
         });
         
@@ -422,9 +422,9 @@ export function useRealtimeTranscript(
           }
         };
         
-        // Poll immediately, then every 2 seconds
+        // Poll immediately, then every 5 seconds
         poll();
-        pollIntervalRef.current = setInterval(poll, 2000);
+        pollIntervalRef.current = setInterval(poll, 5000);
         setIsConnected(true); // Mark as connected when polling starts
       };
       
@@ -841,9 +841,9 @@ export function useRealtimeTranscript(
         }
       };
       
-      // Poll immediately, then every 2 seconds (polling fallback - only used when SSE fails)
+      // Poll immediately, then every 5 seconds (polling fallback - only used when SSE fails)
       poll();
-      pollIntervalRef.current = setInterval(poll, 2000);
+      pollIntervalRef.current = setInterval(poll, 5000);
     };
 
     // Initial connection
