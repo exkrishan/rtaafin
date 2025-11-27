@@ -215,6 +215,11 @@ class TranscriptConsumer {
         transcriptCount: 0,
       });
 
+      // CRITICAL FIX: Also start reading from Redis List for this interaction
+      // ASR worker writes to Redis Lists (transcripts:${interactionId}), not Streams
+      // This ensures KB articles are surfaced even when using Lists
+      this.startRedisListReader(interactionId);
+
       // CRITICAL MEMORY FIX: Rate-limit subscription logging
       const now = Date.now();
       this.subscriptionsLoggedSinceLastReport++;
@@ -234,6 +239,110 @@ class TranscriptConsumer {
         error: error.message || String(error),
       });
       throw error;
+    }
+  }
+
+  /**
+   * CRITICAL FIX: Start reading from Redis List for this interaction
+   * ASR worker writes transcripts to Redis Lists (transcripts:${interactionId})
+   * This ensures KB articles are surfaced even when using Lists instead of Streams
+   */
+  private listReaders: Map<string, NodeJS.Timeout> = new Map();
+  private processedListSeqs: Map<string, Set<number>> = new Map(); // Track processed seqs to avoid duplicates
+
+  private startRedisListReader(interactionId: string): void {
+    // Clear existing reader if any
+    const existingReader = this.listReaders.get(interactionId);
+    if (existingReader) {
+      clearInterval(existingReader);
+    }
+
+    // Initialize processed seqs tracker
+    if (!this.processedListSeqs.has(interactionId)) {
+      this.processedListSeqs.set(interactionId, new Set());
+    }
+
+    console.info('[TranscriptConsumer] Starting Redis List reader', { interactionId });
+
+    // Read from Redis List every 2 seconds
+    const listKey = `transcripts:${interactionId}`;
+    const reader = setInterval(async () => {
+      try {
+        // Get Redis client from pubsub adapter
+        const redisAdapter = this.pubsub as any;
+        if (!redisAdapter || !redisAdapter.redis) {
+          console.warn('[TranscriptConsumer] Redis not available for List reader', { interactionId });
+          return;
+        }
+
+        const redis = redisAdapter.redis;
+        if (redis.status !== 'ready' && redis.status !== 'connecting') {
+          console.warn('[TranscriptConsumer] Redis not ready for List reader', { 
+            interactionId,
+            status: redis.status 
+          });
+          return;
+        }
+
+        // Read all items from the list
+        const rawTranscripts = await redis.lrange(listKey, 0, -1);
+        
+        if (!rawTranscripts || rawTranscripts.length === 0) {
+          return; // No transcripts yet
+        }
+
+        // Process each transcript
+        for (const rawItem of rawTranscripts) {
+          try {
+            const msg: TranscriptMessage = JSON.parse(rawItem);
+            
+            // Skip if already processed (deduplication)
+            const processedSeqs = this.processedListSeqs.get(interactionId);
+            if (processedSeqs && processedSeqs.has(msg.seq)) {
+              continue; // Already processed
+            }
+
+            // Process the transcript
+            await this.handleTranscriptMessage(msg, interactionId);
+
+            // Mark as processed
+            if (processedSeqs) {
+              processedSeqs.add(msg.seq);
+            }
+
+            console.info('[TranscriptConsumer] ✅ Processed transcript from Redis List', {
+              interactionId,
+              seq: msg.seq,
+              textLength: msg.text?.length || 0,
+            });
+          } catch (parseError: any) {
+            console.error('[TranscriptConsumer] Error parsing transcript from List', {
+              interactionId,
+              error: parseError.message,
+            });
+          }
+        }
+      } catch (error: any) {
+        console.error('[TranscriptConsumer] Error reading from Redis List', {
+          interactionId,
+          error: error.message,
+        });
+      }
+    }, 2000); // Check every 2 seconds
+
+    this.listReaders.set(interactionId, reader);
+  }
+
+  /**
+   * Stop reading from Redis List for this interaction
+   */
+  private stopRedisListReader(interactionId: string): void {
+    const reader = this.listReaders.get(interactionId);
+    if (reader) {
+      clearInterval(reader);
+      this.listReaders.delete(interactionId);
+      this.processedListSeqs.delete(interactionId);
+      console.info('[TranscriptConsumer] Stopped Redis List reader', { interactionId });
     }
   }
 
@@ -804,12 +913,18 @@ class TranscriptConsumer {
   async unsubscribeFromInteraction(interactionId: string): Promise<void> {
     const subscription = this.subscriptions.get(interactionId);
     if (!subscription) {
+      // Still stop List reader even if no Stream subscription
+      this.stopRedisListReader(interactionId);
       return;
     }
 
     try {
       await subscription.handle.unsubscribe();
       this.subscriptions.delete(interactionId);
+      
+      // CRITICAL: Also stop Redis List reader
+      this.stopRedisListReader(interactionId);
+      
       console.info('[TranscriptConsumer] Unsubscribed from transcript topic', {
         interactionId,
         transcriptCount: subscription.transcriptCount,
@@ -819,6 +934,8 @@ class TranscriptConsumer {
         interactionId,
         error: error.message || String(error),
       });
+      // Still stop List reader on error
+      this.stopRedisListReader(interactionId);
     }
   }
 

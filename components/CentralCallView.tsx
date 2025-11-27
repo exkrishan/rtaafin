@@ -148,21 +148,21 @@ export default function CentralCallView({
       <div className="flex-1 overflow-y-auto">
         {activeTab === 'customer' && (
           <div className="p-6 space-y-6">
-            {/* Customer Information */}
+            {/* Customer Account Details */}
             <div>
-              <h3 className="text-sm font-semibold text-gray-900 mb-4">Customer Information</h3>
+              <h3 className="text-sm font-semibold text-gray-900 mb-4">Customer Account Details</h3>
               <div className="space-y-3 text-sm">
                 <div className="flex justify-between">
                   <span className="text-gray-600">Phone Number:</span>
                   <span className="text-gray-900 font-medium">{customer.masked_phone}</span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-gray-600">Business Number:</span>
-                  <span className="text-gray-900 font-medium">{customer.masked_phone}</span>
+                  <span className="text-gray-600">Account Number:</span>
+                  <span className="text-gray-900 font-medium">987654321</span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-gray-600">Home Number:</span>
-                  <span className="text-gray-900 font-medium">{customer.masked_phone}</span>
+                  <span className="text-gray-600">Service Address:</span>
+                  <span className="text-gray-900 font-medium">2301 Westheimer Rd, Houston, TX 77098</span>
                 </div>
                 {customer.email && (
                   <div className="flex justify-between">
@@ -171,18 +171,15 @@ export default function CentralCallView({
                   </div>
                 )}
                 <div className="flex justify-between">
-                  <span className="text-gray-600">Instagram:</span>
-                  <div className="flex gap-2">
-                    <span className="text-gray-900 font-medium">@mj12</span>
-                    <span className="text-gray-900 font-medium">@mani12</span>
-                  </div>
+                  <span className="text-gray-600">Preferred Contact Method:</span>
+                  <span className="text-gray-900 font-medium">Email</span>
                 </div>
               </div>
             </div>
 
-            {/* Summary */}
+            {/* Overview */}
             <div>
-              <h3 className="text-sm font-semibold text-gray-900 mb-4">Summary</h3>
+              <h3 className="text-sm font-semibold text-gray-900 mb-4">Overview</h3>
               <button
                 onClick={onOpenCaseHistory}
                 className="px-4 py-2 bg-gray-100 text-gray-700 text-sm font-medium rounded-md hover:bg-gray-200 transition-colors"
@@ -191,10 +188,10 @@ export default function CentralCallView({
               </button>
             </div>
 
-            {/* Past Interactions */}
+            {/* Past Interactions (Service History) */}
             <div>
               <div className="flex items-center justify-between mb-4">
-                <h3 className="text-sm font-semibold text-gray-900">Past Interactions (4)</h3>
+                <h3 className="text-sm font-semibold text-gray-900">Past Interactions (Service History)</h3>
                 <input
                   type="text"
                   placeholder="Search interactions..."
@@ -202,15 +199,15 @@ export default function CentralCallView({
                 />
               </div>
               <div className="space-y-3">
-                {/* Intent */}
+                {/* Intent / Current Issue */}
                 <div className="p-3 bg-gray-50 rounded-md border border-gray-200">
                   <div className="flex items-center gap-2 mb-2">
-                    <span className="text-xs font-semibold text-gray-900">Intent:</span>
-                    <span className="text-xs text-gray-700">Card Replacement Request</span>
+                    <span className="text-xs font-semibold text-gray-900">Intent / Current Issue:</span>
+                    <span className="text-xs text-gray-700">Start Service – Move-In Request</span>
                     <span className="px-2 py-0.5 bg-yellow-100 text-yellow-700 text-xs font-medium rounded">Neutral</span>
                   </div>
                   <p className="text-xs text-gray-600">
-                    Manish had reported a fraudulent SMS and a small unauthorized debit card transaction in the past few months, leading to a new debit card issuance.
+                    Customer is moving into a new home and needs electricity service activated at the earliest available date.
                   </p>
                 </div>
 

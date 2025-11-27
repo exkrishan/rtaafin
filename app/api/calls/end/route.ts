@@ -8,8 +8,12 @@ import { getCallRegistry } from '@/lib/call-registry';
 import { generateCallSummary } from '@/lib/summary';
 import { supabase } from '@/lib/supabase';
 import { unsubscribeFromTranscripts } from '@/lib/transcript-consumer';
+import Redis from 'ioredis';
 
 export const dynamic = 'force-dynamic';
+
+// Initialize Redis client for fallback transcript fetching
+const redis = new Redis(process.env.REDIS_URL || process.env.REDISCLOUD_URL || 'redis://localhost:6379');
 
 interface CallEndRequest {
   interactionId: string;
@@ -62,7 +66,9 @@ export async function POST(req: Request) {
       });
     }
 
-    // Fetch complete transcript from Supabase
+    // Fetch complete transcript from Supabase (primary source)
+    // CRITICAL FIX: Also check Redis Lists as fallback if Supabase is empty
+    // This ensures disposition can be generated even if transcripts haven't been ingested to Supabase yet
     let fullTranscript = '';
     try {
       const { data: transcriptData, error: transcriptError } = await (supabase as any)
@@ -72,22 +78,61 @@ export async function POST(req: Request) {
         .order('seq', { ascending: true });
 
       if (transcriptError) {
-        console.error('[call-end] Failed to fetch transcript', {
+        console.error('[call-end] Failed to fetch transcript from Supabase', {
           error: transcriptError.message,
           interactionId,
         });
-      } else if (transcriptData && Array.isArray(transcriptData)) {
+      } else if (transcriptData && Array.isArray(transcriptData) && transcriptData.length > 0) {
         // Combine all transcript chunks into full transcript
         fullTranscript = transcriptData
           .map((event: any) => event.text)
           .filter((text: string) => text && text.trim().length > 0)
           .join(' ');
 
-        console.info('[call-end] Fetched complete transcript', {
+        console.info('[call-end] Fetched complete transcript from Supabase', {
           interactionId,
           transcriptChunks: transcriptData.length,
           totalLength: fullTranscript.length,
         });
+      } else {
+        // Supabase is empty - try Redis Lists as fallback
+        console.info('[call-end] Supabase transcript empty, checking Redis Lists', { interactionId });
+        try {
+          const listKey = `transcripts:${interactionId}`;
+          const rawTranscripts = await redis.lrange(listKey, 0, -1);
+          
+          if (rawTranscripts && rawTranscripts.length > 0) {
+            // Parse and combine transcripts from Redis List
+            const transcripts = rawTranscripts
+              .map((item) => {
+                try {
+                  return JSON.parse(item);
+                } catch (e) {
+                  return null;
+                }
+              })
+              .filter((t: any) => t && t.text && t.text.trim().length > 0)
+              .sort((a: any, b: any) => (a.seq || 0) - (b.seq || 0)); // Sort by seq
+            
+            fullTranscript = transcripts
+              .map((t: any) => t.text)
+              .join(' ');
+
+            console.info('[call-end] Fetched complete transcript from Redis List', {
+              interactionId,
+              transcriptChunks: transcripts.length,
+              totalLength: fullTranscript.length,
+              note: 'Using Redis List as fallback since Supabase was empty',
+            });
+          } else {
+            console.warn('[call-end] No transcripts found in Redis List either', { interactionId });
+          }
+        } catch (redisError: any) {
+          console.error('[call-end] Error fetching transcript from Redis List', {
+            error: redisError.message,
+            interactionId,
+          });
+        }
       }
     } catch (error: any) {
       console.error('[call-end] Error fetching transcript', {
@@ -97,12 +142,18 @@ export async function POST(req: Request) {
     }
 
     // Generate disposition from complete transcript
+    // WHY: Disposition notes are auto-generated when a call ends to help agents:
+    // 1. Quickly understand call summary (issue, resolution, next steps)
+    // 2. Select appropriate disposition code from suggested options
+    // 3. Save time by pre-filling notes instead of writing from scratch
+    // This is triggered automatically via /api/calls/end when Exotel sends a 'stop' event
     let dispositionResult = null;
     if (fullTranscript && fullTranscript.trim().length > 0) {
       try {
         console.info('[call-end] Generating disposition from transcript', {
           interactionId,
           transcriptLength: fullTranscript.length,
+          note: 'Auto-generating disposition notes to help agent quickly summarize and close the call',
         });
 
         const summaryResult = await generateCallSummary(interactionId, fullTranscript);

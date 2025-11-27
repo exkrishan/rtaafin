@@ -11,16 +11,16 @@ import ToastContainer from '@/components/ToastContainer';
 
 // Mock customer data for live (would come from API in production)
 const mockCustomer: Customer = {
-  name: 'Manish Sharma',
+  name: 'Michael Thompson',
   id: 'cust-789',
-  masked_phone: '+91-XXXX-1234',
-  account: 'MoneyAssure — Card Services',
-  tags: ['Premium', 'Card'],
-  email: 'manish.sharma@example.com',
+  masked_phone: '+1 (713) 555-1298',
+  account: 'Gexa Energy — Customer Care',
+  tags: ['Residential', 'Fixed Rate'],
+  email: 'michael.thompson@example.com',
   lastInteractions: [
-    { date: '2025-10-29', summary: 'Payment issue resolved', caseId: 'CASE-1234' },
-    { date: '2025-09-12', summary: 'KYC updated', caseId: 'CASE-5678' },
-    { date: '2025-07-21', summary: 'Plan upgrade', caseId: 'CASE-9012' },
+    { date: '2025-10-29', summary: 'Payment arrangement set and bill updated', caseId: 'CASE-1234' },
+    { date: '2025-09-12', summary: 'Account identity verified', caseId: 'CASE-5678' },
+    { date: '2025-07-21', summary: 'Customer enrolled in a new fixed-rate plan', caseId: 'CASE-9012' },
   ],
 };
 
@@ -457,7 +457,92 @@ function LivePageContent() {
                   setDispositionOpen(true);
                 });
               }}
-              onEndCall={() => console.log('[Live] End call clicked')}
+              onEndCall={async () => {
+                if (!callId) {
+                  console.warn('[Live] Cannot end call - no callId');
+                  return;
+                }
+                
+                console.log('[Live] End call clicked - generating disposition from current transcript');
+                
+                try {
+                  // Call /api/calls/end to generate disposition from current transcript
+                  const response = await fetch('/api/calls/end', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                      interactionId: callId,
+                      tenantId,
+                    }),
+                  });
+
+                  const result = await response.json();
+
+                  if (result.ok && result.disposition) {
+                    // Convert disposition result to DispositionData format
+                    // Note: API returns mappedDispositions, but we check both for compatibility
+                    const dispositions = result.disposition.suggestedDispositions || result.disposition.mappedDispositions || [];
+                    const firstDisposition = dispositions[0];
+                    const dispositionData: DispositionData = {
+                      dispositionId: firstDisposition?.mappedId?.toString() || firstDisposition?.mappedCode || 'GENERAL_INQUIRY',
+                      dispositionTitle: firstDisposition?.mappedTitle || firstDisposition?.originalLabel || 'General Inquiry',
+                      confidence: firstDisposition?.confidence || firstDisposition?.score || 0.5,
+                      subDispositions: firstDisposition?.subDisposition ? [
+                        {
+                          id: firstDisposition?.subDispositionId?.toString() || '1',
+                          title: firstDisposition?.subDisposition || 'Unknown',
+                        }
+                      ] : undefined,
+                      autoNotes: [
+                        result.disposition.issue,
+                        result.disposition.resolution,
+                        result.disposition.nextSteps,
+                      ].filter(Boolean).join('\n\n') || 'No notes generated.',
+                    };
+
+                    // Set disposition data and open modal
+                    setDispositionData({
+                      suggested: dispositions.map((item: any) => ({
+                        code: item.mappedCode || item.code || 'GENERAL_INQUIRY',
+                        title: item.mappedTitle || item.title || 'General Inquiry',
+                        score: typeof item.score === 'number' ? item.score : 0.5,
+                        id: typeof item.mappedId === 'number' ? item.mappedId : undefined,
+                        subDisposition: item.subDisposition || item.sub_disposition || undefined,
+                        subDispositionId: typeof item.subDispositionId === 'number' ? item.subDispositionId : undefined,
+                      })) || [{ code: 'GENERAL_INQUIRY', title: 'General Inquiry', score: 0.1 }],
+                      autoNotes: dispositionData.autoNotes,
+                    });
+                    setDispositionOpen(true);
+                    
+                    console.info('[Live] ✅ Disposition generated and modal opened', {
+                      callId,
+                      hasDisposition: !!result.disposition,
+                      dispositionsCount: dispositions.length,
+                    });
+                  } else {
+                    // Fallback: try to generate using handleDispositionSummary
+                    console.warn('[Live] /api/calls/end did not return disposition, trying summary API', {
+                      callId,
+                      error: result.error,
+                    });
+                    await handleDispositionSummary(callId);
+                    setDispositionOpen(true);
+                  }
+                } catch (error: any) {
+                  console.error('[Live] Failed to generate disposition on call end', {
+                    callId,
+                    error: error.message,
+                  });
+                  // Still try to open disposition modal with summary API as fallback
+                  try {
+                    await handleDispositionSummary(callId);
+                    setDispositionOpen(true);
+                  } catch (fallbackError: any) {
+                    console.error('[Live] Fallback disposition generation also failed', fallbackError);
+                    alert('Failed to generate disposition: ' + (error?.message || 'Unknown error'));
+                  }
+                }
+              }}
               onOpenCRM={() => {
                 console.log('[Live] Open CRM clicked');
                 window.open('https://crm.example.com/customer/cust-789', '_blank');

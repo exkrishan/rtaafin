@@ -99,7 +99,7 @@ export default function CustomerDetailsPanel({
         {activeTab === 'history' && (
           <div className="space-y-4">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="text-sm font-semibold text-gray-900">Past Interactions</h3>
+              <h3 className="text-sm font-semibold text-gray-900">Past Interactions (Service History)</h3>
               <input
                 type="text"
                 placeholder="Search interactions..."

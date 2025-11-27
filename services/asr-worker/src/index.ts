@@ -690,10 +690,10 @@ class AsrWorker {
       clearInterval(existingTimer);
     }
 
-    console.info(`[ASRWorker] 🚀 Starting 10-second timer for ${interactionId}`);
+    console.info(`[ASRWorker] 🚀 Starting 15-second timer for ${interactionId}`);
 
-    // Timer interval: 10 seconds (configurable)
-    const TIMER_INTERVAL_MS = parseInt(process.env.ASR_BUFFER_TIMER_INTERVAL_MS || '10000', 10);
+    // Timer interval: 15 seconds (configurable)
+    const TIMER_INTERVAL_MS = parseInt(process.env.ASR_BUFFER_TIMER_INTERVAL_MS || '15000', 10);
 
     const timer = setInterval(async () => {
       const buffer = this.buffers.get(interactionId);
@@ -744,17 +744,17 @@ class AsrWorker {
         });
         
         // Dump audio chunk to GCS before sending to ElevenLabs
-        dumpBufferedAudioChunk(
+      dumpBufferedAudioChunk(
           interactionId,
-          seq,
+        seq,
           mergedAudio,
-          buffer.sampleRate,
+        buffer.sampleRate,
           totalAudioMs
-        ).catch((err) => {
+      ).catch((err) => {
           // Non-critical - don't block processing
-          console.debug('[ASRWorker] Audio dump failed (non-critical)', { error: err.message });
-        });
-        
+        console.debug('[ASRWorker] Audio dump failed (non-critical)', { error: err.message });
+      });
+      
         // Send to ElevenLabs and measure response time
         const startTime = Date.now();
         const transcript = await this.asrProvider.sendAudioChunk(mergedAudio, {
