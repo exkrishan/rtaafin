@@ -140,7 +140,7 @@ export function useRealtimeTranscript(
   const pollIntervalRef = useRef<NodeJS.Timeout | undefined>(undefined);
   const lastSeqRef = useRef<number>(0); // Track last seq to only fetch new transcripts
   const consecutiveEmptyResponsesRef = useRef<number>(0); // Track consecutive empty responses
-  const MAX_CONSECUTIVE_EMPTY_RESPONSES = 6; // Stop polling after 6 empty responses (30 seconds)
+  const MAX_CONSECUTIVE_EMPTY_RESPONSES = 20; // Stop polling after 20 empty responses (100 seconds)
   
   // Log initial state creation
   useEffect(() => {
