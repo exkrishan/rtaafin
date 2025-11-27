@@ -690,10 +690,10 @@ class AsrWorker {
       clearInterval(existingTimer);
     }
 
-    console.info(`[ASRWorker] 🚀 Starting 15-second timer for ${interactionId}`);
+    console.info(`[ASRWorker] 🚀 Starting 4-second timer for ${interactionId}`);
 
-    // Timer interval: 15 seconds (configurable)
-    const TIMER_INTERVAL_MS = parseInt(process.env.ASR_BUFFER_TIMER_INTERVAL_MS || '15000', 10);
+    // Timer interval: 4 seconds (configurable)
+    const TIMER_INTERVAL_MS = parseInt(process.env.ASR_BUFFER_TIMER_INTERVAL_MS || '4000', 10);
 
     const timer = setInterval(async () => {
       const buffer = this.buffers.get(interactionId);
@@ -760,8 +760,8 @@ class AsrWorker {
         const startTime = Date.now();
         const transcript = await this.asrProvider.sendAudioChunk(mergedAudio, {
           interactionId,
-          seq,
-          sampleRate: buffer.sampleRate,
+        seq,
+        sampleRate: buffer.sampleRate,
           commitImmediately: true, // Commit immediately to get transcript right away
         });
         const responseTimeMs = Date.now() - startTime;
