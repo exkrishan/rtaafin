@@ -176,6 +176,7 @@ export default function DemoPage() {
         });
         
         // Send to API for KB/intent detection and wait for response
+        // waitForKB: true ensures we get KB articles synchronously (demo mode doesn't use SSE)
         const response = await fetch('/api/calls/ingest-transcript', {
           method: 'POST',
           headers: { 
@@ -187,6 +188,7 @@ export default function DemoPage() {
             seq: line.seq,
             ts: line.ts,
             text,
+            waitForKB: true, // Wait for KB articles synchronously (demo mode)
           }),
         });
 

@@ -121,6 +121,7 @@ export interface IngestTranscriptParams {
   ts: string;
   text: string;
   tenantId?: string;
+  waitForKB?: boolean; // If true, wait for KB articles to be fetched synchronously (for demo mode)
 }
 
 export interface IngestTranscriptResult {
@@ -342,6 +343,48 @@ export async function ingestTranscriptCore(
     const MIN_TEXT_LENGTH_FOR_INTENT = 5; // Reduced from 10 to catch more transcripts
     const shouldDetectIntent = params.text.trim().length >= MIN_TEXT_LENGTH_FOR_INTENT;
 
+    // If waitForKB is true (demo mode), wait for KB articles synchronously
+    if (params.waitForKB) {
+      let intent = 'unknown';
+      let confidence = 0.0;
+      let articles: KBArticle[] = [];
+
+      // Try intent-based KB surfacing first
+      if (shouldDetectIntent) {
+        try {
+          const intentResult = await detectIntentAndSurfaceKB(validatedCallId, params.text, params.seq, tenantId, true);
+          intent = intentResult.intent;
+          confidence = intentResult.confidence;
+          articles = intentResult.articles || [];
+        } catch (err) {
+          console.error('[ingest-transcript-core] Intent detection failed (synchronous):', err);
+        }
+      }
+
+      // Always try text-based KB surfacing (even if intent detection ran)
+      // This ensures we get articles even if intent detection fails
+      try {
+        const textBasedArticles = await surfaceKBFromText(validatedCallId, params.text, params.seq, tenantId, true);
+        // Merge articles, avoiding duplicates
+        const existingIds = new Set(articles.map(a => a.id));
+        for (const article of textBasedArticles) {
+          if (!existingIds.has(article.id)) {
+            articles.push(article);
+            existingIds.add(article.id);
+          }
+        }
+      } catch (err) {
+        console.error('[ingest-transcript-core] KB text search failed (synchronous):', err);
+      }
+
+      return {
+        ok: true,
+        intent,
+        confidence,
+        articles: articles.slice(0, 10), // Limit to 10 articles for demo
+      };
+    }
+
     // Fire and forget - don't await intent detection (non-blocking)
     if (shouldDetectIntent) {
       detectIntentAndSurfaceKB(validatedCallId, params.text, params.seq, tenantId)
@@ -381,8 +424,9 @@ async function detectIntentAndSurfaceKB(
   callId: string,
   text: string,
   seq: number,
-  tenantId: string
-): Promise<void> {
+  tenantId: string,
+  returnArticles: boolean = false
+): Promise<{ intent: string; confidence: number; articles: KBArticle[] }> {
   let intent = 'unknown';
   let confidence = 0.0;
   let articles: KBArticle[] = [];
@@ -502,7 +546,13 @@ async function detectIntentAndSurfaceKB(
       }
     } else {
       // CRITICAL FIX: Even if intent is unknown, try to surface KB articles using transcript text
-      await surfaceKBFromText(callId, text, seq, tenantId);
+      if (!returnArticles) {
+        await surfaceKBFromText(callId, text, seq, tenantId);
+      } else {
+        // In synchronous mode, fetch articles and add to result
+        const textBasedArticles = await surfaceKBFromText(callId, text, seq, tenantId, true);
+        articles = [...articles, ...textBasedArticles];
+      }
     }
 
     // Broadcast intent update to real-time listeners
@@ -547,10 +597,20 @@ async function detectIntentAndSurfaceKB(
   } catch (intentErr) {
     console.error('[ingest-transcript-core] Intent detection error:', intentErr);
     // Fallback: try to surface KB from text even if intent detection fails
-    await surfaceKBFromText(callId, text, seq, tenantId).catch(() => {
-      // Ignore errors in fallback
-    });
+    if (!returnArticles) {
+      await surfaceKBFromText(callId, text, seq, tenantId).catch(() => {
+        // Ignore errors in fallback
+      });
+    }
   }
+
+  // Return result if synchronous mode
+  if (returnArticles) {
+    return { intent, confidence, articles };
+  }
+  
+  // Otherwise return empty (async mode)
+  return { intent: 'unknown', confidence: 0.0, articles: [] };
 }
 
 /**
@@ -561,8 +621,9 @@ async function surfaceKBFromText(
   callId: string,
   text: string,
   seq: number,
-  tenantId: string
-): Promise<void> {
+  tenantId: string,
+  returnArticles: boolean = false
+): Promise<KBArticle[]> {
   try {
     console.info('[ingest-transcript-core] Fetching KB articles from transcript text (intent unknown)');
     
@@ -618,9 +679,17 @@ async function surfaceKBFromText(
     } else {
       console.debug('[ingest-transcript-core] No KB articles found for text search');
     }
+    
+    // Return articles if synchronous mode
+    if (returnArticles) {
+      return articles;
+    }
   } catch (err) {
     console.error('[ingest-transcript-core] KB text search error:', err);
     // Don't throw - this is a best-effort operation
   }
+  
+  // Return empty array if error or async mode
+  return [];
 }
 

@@ -14,6 +14,7 @@ interface IngestRequest {
   seq: number;
   ts: string;
   text: string;
+  waitForKB?: boolean; // If true, wait for KB articles to be fetched synchronously
 }
 
 export async function POST(req: Request) {
@@ -30,6 +31,7 @@ export async function POST(req: Request) {
 
     // Extract tenantId from header or default to 'default'
     const tenantId = req.headers.get('x-tenant-id') || 'default';
+    const waitForKB = body.waitForKB === true; // Demo mode: wait for KB articles
 
     console.info('[ingest-transcript] Received HTTP request', {
       callId: body.callId,
@@ -38,6 +40,7 @@ export async function POST(req: Request) {
       textLength: body.text.length,
       textPreview: body.text.substring(0, 50),
       tenantId,
+      waitForKB,
       timestamp: new Date().toISOString(),
     });
 
@@ -48,6 +51,7 @@ export async function POST(req: Request) {
       ts: body.ts,
       text: body.text,
       tenantId,
+      waitForKB, // Pass the flag to wait for KB articles
     });
 
     if (!result.ok) {
@@ -61,7 +65,7 @@ export async function POST(req: Request) {
       ok: true,
       intent: result.intent,
       confidence: result.confidence,
-      articles: result.articles,
+      articles: result.articles || [],
     });
   } catch (err: any) {
     console.error('[ingest-transcript] Error:', err);
