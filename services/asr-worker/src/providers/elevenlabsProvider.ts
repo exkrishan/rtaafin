@@ -300,11 +300,8 @@ export class ElevenLabsProvider implements AsrProvider {
             languageCode: this.languageCode,
             audioFormat: audioFormat,
             sampleRate: sampleRate,
-            commitStrategy: CommitStrategy.VAD,
-            vadSilenceThresholdSecs: parseFloat(process.env.ELEVENLABS_VAD_SILENCE_THRESHOLD || '1.0'), // Tuned for telephony
-            vadThreshold: parseFloat(process.env.ELEVENLABS_VAD_THRESHOLD || '0.4'),
-            minSpeechDurationMs: parseInt(process.env.ELEVENLABS_MIN_SPEECH_DURATION_MS || '100', 10), // Ensure enough audio
-            minSilenceDurationMs: parseInt(process.env.ELEVENLABS_MIN_SILENCE_DURATION_MS || '100', 10),
+            commitStrategy: CommitStrategy.MANUAL,
+            // VAD removed - using manual commits only for better control
           });
           console.info(`[ElevenLabsProvider] ✅ Scribe.connect() succeeded for ${interactionId}`);
         } catch (connectError: any) {
@@ -722,7 +719,7 @@ export class ElevenLabsProvider implements AsrProvider {
           console.debug(`[ElevenLabsProvider] 🔄 Reset uncommitted audio after final transcript`, {
             interactionId,
             previousUncommittedMs: previousUncommittedMs.toFixed(0),
-            note: 'Final transcript received - audio was successfully committed by VAD or manual commit',
+            note: 'Final transcript received - audio was successfully committed via manual commit',
           });
         }
 
@@ -1091,52 +1088,9 @@ export class ElevenLabsProvider implements AsrProvider {
       }
     }
 
-    // 5. Check for silence (common cause of empty transcripts)
-    // CRITICAL FIX: Telephony-specific thresholds - 8kHz audio has much lower energy
-    // Lower thresholds to prevent false silence detection for telephony audio
-    // FIXED: Lowered thresholds further (10/10) to allow low-energy telephony audio to pass through
-    const SILENCE_THRESHOLD_8KHZ = 10;   // Very low for 8kHz telephony (was 25, original was 50)
-    const SILENCE_THRESHOLD_16KHZ = 100; // Standard threshold for 16kHz audio
-    const SILENCE_THRESHOLD = sampleRate === 8000 ? SILENCE_THRESHOLD_8KHZ : SILENCE_THRESHOLD_16KHZ;
-    
-    // For 8kHz telephony, use much lower amplitude thresholds
-    // FIXED: Lowered to 10 to allow low-amplitude telephony audio (16-32 range) to pass through
-    const MIN_AMPLITUDE_8KHZ = 10;   // Very low for 8kHz telephony (was 50, original was 500)
-    const MIN_AMPLITUDE_16KHZ = 1000; // Standard threshold for 16kHz
-    const MIN_AMPLITUDE = sampleRate === 8000 ? MIN_AMPLITUDE_8KHZ : MIN_AMPLITUDE_16KHZ;
-    
-    // CRITICAL: Re-enable silence detection based on testing learnings
-    // Testing showed 60-70% empty transcripts are normal, but we should still skip obvious silence
-    // This prevents wasting API calls on chunks that will definitely return empty transcripts
-    const isSilence = allZeros || (audioEnergy < SILENCE_THRESHOLD && maxAmplitude < MIN_AMPLITUDE);
-    // CRITICAL FIX: Don't skip silence for first 10 chunks (let ElevenLabs decide)
-    // Skip silence only after initial chunks to allow ElevenLabs to establish baseline
-    if (isSilence && seq > 10) {
-      const logLevel = seq <= 5 ? 'warn' : 'debug';
-      const logFn = logLevel === 'warn' ? console.warn : console.debug;
-      logFn(`[ElevenLabsProvider] ⏸️ Skipping silence - not sending to ElevenLabs`, {
-        interactionId,
-        seq,
-        sampleRate,
-        audioEnergy: audioEnergy.toFixed(2),
-        maxAmplitude,
-        allZeros,
-        silenceThreshold: SILENCE_THRESHOLD,
-        minAmplitude: MIN_AMPLITUDE,
-        durationMs: durationMs.toFixed(2),
-        note: sampleRate === 8000 
-          ? '8kHz telephony audio detected as silence. Lower thresholds applied. Skipping send to prevent empty transcripts.'
-          : 'Audio detected as silence. Skipping send to prevent empty transcripts.',
-      });
-      
-      // Return empty transcript immediately - don't send silence to ElevenLabs
-      // This prevents wasting API calls and getting empty transcripts
-      return {
-        type: 'partial',
-        text: '',
-        isFinal: false,
-      };
-    }
+    // 5. VAD removed - send all audio to ElevenLabs
+    // Let ElevenLabs handle silence detection and transcription
+    // This ensures we don't filter out valid audio that might have low energy
 
     // 6. Log audio quality metrics for debugging (first few chunks)
     if (seq <= 5) {
@@ -1152,9 +1106,9 @@ export class ElevenLabsProvider implements AsrProvider {
         minAmplitude,
         validSamples,
         invalidSamples,
-        isSilence,
         chunkSizeRecommendation: audio.length < MIN_RECOMMENDED_CHUNK_SIZE ? 'TOO_SMALL' : 
                                  audio.length > OPTIMAL_CHUNK_SIZE ? 'TOO_LARGE' : 'OPTIMAL',
+        note: 'VAD removed - all audio sent to ElevenLabs',
       });
     }
 
@@ -1337,7 +1291,6 @@ export class ElevenLabsProvider implements AsrProvider {
         audioQuality: {
           energy: audioEnergy.toFixed(2),
           maxAmplitude,
-          isSilence,
         },
       });
     } catch (error: any) {

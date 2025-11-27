@@ -337,7 +337,9 @@ export async function ingestTranscriptCore(
 
     // CRITICAL FIX: Intent detection and KB surfacing - make it NON-BLOCKING
     // This prevents latency from blocking transcript broadcasting
-    const MIN_TEXT_LENGTH_FOR_INTENT = 10;
+    // CRITICAL FIX: Always try to surface KB articles, even for short text
+    // Reduced minimum length to ensure KB suggestions trigger for all transcripts
+    const MIN_TEXT_LENGTH_FOR_INTENT = 5; // Reduced from 10 to catch more transcripts
     const shouldDetectIntent = params.text.trim().length >= MIN_TEXT_LENGTH_FOR_INTENT;
 
     // Fire and forget - don't await intent detection (non-blocking)
@@ -346,13 +348,14 @@ export async function ingestTranscriptCore(
         .catch(err => {
           console.error('[ingest-transcript-core] Intent detection failed (non-blocking):', err);
         });
-    } else {
-      // Even for short text, try to surface KB articles using transcript text
-      surfaceKBFromText(validatedCallId, params.text, params.seq, tenantId)
-        .catch(err => {
-          console.error('[ingest-transcript-core] KB surfacing failed (non-blocking):', err);
-        });
     }
+    
+    // CRITICAL FIX: Always try to surface KB articles, even for short text or when intent detection runs
+    // This ensures KB suggestions appear even if intent detection fails or text is short
+    surfaceKBFromText(validatedCallId, params.text, params.seq, tenantId)
+      .catch(err => {
+        console.error('[ingest-transcript-core] KB surfacing failed (non-blocking):', err);
+      });
 
     // Return immediately (don't wait for intent detection)
     return {

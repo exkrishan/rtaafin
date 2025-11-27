@@ -21,7 +21,8 @@ async function safeTelemetry(event: string, payload: Record<string, any>): Promi
 export async function POST(req: Request) {
   try {
     const body = await req.json().catch(() => ({}));
-    const callId = String(body?.callId || '').trim();
+    // Support both callId and interactionId for backward compatibility
+    const callId = String(body?.callId || body?.interactionId || '').trim();
     const tenantId =
       typeof body?.tenantId === 'string' ? body.tenantId.trim() || undefined : undefined;
     const source = typeof body?.source === 'string' ? body.source : undefined;
@@ -30,7 +31,7 @@ export async function POST(req: Request) {
       return NextResponse.json(
         {
           ok: false,
-          error: 'callId is required',
+          error: 'callId is required (or use interactionId)',
         },
         { status: 400 }
       );
