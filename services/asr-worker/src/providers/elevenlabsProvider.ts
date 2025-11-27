@@ -55,6 +55,8 @@ interface ConnectionState {
   tokenExpiresAt?: number; // Track token expiration time
   bytesSent?: number; // Track bytes sent
   transcriptCount?: number; // Track transcript count
+  uncommittedAudioMs?: number; // Track uncommitted audio duration in milliseconds
+  lastCommitTime?: number; // Track last commit time
 }
 
 interface ElevenLabsMetrics {
@@ -331,6 +333,8 @@ export class ElevenLabsProvider implements AsrProvider {
           tokenExpiresAt,
           bytesSent: 0,
           transcriptCount: 0,
+          uncommittedAudioMs: 0, // Track uncommitted audio duration
+          lastCommitTime: 0, // Track last commit time
         };
 
         // CRITICAL FIX: Register ALL event handlers immediately after connection creation
@@ -708,6 +712,18 @@ export class ElevenLabsProvider implements AsrProvider {
           state.transcriptCount++;
         } else {
           state.transcriptCount = 1;
+        }
+        
+        // CRITICAL FIX: Reset uncommitted audio counter when we receive a final/committed transcript
+        // This means VAD detected a speech boundary and committed, or a manual commit succeeded
+        if (isFinal) {
+          const previousUncommittedMs = state.uncommittedAudioMs || 0;
+          state.uncommittedAudioMs = 0;
+          console.debug(`[ElevenLabsProvider] 🔄 Reset uncommitted audio after final transcript`, {
+            interactionId,
+            previousUncommittedMs: previousUncommittedMs.toFixed(0),
+            note: 'Final transcript received - audio was successfully committed by VAD or manual commit',
+          });
         }
 
         console.info(`[ElevenLabsProvider] 📝 Transcript (${isFinal ? 'FINAL' : 'PARTIAL'}):`, {
@@ -1247,26 +1263,57 @@ export class ElevenLabsProvider implements AsrProvider {
         stateToUse.bytesSent = audio.length;
       }
       
-      // CRITICAL FIX: Add periodic manual commits (recommended every 20-30 seconds)
-      // Even with VAD strategy, periodic commits improve latency
-      const LAST_COMMIT_TIME_KEY = Symbol('lastCommitTime');
+      // CRITICAL FIX: Track uncommitted audio duration
+      // ElevenLabs requires at least 300ms of uncommitted audio before accepting a commit
+      if (stateToUse.uncommittedAudioMs !== undefined) {
+        stateToUse.uncommittedAudioMs += durationMs;
+      } else {
+        stateToUse.uncommittedAudioMs = durationMs;
+      }
+      
+      // CRITICAL FIX: Add periodic manual commits with proper audio accumulation check
+      // ElevenLabs requires minimum 300ms of uncommitted audio before commit
+      const MIN_AUDIO_FOR_COMMIT_MS = parseInt(process.env.ELEVENLABS_MIN_COMMIT_AUDIO_MS || '500', 10); // 500ms to be safe (min is 300ms)
       const COMMIT_INTERVAL_MS = parseInt(process.env.ELEVENLABS_COMMIT_INTERVAL_MS || '25000', 10);
       
-      const lastCommitTime = (stateToUse as any)[LAST_COMMIT_TIME_KEY] || 0;
+      const lastCommitTime = stateToUse.lastCommitTime || 0;
       const timeSinceLastCommit = Date.now() - lastCommitTime;
+      const uncommittedAudioMs = stateToUse.uncommittedAudioMs || 0;
       
-      if (timeSinceLastCommit >= COMMIT_INTERVAL_MS) {
+      // Only commit if:
+      // 1. We have enough uncommitted audio (>= 500ms to be safe, ElevenLabs minimum is 300ms)
+      // 2. AND enough time has passed since last commit (25 seconds)
+      const hasEnoughAudio = uncommittedAudioMs >= MIN_AUDIO_FOR_COMMIT_MS;
+      const hasEnoughTime = timeSinceLastCommit >= COMMIT_INTERVAL_MS;
+      
+      if (hasEnoughAudio && hasEnoughTime) {
         try {
           stateToUse.connection.commit();
-          (stateToUse as any)[LAST_COMMIT_TIME_KEY] = Date.now();
-          console.debug(`[ElevenLabsProvider] 🔄 Periodic commit for ${interactionId}`, {
+          stateToUse.lastCommitTime = Date.now();
+          stateToUse.uncommittedAudioMs = 0; // Reset after commit
+          console.info(`[ElevenLabsProvider] ✅ Periodic commit for ${interactionId}`, {
             interactionId,
+            uncommittedAudioMs: uncommittedAudioMs.toFixed(0),
+            minRequired: MIN_AUDIO_FOR_COMMIT_MS,
             timeSinceLastCommit,
             commitInterval: COMMIT_INTERVAL_MS,
+            note: `Successfully committed ${uncommittedAudioMs.toFixed(0)}ms of audio`,
           });
         } catch (e: any) {
-          console.warn(`[ElevenLabsProvider] ⚠️ Periodic commit failed for ${interactionId}:`, e.message);
+          console.warn(`[ElevenLabsProvider] ⚠️ Periodic commit failed for ${interactionId}:`, e.message, {
+            uncommittedAudioMs: uncommittedAudioMs.toFixed(0),
+            minRequired: MIN_AUDIO_FOR_COMMIT_MS,
+          });
         }
+      } else if (!hasEnoughAudio && seq % 50 === 0) {
+        // Log every 50 chunks to track progress
+        console.debug(`[ElevenLabsProvider] ⏳ Accumulating audio for commit`, {
+          interactionId,
+          uncommittedAudioMs: uncommittedAudioMs.toFixed(0),
+          minRequired: MIN_AUDIO_FOR_COMMIT_MS,
+          remaining: (MIN_AUDIO_FOR_COMMIT_MS - uncommittedAudioMs).toFixed(0),
+          note: 'Waiting to accumulate enough audio before commit',
+        });
       }
 
       console.info(`[ElevenLabsProvider] 📤 Sent audio chunk to ElevenLabs:`, {
