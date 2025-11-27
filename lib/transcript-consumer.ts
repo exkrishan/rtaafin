@@ -538,11 +538,14 @@ class TranscriptConsumer {
   private discoveryInterval: NodeJS.Timeout | null = null;
 
   private async startStreamDiscovery(): Promise<void> {
-    // Run discovery immediately
-    await this.discoverAndSubscribeToNewStreams();
-
-    // CRITICAL FIX: Use dynamic interval that backs off when Redis is down
-    const runDiscovery = async () => {
+    // DISABLED: Blind auto-discovery causes memory leaks by subscribing to old/test calls
+    // New calls are auto-subscribed when first transcript arrives (see ingestTranscriptCore)
+    // This prevents scanning Redis for old streams while still detecting new calls automatically
+    console.info('[TranscriptConsumer] 🚫 Auto-discovery DISABLED - using smart subscription on first transcript');
+    console.info('[TranscriptConsumer] ✅ New calls will be auto-subscribed when first transcript arrives');
+    
+    // Still run periodic cleanup for ended calls
+    const runCleanup = async () => {
       if (!this.isRunning) {
         if (this.discoveryInterval) {
           clearInterval(this.discoveryInterval);
@@ -552,32 +555,25 @@ class TranscriptConsumer {
       }
 
       try {
-        await this.discoverAndSubscribeToNewStreams();
         await this.cleanupEndedCallSubscriptions();
         
-        // Success - reset failure count and use normal interval (1 second for faster discovery)
-        this.discoveryFailureCount = 0;
-        
+        // Run cleanup every 30 seconds (less frequent than discovery)
         if (this.discoveryInterval) {
           clearInterval(this.discoveryInterval);
         }
-        this.discoveryInterval = setTimeout(runDiscovery, 1000);
+        this.discoveryInterval = setTimeout(runCleanup, 30000);
       } catch (error: any) {
-        // Failure - increment failure count and use longer interval (30 seconds) to reduce spam
-        this.discoveryFailureCount++;
-        this.lastDiscoveryFailureTime = Date.now();
+        console.warn('[TranscriptConsumer] Cleanup error:', error.message);
         
         if (this.discoveryInterval) {
           clearInterval(this.discoveryInterval);
         }
-        this.discoveryInterval = setTimeout(runDiscovery, 30000);
+        this.discoveryInterval = setTimeout(runCleanup, 60000); // Retry in 1 minute
       }
     };
     
-    // Start with normal interval (1 second for faster discovery)
-    this.discoveryInterval = setTimeout(runDiscovery, 1000);
-
-    console.info('[TranscriptConsumer] Stream discovery started (auto-subscribe mode)');
+    // Start cleanup loop
+    this.discoveryInterval = setTimeout(runCleanup, 30000); // First run after 30 seconds
   }
 
   /**

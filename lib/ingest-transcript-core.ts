@@ -175,6 +175,30 @@ export async function ingestTranscriptCore(
 
     const tenantId = params.tenantId || 'default';
 
+    // CRITICAL FIX: Smart auto-subscription on first transcript
+    // This replaces blind auto-discovery to prevent memory leaks from old calls
+    // Only subscribe when we receive actual transcripts (proves call is active)
+    if (params.seq <= 2) { // First or second transcript
+      try {
+        const { subscribeToTranscripts } = await import('./transcript-consumer');
+        await subscribeToTranscripts(validatedCallId);
+        console.info('[ingest-transcript-core] ✅ Auto-subscribed to new call (first transcript)', {
+          callId: validatedCallId,
+          seq: params.seq,
+          timestamp: new Date().toISOString(),
+        });
+      } catch (subscribeErr: any) {
+        // Already subscribed or consumer not running - this is fine
+        if (!subscribeErr.message?.includes('already') && !subscribeErr.message?.includes('subscription')) {
+          console.warn('[ingest-transcript-core] Failed to auto-subscribe (non-critical)', {
+            callId: validatedCallId,
+            seq: params.seq,
+            error: subscribeErr.message,
+          });
+        }
+      }
+    }
+
     console.info('[ingest-transcript-core] Processing transcript chunk', {
       callId: validatedCallId,
       seq: params.seq,
