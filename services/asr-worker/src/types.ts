@@ -31,6 +31,7 @@ export interface AsrProvider {
       interactionId: string;
       seq: number;
       sampleRate: number;
+      commitImmediately?: boolean; // Optional: commit immediately after sending (for timer-based sending)
     }
   ): Promise<Transcript>;
 

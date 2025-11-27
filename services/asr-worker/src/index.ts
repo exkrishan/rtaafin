@@ -756,11 +756,13 @@ class AsrWorker {
       });
       
         // Send to ElevenLabs and measure response time
+        // commitImmediately: true ensures transcript is returned right away after sending
         const startTime = Date.now();
         const transcript = await this.asrProvider.sendAudioChunk(mergedAudio, {
           interactionId,
-        seq,
-        sampleRate: buffer.sampleRate,
+          seq,
+          sampleRate: buffer.sampleRate,
+          commitImmediately: true, // Commit immediately to get transcript right away
         });
         const responseTimeMs = Date.now() - startTime;
         
