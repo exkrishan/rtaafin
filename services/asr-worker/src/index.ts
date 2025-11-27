@@ -449,11 +449,8 @@ class AsrWorker {
         };
         this.buffers.set(interactionId, buffer);
         
-      // Start 5-second timer for this interaction
-      // this.startBufferProcessingTimer(interactionId);
-      
-      // Check buffer size immediately
-      // this.checkAndProcessBuffer(interactionId);
+        // Start 10-second timer for this interaction
+        this.startBufferProcessingTimer(interactionId);
       }
 
       // Add chunk to buffer
@@ -476,9 +473,6 @@ class AsrWorker {
           total_audio_ms: totalAudioMs.toFixed(0),
         });
       }
-
-      // Check and process buffer if it exceeds threshold
-      await this.checkAndProcessBuffer(interactionId);
     } catch (error: any) {
       console.error('[ASRWorker] Error buffering audio:', error);
       this.metrics.recordError(error.message || String(error));
@@ -686,7 +680,7 @@ class AsrWorker {
   }
 
   /**
-   * Simple timer-based processing: runs every 5 seconds
+   * Simple timer-based processing: runs every 10 seconds
    * Merges all buffered chunks and sends to ElevenLabs
    */
   private startBufferProcessingTimer(interactionId: string): void {
@@ -696,10 +690,10 @@ class AsrWorker {
       clearInterval(existingTimer);
     }
 
-    console.info(`[ASRWorker] 🚀 Starting 5-second timer for ${interactionId}`);
+    console.info(`[ASRWorker] 🚀 Starting 10-second timer for ${interactionId}`);
 
-    // Timer interval: 5 seconds (configurable)
-    const TIMER_INTERVAL_MS = parseInt(process.env.ASR_BUFFER_TIMER_INTERVAL_MS || '5000', 10);
+    // Timer interval: 10 seconds (configurable)
+    const TIMER_INTERVAL_MS = parseInt(process.env.ASR_BUFFER_TIMER_INTERVAL_MS || '10000', 10);
 
     const timer = setInterval(async () => {
       const buffer = this.buffers.get(interactionId);
@@ -747,6 +741,18 @@ class AsrWorker {
           chunks_found: numChunks,
           total_audio_ms: totalAudioMs.toFixed(0),
           merged_size_bytes: mergedAudio.length,
+        });
+        
+        // Dump audio chunk to GCS before sending to ElevenLabs
+        dumpBufferedAudioChunk(
+          interactionId,
+          seq,
+          mergedAudio,
+          buffer.sampleRate,
+          totalAudioMs
+        ).catch((err) => {
+          // Non-critical - don't block processing
+          console.debug('[ASRWorker] Audio dump failed (non-critical)', { error: err.message });
         });
         
         // Send to ElevenLabs and measure response time
