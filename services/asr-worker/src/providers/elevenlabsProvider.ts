@@ -1331,14 +1331,45 @@ export class ElevenLabsProvider implements AsrProvider {
           });
         }
       } else {
-        // Free flow mode: no commits, just send audio and get partial transcripts
-        // ElevenLabs automatically returns partial transcripts as it processes audio
-        console.debug(`[ElevenLabsProvider] 🆓 Free flow mode - no commits, waiting for partial transcripts`, {
-          interactionId,
-          seq,
-          audioDurationMs: durationMs.toFixed(0),
-          note: 'ElevenLabs will return partial transcripts automatically as it processes audio - no commits needed',
-        });
+        // FREE FLOW MODE WITH PERIODIC COMMITS (HACK)
+        // ElevenLabs doesn't send partial transcripts reliably without commits
+        // So we commit every 5 seconds to force transcripts, but still use async callback
+        const FREE_FLOW_COMMIT_INTERVAL_MS = 5000; // Commit every 5 seconds
+        const MIN_AUDIO_FOR_COMMIT_MS = 300; // Minimum 300ms (ElevenLabs requirement)
+        
+        const lastCommitTime = stateToUse.lastCommitTime || 0;
+        const timeSinceLastCommit = Date.now() - lastCommitTime;
+        const uncommittedAudioMs = stateToUse.uncommittedAudioMs || 0;
+        
+        // Commit periodically to force transcripts (even in free flow mode)
+        if (uncommittedAudioMs >= MIN_AUDIO_FOR_COMMIT_MS && 
+            timeSinceLastCommit >= FREE_FLOW_COMMIT_INTERVAL_MS) {
+          try {
+            stateToUse.connection.commit();
+            stateToUse.lastCommitTime = Date.now();
+            stateToUse.uncommittedAudioMs = 0;
+            console.info(`[ElevenLabsProvider] 🔄 Free flow periodic commit (5s) for ${interactionId}`, {
+              interactionId,
+              uncommittedAudioMs: uncommittedAudioMs.toFixed(0),
+              timeSinceLastCommit,
+              note: 'Periodic commit every 5s to force ElevenLabs to send transcripts',
+            });
+          } catch (e: any) {
+            console.warn(`[ElevenLabsProvider] ⚠️ Free flow commit failed:`, e.message);
+          }
+        } else {
+          // Log periodically to show we're accumulating audio
+          if (seq % 20 === 0) {
+            console.debug(`[ElevenLabsProvider] 🆓 Free flow mode - accumulating audio for commit`, {
+              interactionId,
+              seq,
+              uncommittedAudioMs: uncommittedAudioMs.toFixed(0),
+              timeSinceLastCommit,
+              remainingTime: (FREE_FLOW_COMMIT_INTERVAL_MS - timeSinceLastCommit).toFixed(0),
+              note: 'Will commit when 5s interval passes and 300ms audio accumulated',
+            });
+          }
+        }
       }
 
       console.info(`[ElevenLabsProvider] 📤 Sent audio chunk to ElevenLabs:`, {
