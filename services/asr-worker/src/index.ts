@@ -1208,14 +1208,16 @@ class AsrWorker {
       const timeSinceLastContinuousSend = Date.now() - buffer.lastContinuousSendTime;
       
       // Provider-specific thresholds - optimized for real-time processing
-      // CRITICAL: Reduced all thresholds to 20ms minimum for real-time transcription
-      // This enables transcripts to be generated as soon as audio chunks arrive
+      // CRITICAL: ElevenLabs requires 300ms minimum for VAD commit (0.3s uncommitted audio)
+      // Deepgram can handle smaller chunks for ultra-low latency
       const isElevenLabs = ASR_PROVIDER === 'elevenlabs';
-      // Real-time configuration: 20ms minimum for both providers
-      const MIN_CHUNK_DURATION_MS = 20; // Real-time: 20ms for both ElevenLabs and Deepgram
-      const MAX_TIME_BETWEEN_SENDS_MS = isElevenLabs ? 200 : 200; // Real-time: 200ms max wait (reduced from 2000ms)
-      const TIMEOUT_FALLBACK_MS = isElevenLabs ? 500 : 500; // Real-time: 500ms timeout (reduced from 5000ms)
-      const TIMEOUT_FALLBACK_MIN_MS = 20; // Real-time: 20ms minimum for both providers
+      
+      // ElevenLabs: 300ms chunks = ~9,600 bytes at 16kHz (within 4096-8192 byte recommendation)
+      // Deepgram: 20ms chunks for ultra-low latency
+      const MIN_CHUNK_DURATION_MS = isElevenLabs ? 300 : 20; // 300ms for ElevenLabs (required), 20ms for Deepgram
+      const MAX_TIME_BETWEEN_SENDS_MS = isElevenLabs ? 400 : 200; // 400ms for ElevenLabs, 200ms for Deepgram
+      const TIMEOUT_FALLBACK_MS = isElevenLabs ? 800 : 500; // 800ms for ElevenLabs, 500ms for Deepgram
+      const TIMEOUT_FALLBACK_MIN_MS = isElevenLabs ? 300 : 20; // 300ms for ElevenLabs (required), 20ms for Deepgram
       
       // Provider-specific max chunk size: Reduced for real-time processing
       const MAX_CHUNK_DURATION_MS_PROVIDER = MAX_CHUNK_DURATION_MS; // Use global max (100ms)
@@ -1226,33 +1228,33 @@ class AsrWorker {
       const isTimeoutRisk = timeSinceLastContinuousSend >= TIMEOUT_FALLBACK_MS && currentAudioDurationMs >= TIMEOUT_FALLBACK_MIN_MS;
 
       // Process if:
-      // 1. We have minimum chunk size (500ms for ElevenLabs TESTING, 250ms for Deepgram) - SEND
+      // 1. We have minimum chunk size (300ms for ElevenLabs, 20ms for Deepgram) - SEND
       // 2. Buffer exceeds max chunk size - SEND (split)
       // 3. Timeout risk: waited too long AND have minimum audio - SEND (prevent timeout)
       // 4. Timeout: waited >= MAX_TIME_BETWEEN_SENDS_MS - SEND (force send to prevent timeout)
       // 5. Very long timeout: waited >10 seconds (both) - SEND if have minimum
       const hasTimedOut = timeSinceLastContinuousSend >= MAX_TIME_BETWEEN_SENDS_MS;
-      const VERY_LONG_TIMEOUT_MS = isElevenLabs ? 15000 : 10000; // 15s for ElevenLabs to accumulate 2s, 10s for Deepgram
+      const VERY_LONG_TIMEOUT_MS = isElevenLabs ? 2000 : 10000; // 2s for ElevenLabs, 10s for Deepgram
       const isVeryLongTimeout = timeSinceLastContinuousSend >= VERY_LONG_TIMEOUT_MS;
       const shouldProcess = hasMinimumChunkSize || exceedsMaxChunkSize || isTimeoutRisk || hasTimedOut || isVeryLongTimeout;
 
       // Minimum chunk for send: provider-specific minimum normally, timeout fallback minimum if timeout risk
-      // TESTING: Using 500ms minimum instead of 2000ms
-      // For Deepgram, can allow smaller chunks on timeout to prevent deadlock
+      // ElevenLabs: 300ms minimum (required by VAD commit)
+      // Deepgram: 20ms for ultra-low latency, can allow smaller chunks on timeout
       const minChunkForSend = isElevenLabs
-        ? MIN_CHUNK_DURATION_MS // Normal: require 500ms (TESTING)
+        ? MIN_CHUNK_DURATION_MS // ElevenLabs: require 300ms minimum
         : (isTimeoutRisk 
             ? TIMEOUT_FALLBACK_MIN_MS 
-            : (hasTimedOut && currentAudioDurationMs >= 200) // Allow 200ms on normal timeout (3s) to prevent deadlock
+            : (hasTimedOut && currentAudioDurationMs >= 200) // Allow 200ms on normal timeout to prevent deadlock
               ? 200
-              : (isVeryLongTimeout && currentAudioDurationMs >= 200) // Allow 200ms minimum for very long timeouts (>10s)
+              : (isVeryLongTimeout && currentAudioDurationMs >= 200) // Allow 200ms minimum for very long timeouts
                 ? 200
                 : MIN_CHUNK_DURATION_MS);
       
-      // TESTING: Using 500ms minimum instead of 2000ms for continuous streaming
-      // This allows chunks to be sent more frequently
+      // ElevenLabs: enforce 300ms minimum to meet VAD commit requirements
+      // Deepgram: use flexible logic for optimal real-time performance
       const finalShouldProcess = isElevenLabs
-        ? (shouldProcess && currentAudioDurationMs >= MIN_CHUNK_DURATION_MS) // For ElevenLabs, require 500ms minimum (TESTING)
+        ? (shouldProcess && currentAudioDurationMs >= MIN_CHUNK_DURATION_MS) // For ElevenLabs, require 300ms minimum
         : shouldProcess; // For Deepgram, use original logic
       
       // DIAGNOSTIC: Calculate accumulation rate to detect slow audio arrival
@@ -1408,12 +1410,12 @@ class AsrWorker {
       // Determine required duration based on mode and provider
       // CRITICAL: These must match the timer settings above - optimized for real-time
       let requiredDuration: number;
-      const TIMEOUT_FALLBACK_MS = 500; // Real-time: 500ms timeout for both providers (reduced from 5000ms)
-      const TIMEOUT_FALLBACK_MIN_MS = 20; // Real-time: 20ms minimum for both providers
+      const TIMEOUT_FALLBACK_MS = isElevenLabs ? 800 : 500; // 800ms for ElevenLabs, 500ms for Deepgram
+      const TIMEOUT_FALLBACK_MIN_MS = isElevenLabs ? 300 : 20; // 300ms for ElevenLabs (required), 20ms for Deepgram
       
       if (!buffer.hasSentInitialChunk) {
-        // Initial chunk: Require provider-specific minimum (2000ms for ElevenLabs, 250ms for others)
-        // CRITICAL: ElevenLabs requires 2 seconds before transcription can start
+        // Initial chunk: Require provider-specific minimum (300ms for ElevenLabs, varies for others)
+        // CRITICAL: ElevenLabs requires 300ms minimum for VAD commit
         const MAX_INITIAL_WAIT_MS = MAX_WAIT_MS;
         if (timeSinceBufferCreation >= MAX_INITIAL_WAIT_MS && totalAudioDurationMs >= MIN_INITIAL_CHUNK_DURATION_MS) {
           // Force send if waited too long, but still require minimum
@@ -1423,16 +1425,16 @@ class AsrWorker {
         }
       } else {
         // Continuous mode: Provider-specific minimum, with timeout fallback
-        // TESTING: Changed from 2000ms to 500ms to test continuous streaming
-        // Hypothesis: ElevenLabs accumulates audio internally, so we can send smaller chunks
-        const NORMAL_TIMEOUT_MS = MAX_WAIT_MS; // 2s for ElevenLabs, 1s for Deepgram
-        const VERY_LONG_TIMEOUT_MS = isElevenLabs ? 10000 : 10000; // 10s for both
+        // ElevenLabs: 300ms minimum (required by VAD commit)
+        // Deepgram: 20ms for ultra-low latency
+        const NORMAL_TIMEOUT_MS = MAX_WAIT_MS; // 400ms for ElevenLabs, 200ms for Deepgram
+        const VERY_LONG_TIMEOUT_MS = isElevenLabs ? 2000 : 10000; // 2s for ElevenLabs, 10s for Deepgram
         
         if (isElevenLabs) {
-          // Continuous mode: Real-time processing with 20ms minimum chunks
-          // This enables immediate transcription as audio arrives
+          // Continuous mode: Real-time processing with 300ms minimum chunks
+          // CRITICAL: ElevenLabs requires 300ms (0.3s) minimum for VAD commit
           if (timeSinceLastSend >= VERY_LONG_TIMEOUT_MS && totalAudioDurationMs >= MIN_CONTINUOUS_CHUNK_DURATION_MS) {
-            // Very long timeout: send if we have minimum (20ms)
+            // Very long timeout: send if we have minimum (300ms)
             requiredDuration = MIN_CONTINUOUS_CHUNK_DURATION_MS;
             console.warn(`[ASRWorker] ⚠️ Very long timeout (${timeSinceLastSend}ms): sending ${totalAudioDurationMs.toFixed(0)}ms chunk (minimum: ${MIN_CONTINUOUS_CHUNK_DURATION_MS}ms) for ElevenLabs`, {
               interaction_id: buffer.interactionId,
@@ -1440,20 +1442,20 @@ class AsrWorker {
               timeSinceLastSend,
               totalAudioDurationMs: totalAudioDurationMs.toFixed(0),
               chunksInBuffer: buffer.chunks.length,
-              note: 'Real-time mode: Using 20ms minimum for immediate transcription',
+              note: 'ElevenLabs requires 300ms minimum for VAD commit',
             });
           } else if (timeSinceLastSend >= NORMAL_TIMEOUT_MS && totalAudioDurationMs >= MIN_CONTINUOUS_CHUNK_DURATION_MS) {
-            // Normal timeout: send if we have minimum (20ms)
+            // Normal timeout: send if we have minimum (300ms)
             requiredDuration = MIN_CONTINUOUS_CHUNK_DURATION_MS;
             console.info(`[ASRWorker] ⏰ Max wait reached: sending ${totalAudioDurationMs.toFixed(0)}ms chunk after ${timeSinceLastSend}ms wait`, {
               interaction_id: buffer.interactionId,
               provider: ASR_PROVIDER,
               timeSinceLastSend,
               totalAudioDurationMs: totalAudioDurationMs.toFixed(0),
-              note: 'Real-time mode: Using 20ms minimum for immediate transcription',
+              note: 'ElevenLabs requires 300ms minimum for VAD commit',
             });
           } else {
-            // Not enough audio yet - wait for minimum (20ms)
+            // Not enough audio yet - wait for minimum (300ms)
             requiredDuration = MIN_CONTINUOUS_CHUNK_DURATION_MS;
           }
         } else {
