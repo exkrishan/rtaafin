@@ -392,7 +392,7 @@ class AsrWorker {
     
     try {
       // Skip if call has ended
-      if (interactionId && this.endedCalls.has(interactionId)) {
+    if (interactionId && this.endedCalls.has(interactionId)) {
         return;
       }
 
@@ -401,7 +401,7 @@ class AsrWorker {
       
       if (!audioData || typeof audioData !== 'string') {
         console.error('[ASRWorker] ❌ Missing audio data:', {
-          interaction_id: interactionId,
+        interaction_id: interactionId,
           seq,
         });
         return;
@@ -467,7 +467,7 @@ class AsrWorker {
       
       // Log every 10th chunk to avoid spam
       if (seq % 10 === 0) {
-        const totalBytes = buffer.chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+      const totalBytes = buffer.chunks.reduce((sum, chunk) => sum + chunk.length, 0);
         const totalAudioMs = (totalBytes / 2 / sampleRate) * 1000;
         
         console.info(`[ASRWorker] 📥 Buffered chunk ${seq}`, {
@@ -615,16 +615,16 @@ class AsrWorker {
    * This replaces the timer-based approach for lower latency
    */
   private async checkAndProcessBuffer(interactionId: string): Promise<void> {
-    const buffer = this.buffers.get(interactionId);
+      const buffer = this.buffers.get(interactionId);
     if (!buffer || buffer.chunks.length === 0) return;
 
     // Calculate total audio duration
     const totalBytes = buffer.chunks.reduce((sum, chunk) => sum + chunk.length, 0);
     const totalAudioMs = (totalBytes / 2 / buffer.sampleRate) * 1000;
 
-    // CRITICAL: Only send if we have enough audio (300ms)
+    // CRITICAL: Only send if we have enough audio (100ms)
     // This prevents "commit_throttled" errors and 10s timeouts from ElevenLabs
-    const MIN_SEND_DURATION_MS = 300;
+    const MIN_SEND_DURATION_MS = 100;
 
     if (totalAudioMs < MIN_SEND_DURATION_MS) {
       return; // Keep buffering
@@ -656,7 +656,7 @@ class AsrWorker {
       // Send to ElevenLabs and measure response time
       const startTime = Date.now();
       const transcript = await this.asrProvider.sendAudioChunk(mergedAudio, {
-        interactionId,
+          interactionId,
         seq,
         sampleRate: buffer.sampleRate,
       });
@@ -681,7 +681,7 @@ class AsrWorker {
       
     } catch (error: any) {
       console.error(`[ASRWORKER] ❌ Buffer processing error for ${interactionId}:`, error);
-      this.metrics.recordError(error.message || String(error));
+          this.metrics.recordError(error.message || String(error));
     }
   }
 
@@ -719,11 +719,11 @@ class AsrWorker {
       }
 
       // Skip if no chunks buffered
-      if (buffer.chunks.length === 0) {
-        return;
-      }
+    if (buffer.chunks.length === 0) {
+      return;
+    }
 
-      try {
+    try {
         // Get all buffered chunks
         const chunksToProcess = [...buffer.chunks];
         const numChunks = chunksToProcess.length;
@@ -753,8 +753,8 @@ class AsrWorker {
         const startTime = Date.now();
         const transcript = await this.asrProvider.sendAudioChunk(mergedAudio, {
           interactionId,
-          seq,
-          sampleRate: buffer.sampleRate,
+        seq,
+        sampleRate: buffer.sampleRate,
         });
         const responseTimeMs = Date.now() - startTime;
         
