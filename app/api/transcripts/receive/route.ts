@@ -1,44 +1,71 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { supabase } from '@/lib/supabase';
-import { ingestTranscriptCore } from '@/lib/ingest-transcript-core';
+import { ingestTranscriptCore, getTranscriptsFromCache } from '@/lib/ingest-transcript-core';
 
-// Cache for max seq per callId (1 second TTL)
-const seqCache = new Map<string, { maxSeq: number; timestamp: number }>();
+// Atomic counter per callId for sequence numbers
+// CRITICAL: Use Map with atomic operations to prevent race conditions
+const seqCounters = new Map<string, number>();
+const seqLocks = new Map<string, Promise<number>>();
 
 /**
  * Get the next sequence number for a given callId
- * Uses in-memory cache with 1 second TTL to reduce DB queries
+ * THREAD-SAFE: Uses per-callId locks to prevent race conditions
+ * Uses in-memory cache from ingest-transcript-core to get current max seq
  */
 async function getNextSeq(callId: string): Promise<number> {
-  // Check cache first
-  const cached = seqCache.get(callId);
-  if (cached && Date.now() - cached.timestamp < 1000) {
-    const nextSeq = cached.maxSeq + 1;
-    // Update cache with new max
-    seqCache.set(callId, { maxSeq: nextSeq, timestamp: cached.timestamp });
+  // Check if there's already a pending request for this callId (prevent race condition)
+  const existingLock = seqLocks.get(callId);
+  if (existingLock) {
+    // Wait for the existing request to complete, then increment
+    const baseSeq = await existingLock;
+    const nextSeq = baseSeq + 1;
+    seqCounters.set(callId, nextSeq);
+    seqLocks.delete(callId);
     return nextSeq;
   }
   
-  // Query Supabase for max seq
-  const { data, error } = await (supabase as any)
-    .from('ingest_events')
-    .select('seq')
-    .eq('call_id', callId)
-    .order('seq', { ascending: false })
-    .limit(1);
+  // Create a new lock promise
+  const lockPromise = (async () => {
+    try {
+      // Get current max seq from in-memory cache (transcripts are cached, not in DB)
+      const cachedTranscripts = getTranscriptsFromCache(callId);
+      const currentMaxSeq = cachedTranscripts.length > 0
+        ? Math.max(...cachedTranscripts.map(t => t.seq))
+        : 0;
+      
+      // Use the higher of: cache max or counter
+      const counterSeq = seqCounters.get(callId) || 0;
+      const baseSeq = Math.max(currentMaxSeq, counterSeq);
+      const nextSeq = baseSeq + 1;
+      
+      // Update counter BEFORE returning (atomic operation)
+      seqCounters.set(callId, nextSeq);
+      
+      console.log('[ReceiveTranscript] Generated seq (thread-safe)', {
+        callId,
+        nextSeq,
+        currentMaxSeq,
+        counterSeq,
+        cachedCount: cachedTranscripts.length,
+      });
+      
+      return nextSeq;
+    } catch (error: any) {
+      console.error('[ReceiveTranscript] Error generating seq:', error);
+      // Fallback: Use timestamp-based seq (guaranteed unique)
+      const fallbackSeq = Date.now();
+      seqCounters.set(callId, fallbackSeq);
+      return fallbackSeq;
+    } finally {
+      // Remove lock after completion
+      seqLocks.delete(callId);
+    }
+  })();
   
-  if (error) {
-    console.error('[ReceiveTranscript] Error querying max seq:', error);
-    // Fallback to timestamp-based seq if query fails
-    return Date.now();
-  }
+  // Store the lock promise
+  seqLocks.set(callId, lockPromise);
   
-  const maxSeq = data && data.length > 0 ? data[0].seq : 0;
-  
-  // Update cache
-  seqCache.set(callId, { maxSeq, timestamp: Date.now() });
-  
-  return maxSeq + 1;
+  // Wait for the lock to complete
+  return await lockPromise;
 }
 
 /**

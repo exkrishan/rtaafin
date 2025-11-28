@@ -209,14 +209,22 @@ export async function GET(req: Request) {
     }
 
     // Map cache results to TranscriptUtterance format
-    const transcripts: TranscriptUtterance[] = cachedTranscripts.map((t) => ({
-      id: `${callId}-${t.seq}`,
-      text: t.text || '',
-      speaker: t.speaker,
-      timestamp: t.ts,
-      seq: t.seq,
-      confidence: 1.0,
-    }));
+    // CRITICAL: Generate unique IDs - use seq + timestamp to ensure uniqueness
+    const transcripts: TranscriptUtterance[] = cachedTranscripts.map((t) => {
+      // Use seq + timestamp milliseconds for unique ID
+      // This ensures uniqueness even if seqs somehow collide
+      const timestampMs = new Date(t.ts).getTime();
+      const uniqueId = `${callId}-${t.seq}-${timestampMs}`;
+      
+      return {
+        id: uniqueId,
+        text: t.text || '',
+        speaker: t.speaker,
+        timestamp: t.ts,
+        seq: t.seq,
+        confidence: 1.0,
+      };
+    });
 
     // OPTION 2: Fetch intent first, then KB articles based on intent (if available)
     const intentData = await getLatestIntent(callId).catch(() => null);
