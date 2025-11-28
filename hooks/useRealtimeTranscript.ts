@@ -377,7 +377,46 @@ export function useRealtimeTranscript(
                 }
               }
               
-              logPerformance('Transcript processing (polling mode)', () => {
+              // OPTION 2: Process intent and KB articles from polling response
+            if (data.intent || (data.articles && Array.isArray(data.articles) && data.articles.length > 0)) {
+              console.log('[useRealtimeTranscript] 📥 Polling: Received intent/KB data', {
+                callId,
+                intent: data.intent || 'unknown',
+                confidence: data.confidence || 0,
+                articlesCount: data.articles?.length || 0,
+              });
+              
+              // Trigger onIntentUpdate callback if available (same format as SSE event)
+              if (onIntentUpdateRef.current) {
+                try {
+                  // Create a synthetic MessageEvent-like object for compatibility
+                  const syntheticEvent = {
+                    data: JSON.stringify({
+                      type: 'intent_update',
+                      callId: callId,
+                      intent: data.intent || 'unknown',
+                      confidence: data.confidence || 0,
+                      articles: data.articles || [],
+                    }),
+                  } as MessageEvent;
+                  
+                  onIntentUpdateRef.current(syntheticEvent);
+                  
+                  console.log('[useRealtimeTranscript] ✅ Triggered onIntentUpdate callback from polling data', {
+                    callId,
+                    intent: data.intent || 'unknown',
+                    articlesCount: data.articles?.length || 0,
+                  });
+                } catch (err) {
+                  console.error('[useRealtimeTranscript] Error triggering onIntentUpdate from polling data', {
+                    callId,
+                    error: err,
+                  });
+                }
+              }
+            }
+            
+            logPerformance('Transcript processing (polling mode)', () => {
                 setTranscripts((prev) => {
                   const processStartTime = performance.now();
                   
