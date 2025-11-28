@@ -136,12 +136,16 @@ export async function POST(request: NextRequest) {
       });
     });
     
-    // Return 200 OK immediately
+    // Return 200 OK immediately with helpful view URL
+    const viewUrl = `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/live?callId=${encodeURIComponent(callId)}`;
+    
     return NextResponse.json({
       ok: true,
       callId,
       seq,
-      message: 'Transcript received and processing'
+      message: 'Transcript received and processing',
+      viewUrl,
+      autoDiscovery: 'The /live page will auto-discover this call within 10 seconds, or visit the viewUrl directly'
     });
     
   } catch (error: any) {

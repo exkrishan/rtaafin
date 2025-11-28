@@ -58,7 +58,7 @@ function LivePageContent() {
   }, [urlCallId, callId]);
 
   // Auto-discover active calls silently in background
-  // Copied from test-agent-assist with exponential backoff
+  // Enhanced to fallback to latest call with transcripts for automated API testing
   useEffect(() => {
     const discoverActiveCalls = async () => {
       // Check if URL has callId parameter - don't override it
@@ -84,7 +84,8 @@ function LivePageContent() {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 5000);
         
-        const response = await fetch('/api/calls/active?limit=10', {
+        // AUTOMATED FIX: Try active calls first, then fallback to latest call with transcripts
+        let response = await fetch('/api/calls/active?limit=10', {
           signal: controller.signal,
         });
         
@@ -154,26 +155,83 @@ function LivePageContent() {
             setLastDiscoveredCallId(currentLast => {
               if (data.latestCall !== currentLast) {
                 console.log('[Live] 🎯 Auto-discovered new call (via latestCall):', data.latestCall);
-                setCallId(data.latestCall);
+                setCallId(prevCallId => {
+                  // CRITICAL: Only update if callId actually changed to prevent UI reload
+                  if (prevCallId === data.latestCall) {
+                    console.debug('[Live] CallId unchanged, skipping update to prevent reload:', data.latestCall);
+                    return prevCallId; // No change - prevents reconnection
+                  }
+                  return data.latestCall;
+                });
                 return data.latestCall;
               }
               return currentLast;
             });
           }
         } else {
-          // CRITICAL FIX: Clear callId when no active calls are found
-          // This prevents polling from continuing with ended call IDs
-          setCallId(prevCallId => {
-            if (prevCallId) {
-              console.log('[Live] 🛑 No active calls found - clearing callId', {
-                previousCallId: prevCallId,
-                note: 'This will stop transcript polling for the ended call',
-              });
-              return '';
+          // AUTOMATED FIX: Fallback to latest call with transcripts
+          // This enables automated testing - API sends transcript, UI auto-discovers it
+          console.log('[Live] 📊 No active calls found - checking for latest call with transcripts...');
+          
+          try {
+            const latestResponse = await fetch('/api/calls/latest');
+            if (latestResponse.ok) {
+              const latestData = await latestResponse.json();
+              if (latestData.ok && latestData.callId) {
+                console.log('[Live] ✅ Found latest call with transcripts:', {
+                  callId: latestData.callId,
+                  transcriptCount: latestData.transcriptCount,
+                  latestActivity: latestData.latestActivity,
+                });
+                
+                setLastDiscoveredCallId(currentLast => {
+                  if (latestData.callId !== currentLast) {
+                    setCallId(prevCallId => {
+                      // CRITICAL: Only update if callId actually changed to prevent UI reload
+                      if (prevCallId === latestData.callId) {
+                        console.debug('[Live] CallId unchanged, skipping update to prevent reload:', latestData.callId);
+                        return prevCallId; // No change - prevents reconnection
+                      }
+                      console.log('[Live] ✅ CallId updated to latest call:', {
+                        previousCallId: prevCallId || '(empty)',
+                        newCallId: latestData.callId,
+                        note: 'Progressive updates will now flow for this call',
+                      });
+                      return latestData.callId;
+                    });
+                    return latestData.callId;
+                  }
+                  return currentLast;
+                });
+              } else {
+                // No calls found at all - clear callId
+                setCallId(prevCallId => {
+                  if (prevCallId) {
+                    console.log('[Live] 🛑 No calls found anywhere - clearing callId', {
+                      previousCallId: prevCallId,
+                    });
+                    return '';
+                  }
+                  return prevCallId;
+                });
+                setLastDiscoveredCallId(null);
+              }
             }
-            return prevCallId;
-          });
-          setLastDiscoveredCallId(null);
+          } catch (latestErr) {
+            console.debug('[Live] Could not fetch latest call:', latestErr);
+            // Clear callId if we can't find any calls
+            setCallId(prevCallId => {
+              if (prevCallId) {
+                console.log('[Live] 🛑 No active calls found - clearing callId', {
+                  previousCallId: prevCallId,
+                  note: 'This will stop transcript polling for the ended call',
+                });
+                return '';
+              }
+              return prevCallId;
+            });
+            setLastDiscoveredCallId(null);
+          }
         }
       } catch (err: any) {
         // Handle timeout and network errors with exponential backoff
@@ -217,7 +275,7 @@ function LivePageContent() {
     let timeoutId: NodeJS.Timeout;
     
     const scheduleNextPoll = () => {
-      const baseInterval = 5000; // 5 seconds base
+      const baseInterval = 2000; // 2 seconds base (fast auto-discovery for progressive updates)
       const retryCount = discoveryRetryCountRef.current;
       
       // Calculate backoff: 5s, 7.5s, 10s, 12.5s, 15s (max)
