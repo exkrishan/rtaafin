@@ -1,18 +1,28 @@
 /**
  * ElevenLabs streaming ASR provider
  * Uses ElevenLabs Scribe v2 Realtime API for real-time speech recognition
+ * 
+ * COMMENTED OUT: Migrated to Azure Speech SDK
+ * KEPT AS FALLBACK: Can be re-enabled by removing block comments
+ * Date: 2025-11-28
+ * 
+ * To re-enable: Remove the /* and */ comment delimiters around the implementation
  */
+
+// Keep imports active for type checking
+import { Scribe, AudioFormat, CommitStrategy } from '@elevenlabs/client';
+import { AsrProvider, Transcript } from '../types';
+import { ElevenLabsCircuitBreaker } from '../circuit-breaker';
+import { ConnectionHealthMonitor } from '../connection-health-monitor';
+
+/*
+// ========== ELEVENLABS PROVIDER (COMMENTED - FALLBACK ONLY) ==========
 
 // Polyfill WebSocket for Node.js environment
 if (typeof WebSocket === 'undefined') {
   const WebSocket = require('ws');
   (global as any).WebSocket = WebSocket;
 }
-
-import { Scribe, AudioFormat, CommitStrategy } from '@elevenlabs/client';
-import { AsrProvider, Transcript } from '../types';
-import { ElevenLabsCircuitBreaker } from '../circuit-breaker';
-import { ConnectionHealthMonitor } from '../connection-health-monitor';
 
 interface PendingSend {
   seq: number;
@@ -723,15 +733,16 @@ export class ElevenLabsProvider implements AsrProvider {
           state.transcriptCount = 1;
         }
         
-        // CRITICAL FIX: Reset uncommitted audio counter when we receive a final/committed transcript
-        // This means VAD detected a speech boundary and committed, or a manual commit succeeded
-        if (isFinal) {
+        // CRITICAL FIX: Reset uncommitted audio counter when we receive a final/committed transcript WITH TEXT
+        // Only reset if transcript has actual text - empty transcripts mean no speech was detected
+        if (isFinal && transcriptText.trim().length > 0) {
           const previousUncommittedMs = state.uncommittedAudioMs || 0;
           state.uncommittedAudioMs = 0;
           console.debug(`[ElevenLabsProvider] 🔄 Reset uncommitted audio after final transcript`, {
             interactionId,
             previousUncommittedMs: previousUncommittedMs.toFixed(0),
-            note: 'Final transcript received - audio was successfully committed via manual commit',
+            textLength: transcriptText.trim().length,
+            note: 'Final transcript with text received - audio was successfully committed',
           });
         }
 
@@ -1719,4 +1730,7 @@ export class ElevenLabsProvider implements AsrProvider {
     console.info('[ElevenLabsProvider] Final metrics:', this.metrics);
   }
 }
+
+// ========== END ELEVENLABS PROVIDER ==========
+*/
 

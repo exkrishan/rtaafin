@@ -1,10 +1,20 @@
 /**
  * Deepgram streaming ASR provider
  * Uses Deepgram SDK for real-time speech recognition
+ * 
+ * COMMENTED OUT: Migrated to Azure Speech SDK
+ * KEPT AS FALLBACK: Can be re-enabled by removing block comments
+ * Date: 2025-11-28
+ * 
+ * To re-enable: Remove the /* and */ comment delimiters around the implementation
  */
 
+// Keep imports active for type checking
 import { createClient, LiveTranscriptionEvents } from '@deepgram/sdk';
 import { AsrProvider, Transcript } from '../types';
+
+/*
+// ========== DEEPGRAM PROVIDER (COMMENTED - FALLBACK ONLY) ==========
 
 interface PendingSend {
   seq: number;
@@ -1749,4 +1759,7 @@ export class DeepgramProvider implements AsrProvider {
     this.connections.clear();
   }
 }
+
+// ========== END DEEPGRAM PROVIDER ==========
+*/
 

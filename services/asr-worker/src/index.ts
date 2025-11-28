@@ -43,7 +43,7 @@ const BUFFER_WINDOW_MS = parseInt(process.env.BUFFER_WINDOW_MS || '1000', 10);
 // Stale buffer timeout: if no new audio arrives for this duration, clean up the buffer
 // This prevents processing old audio after a call has ended
 const STALE_BUFFER_TIMEOUT_MS = parseInt(process.env.STALE_BUFFER_TIMEOUT_MS || '5000', 10); // 5 seconds
-const ASR_PROVIDER = (process.env.ASR_PROVIDER || 'mock') as 'mock' | 'deepgram' | 'whisper' | 'google' | 'elevenlabs';
+const ASR_PROVIDER = (process.env.ASR_PROVIDER || 'mock') as 'mock' | 'deepgram' | 'whisper' | 'google' | 'elevenlabs' | 'azure';
 // CRITICAL: PCM16 audio format constant - used for duration calculations
 // Formula: durationMs = (bytes / BYTES_PER_SAMPLE / sampleRate) * 1000
 // Example: 640 bytes at 16kHz = (640 / 2 / 16000) * 1000 = 20ms
@@ -148,37 +148,39 @@ class AsrWorker {
         connectionHealthMonitor: this.connectionHealthMonitor,
       });
       
-      // Set up transcript callback for free flow mode (ElevenLabs only)
+      // Set up transcript callback for event-driven providers (Azure, ElevenLabs)
       // This allows transcripts to be published immediately when they arrive asynchronously
-      if (ASR_PROVIDER === 'elevenlabs' && 'setTranscriptCallback' in this.asrProvider) {
+      if (['azure', 'elevenlabs'].includes(ASR_PROVIDER) && 'setTranscriptCallback' in this.asrProvider) {
         (this.asrProvider as any).setTranscriptCallback((transcript: any, interactionId: string, seq: number) => {
           console.info(`[ASRWorker] 📨 Transcript callback invoked`, {
             interaction_id: interactionId,
+            provider: ASR_PROVIDER,
             seq,
             textLength: transcript.text?.length || 0,
             textPreview: transcript.text?.substring(0, 50) || '(empty)',
             type: transcript.type,
             note: 'Publishing transcript to Redis List',
           });
-          // Publish transcript immediately when it arrives in free flow mode
+          // Publish transcript immediately when it arrives in event-driven mode
           this.publishTranscript(interactionId, transcript, seq).catch((err: any) => {
             console.error(`[ASRWorker] ❌ Error publishing transcript from callback:`, {
               interaction_id: interactionId,
+              provider: ASR_PROVIDER,
               seq,
               error: err.message,
             });
           });
         });
-        console.info('[ASRWorker] ✅ Transcript callback set for free flow mode', {
+        console.info('[ASRWorker] ✅ Transcript callback set for event-driven provider', {
           provider: ASR_PROVIDER,
           hasCallback: true,
-          note: 'Transcripts will be published automatically when received from ElevenLabs',
+          note: 'Transcripts will be published automatically when received',
         });
       } else {
         console.warn('[ASRWorker] ⚠️ Transcript callback not set', {
           provider: ASR_PROVIDER,
           hasMethod: 'setTranscriptCallback' in (this.asrProvider as any),
-          note: 'Free flow mode may not work correctly',
+          note: 'Event-driven mode may not work correctly for this provider',
         });
       }
     } catch (error: any) {
@@ -221,17 +223,42 @@ class AsrWorker {
         }
         health.buffers = bufferDetails;
         
-        // Safely check for Deepgram provider connections and metrics
+        // Provider-specific metrics
         try {
           const providerAny = this.asrProvider as any;
+          
+          // Get active connections count (works for most providers)
           if (providerAny.connections && typeof providerAny.connections.size === 'number') {
             health.activeConnections = providerAny.connections.size;
+          } else if (providerAny.recognizers && typeof providerAny.recognizers.size === 'number') {
+            health.activeConnections = providerAny.recognizers.size;
           } else {
             health.activeConnections = 'N/A';
           }
           
-          // Add Deepgram metrics if available
-          if (providerAny.getMetrics && typeof providerAny.getMetrics === 'function') {
+          // Azure metrics
+          if (ASR_PROVIDER === 'azure' && providerAny.getMetrics && typeof providerAny.getMetrics === 'function') {
+            const azureMetrics = providerAny.getMetrics();
+            health.azureMetrics = {
+              connectionsCreated: azureMetrics.connectionsCreated,
+              connectionsClosed: azureMetrics.connectionsClosed,
+              audioChunksSent: azureMetrics.audioChunksSent,
+              transcriptsReceived: azureMetrics.transcriptsReceived,
+              emptyTranscriptsReceived: azureMetrics.emptyTranscriptsReceived,
+              partialTranscriptsReceived: azureMetrics.partialTranscriptsReceived,
+              finalTranscriptsReceived: azureMetrics.finalTranscriptsReceived,
+              emptyTranscriptRate: azureMetrics.transcriptsReceived > 0
+                ? ((azureMetrics.emptyTranscriptsReceived / azureMetrics.transcriptsReceived) * 100).toFixed(1) + '%'
+                : '0%',
+              errors: azureMetrics.errors,
+              sessionsCanceled: azureMetrics.sessionsCanceled,
+              averageLatencyMs: azureMetrics.averageLatencyMs?.toFixed(0) + 'ms' || 'N/A',
+              averageSessionDurationMs: azureMetrics.averageSessionDurationMs?.toFixed(0) + 'ms' || 'N/A',
+            };
+          }
+          
+          // Deepgram metrics (only if using Deepgram)
+          if (ASR_PROVIDER === 'deepgram' && providerAny.getMetrics && typeof providerAny.getMetrics === 'function') {
             const deepgramMetrics = providerAny.getMetrics();
             health.deepgramMetrics = {
               connectionsCreated: deepgramMetrics.connectionsCreated,
@@ -250,6 +277,21 @@ class AsrWorker {
                 ? ((deepgramMetrics.keepAliveSuccess / (deepgramMetrics.keepAliveSuccess + deepgramMetrics.keepAliveFailures)) * 100).toFixed(1) + '%'
                 : 'N/A',
               averageChunkSizeMs: deepgramMetrics.averageChunkSizeMs.toFixed(0) + 'ms',
+            };
+          }
+          
+          // ElevenLabs metrics (only if using ElevenLabs)
+          if (ASR_PROVIDER === 'elevenlabs' && providerAny.getMetrics && typeof providerAny.getMetrics === 'function') {
+            const elevenLabsMetrics = providerAny.getMetrics();
+            health.elevenLabsMetrics = {
+              connectionsCreated: elevenLabsMetrics.connectionsCreated,
+              connectionsReused: elevenLabsMetrics.connectionsReused,
+              connectionsClosed: elevenLabsMetrics.connectionsClosed,
+              audioChunksSent: elevenLabsMetrics.audioChunksSent,
+              transcriptsReceived: elevenLabsMetrics.transcriptsReceived,
+              emptyTranscriptsReceived: elevenLabsMetrics.emptyTranscriptsReceived,
+              errors: elevenLabsMetrics.errors,
+              averageLatencyMs: elevenLabsMetrics.averageLatencyMs?.toFixed(0) + 'ms' || 'N/A',
             };
           }
         } catch (e) {
@@ -419,6 +461,7 @@ class AsrWorker {
   /**
    * Simple audio frame handler - just buffers audio chunks in memory
    * Timer job will process buffered chunks every 5 seconds
+   * Azure: Sends audio immediately without buffering (continuous recognition)
    */
   private async handleAudioFrame(msg: any): Promise<void> {
     const interactionId = msg?.interaction_id;
@@ -432,6 +475,50 @@ class AsrWorker {
 
       // Get audio data from message (support multiple field names)
       let audioData: string | undefined = msg.audio || msg.audio_data || msg.data || msg.payload;
+      
+      // AZURE: Send audio immediately, no buffering
+      if (ASR_PROVIDER === 'azure') {
+        if (!audioData || typeof audioData !== 'string') {
+          console.error('[ASRWorker] ❌ Missing audio data:', {
+            interaction_id: interactionId,
+            seq,
+          });
+          return;
+        }
+
+        // Decode base64 to buffer
+        const audioBuffer = Buffer.from(audioData, 'base64');
+        if (audioBuffer.length === 0) {
+          return;
+        }
+
+        // Get sample rate (default to 16000)
+        const sampleRate = msg.sample_rate || 16000;
+
+        // Send directly to Azure (continuous recognition)
+        await this.asrProvider.sendAudioChunk(audioBuffer, {
+          interactionId,
+          seq,
+          sampleRate,
+        });
+        
+        // Log every 20th chunk to avoid spam
+        if (seq % 20 === 0) {
+          console.debug(`[ASRWorker] 📤 Sent audio chunk to Azure`, {
+            interaction_id: interactionId,
+            seq,
+            audio_size_bytes: audioBuffer.length,
+            sample_rate: sampleRate,
+          });
+        }
+        
+        // Update metrics
+        this.metrics.recordAudioChunk(interactionId);
+        
+        return; // Skip buffering logic below
+      }
+
+      // EXISTING BUFFERING LOGIC for other providers
       
       if (!audioData || typeof audioData !== 'string') {
         console.error('[ASRWorker] ❌ Missing audio data:', {
@@ -718,6 +805,16 @@ class AsrWorker {
    * Merges all buffered chunks and sends to ElevenLabs
    */
   private startBufferProcessingTimer(interactionId: string): void {
+    // Azure uses continuous recognition - no timer needed
+    if (ASR_PROVIDER === 'azure') {
+      console.info(`[ASRWorker] ⏭️ Skipping timer for Azure (continuous recognition)`, {
+        interaction_id: interactionId,
+        provider: 'azure',
+        note: 'Azure sends audio immediately, no buffering',
+      });
+      return;
+    }
+
     // Clear existing timer if any
     const existingTimer = this.bufferTimers.get(interactionId);
     if (existingTimer) {

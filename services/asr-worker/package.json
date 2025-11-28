@@ -32,6 +32,7 @@
     "@rtaa/pubsub": "*",
     "@types/ws": "^8.18.1",
     "dotenv": "^16.3.1",
+    "microsoft-cognitiveservices-speech-sdk": "^1.38.0",
     "ws": "^8.18.3"
   },
   "devDependencies": {
