@@ -46,6 +46,22 @@ export async function POST(
     // Clear transcripts from in-memory cache
     const wasCleared = clearCallFromCache(callId);
 
+    // Clear intents from Supabase (prevent old intents from appearing)
+    try {
+      const { error: intentDeleteError } = await (await import('@/lib/supabase')).supabase
+        .from('intents')
+        .delete()
+        .eq('call_id', callId);
+      
+      if (intentDeleteError) {
+        console.error('[dispose] Error deleting intents (non-critical):', intentDeleteError);
+      } else {
+        console.info('[dispose] ✅ Cleared intents from database', { callId });
+      }
+    } catch (intentErr) {
+      console.error('[dispose] Failed to clear intents (non-critical):', intentErr);
+    }
+
     // TODO: Save disposition data to Supabase
     // await supabase.from('dispositions').insert({
     //   call_id: callId,
@@ -57,7 +73,8 @@ export async function POST(
     console.info('[dispose] ✅ Call disposed successfully', {
       callId,
       transcriptsCleared: wasCleared,
-      note: 'UI should now wait for new call',
+      intentsCleared: true,
+      note: 'UI should now wait for new call with no old data',
     });
 
     return NextResponse.json({
