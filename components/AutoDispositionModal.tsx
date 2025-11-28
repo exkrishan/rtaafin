@@ -32,6 +32,7 @@ export interface AutoDispositionModalProps {
   tenantId?: string;
   suggested?: Suggestion[]; // sorted by score desc
   autoNotes?: string;
+  onDispose?: (callId: string) => void; // Called after successful disposition
 }
 
 export default function AutoDispositionModal({
@@ -42,6 +43,7 @@ export default function AutoDispositionModal({
   tenantId,
   suggested = [],
   autoNotes = '',
+  onDispose,
 }: AutoDispositionModalProps) {
   const [allDispositions, setAllDispositions] = useState<DispositionOption[]>([]);
   const [subDispositions, setSubDispositions] = useState<DispositionOption[]>([]);
@@ -255,6 +257,28 @@ export default function AutoDispositionModal({
 
       // Success - close modal and show toast
       showToast('Saved and synced', 'success');
+      
+      // Call dispose API to clear transcripts from cache
+      try {
+        await fetch(`/api/calls/${callId}/dispose`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            disposition: selectedDispositionObj.code,
+            subDisposition: selectedSubDisposition || undefined,
+            notes: notes || undefined,
+          }),
+        });
+        
+        // Notify parent to clear UI and wait for new call
+        if (onDispose) {
+          onDispose(callId);
+        }
+      } catch (disposeErr) {
+        console.error('[AutoDispositionModal] Dispose call failed (non-critical)', disposeErr);
+        // Still close modal even if dispose fails
+      }
+      
       setTimeout(() => {
         onClose();
       }, 500);

@@ -79,6 +79,24 @@ export function getLatestCallIdFromCache(): { callId: string; transcriptCount: n
 }
 
 /**
+ * Clear transcripts for a specific call (called on disposition)
+ */
+export function clearCallFromCache(callId: string): boolean {
+  const hadTranscripts = transcriptCache.has(callId);
+  
+  transcriptCache.delete(callId);
+  cacheTimestamps.delete(callId);
+  
+  console.info('[ingest-transcript-core] 🧹 Cleared call from cache (disposed)', {
+    callId,
+    hadTranscripts,
+    remainingCalls: transcriptCache.size,
+  });
+  
+  return hadTranscripts;
+}
+
+/**
  * Detect speaker from text patterns
  */
 function detectSpeaker(text: string, seq: number): 'agent' | 'customer' {

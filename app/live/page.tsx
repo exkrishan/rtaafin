@@ -660,6 +660,25 @@ function LivePageContent() {
           tenantId={tenantId}
           suggested={dispositionData.suggested}
           autoNotes={dispositionData.autoNotes}
+          onDispose={(disposedCallId) => {
+            // Clear UI and wait for new call
+            console.info('[Live] 🧹 Call disposed - clearing UI and waiting for new call', {
+              disposedCallId,
+              note: 'UI will wait for a new call with a different callId',
+            });
+            
+            // Clear callId to stop polling and SSE
+            setCallId('');
+            
+            // Clear KB articles
+            setKbArticles([]);
+            
+            // Reset disposition data
+            setDispositionData(null);
+            
+            // Auto-discovery will now pick up the next new call
+            console.log('[Live] ✅ UI cleared - ready for next call');
+          }}
         />
       )}
 
