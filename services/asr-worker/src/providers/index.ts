@@ -4,10 +4,12 @@
 
 import { AsrProvider } from '../types';
 import { MockProvider } from './mockProvider';
-import { DeepgramProvider } from './deepgramProvider';
+// NOTE: DeepgramProvider and ElevenLabsProvider are commented out as fallbacks
+// To re-enable, uncomment their files and re-add imports here
+// import { DeepgramProvider } from './deepgramProvider';
+// import { ElevenLabsProvider } from './elevenlabsProvider';
 import { WhisperLocalProvider } from './whisperLocalProvider';
 import { GoogleSpeechProvider } from './googleSpeechProvider';
-import { ElevenLabsProvider } from './elevenlabsProvider';
 import { AzureSpeechProvider } from './azureSpeechProvider';
 
 export type ProviderType = 'mock' | 'deepgram' | 'whisper' | 'google' | 'elevenlabs' | 'azure';
@@ -20,16 +22,15 @@ export function createAsrProvider(type?: ProviderType, config?: any): AsrProvide
       return new MockProvider();
 
     case 'deepgram':
-      // Explicitly check for API key before creating provider
-      const apiKey = config?.apiKey || process.env.DEEPGRAM_API_KEY;
-      if (!apiKey) {
-        throw new Error(
-          'DEEPGRAM_API_KEY is required when ASR_PROVIDER=deepgram. ' +
-          'Please set DEEPGRAM_API_KEY environment variable. ' +
-          'The system will NOT fall back to mock provider - this is intentional for testing.'
-        );
-      }
-      return new DeepgramProvider(apiKey);
+      // Deepgram provider is currently disabled (commented out as fallback)
+      // To re-enable: uncomment services/asr-worker/src/providers/deepgramProvider.ts
+      // and re-add the import in this file
+      throw new Error(
+        'Deepgram provider is currently disabled. ' +
+        'It has been commented out in favor of Azure Speech SDK. ' +
+        'To re-enable: uncomment the provider file and import. ' +
+        'See AZURE_SETUP.md for instructions.'
+      );
 
     case 'whisper':
       return new WhisperLocalProvider(config);
@@ -46,19 +47,15 @@ export function createAsrProvider(type?: ProviderType, config?: any): AsrProvide
       return new GoogleSpeechProvider();
 
     case 'elevenlabs':
-      // Check for API key
-      const elevenLabsApiKey = config?.apiKey || process.env.ELEVENLABS_API_KEY;
-      if (!elevenLabsApiKey) {
-        throw new Error(
-          'ELEVENLABS_API_KEY is required when ASR_PROVIDER=elevenlabs. ' +
-          'Please set ELEVENLABS_API_KEY environment variable. ' +
-          'The system will NOT fall back to mock provider - this is intentional for testing.'
-        );
-      }
-      return new ElevenLabsProvider(elevenLabsApiKey, {
-        circuitBreaker: config?.circuitBreaker,
-        connectionHealthMonitor: config?.connectionHealthMonitor,
-      });
+      // ElevenLabs provider is currently disabled (commented out as fallback)
+      // To re-enable: uncomment services/asr-worker/src/providers/elevenlabsProvider.ts
+      // and re-add the import in this file
+      throw new Error(
+        'ElevenLabs provider is currently disabled. ' +
+        'It has been commented out in favor of Azure Speech SDK. ' +
+        'To re-enable: uncomment the provider file and import. ' +
+        'See AZURE_SETUP.md for instructions.'
+      );
 
     case 'azure':
       // Check for subscription key and region
