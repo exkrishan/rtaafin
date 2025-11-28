@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createClient } from '@/lib/supabase';
+import { supabase } from '@/lib/supabase';
 import { ingestTranscriptCore } from '@/lib/ingest-transcript-core';
 
 // Cache for max seq per callId (1 second TTL)
@@ -20,8 +20,7 @@ async function getNextSeq(callId: string): Promise<number> {
   }
   
   // Query Supabase for max seq
-  const supabase = createClient();
-  const { data, error } = await supabase
+  const { data, error } = await (supabase as any)
     .from('ingest_events')
     .select('seq')
     .eq('call_id', callId)
