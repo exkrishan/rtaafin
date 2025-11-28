@@ -139,16 +139,20 @@ export default function AgentAssistPanelV2({
     onConnectionStateChangeRef.current = onConnectionStateChange;
   });
 
+  // Track current interactionId in a ref to prevent race conditions
+  const currentInteractionIdRef = useRef(interactionId);
+  
   // CRITICAL FIX: Clear component state when interactionId changes or becomes empty
   useEffect(() => {
+    // Update ref first
+    currentInteractionIdRef.current = interactionId;
+    
     if (!interactionId) {
       console.log('[AgentAssistPanelV2] 🧹 Clearing state (no interactionId)', {
-        kbArticlesCount: kbArticles.length,
-        utterancesCount: utterances.length,
         timestamp: new Date().toISOString(),
       });
       
-      // Clear all call-specific state
+      // Clear all call-specific state IMMEDIATELY
       setKbArticles([]);
       setUtterances([]);
       setDispositionData(null);
@@ -171,6 +175,12 @@ export default function AgentAssistPanelV2({
     useSse ? interactionId : null, // Only connect if useSse is true
     {
       onTranscript: (utterance) => {
+        // GUARD: Don't update if interactionId is empty (disposed)
+        if (!currentInteractionIdRef.current) {
+          console.warn('[AgentAssistPanel] ⚠️ Skipping transcript update - interactionId is empty (call disposed)');
+          return;
+        }
+        
         // Convert hook's TranscriptUtterance to our format
         const ourUtterance: TranscriptUtterance = {
           utterance_id: utterance.id,
@@ -236,6 +246,15 @@ export default function AgentAssistPanelV2({
           });
           
           if (callIdMatches && data.articles && Array.isArray(data.articles)) {
+            // GUARD: Don't update if interactionId is empty (disposed)
+            if (!currentInteractionIdRef.current) {
+              console.warn('[AgentAssistPanel] ⚠️ Skipping KB update - interactionId is empty (call disposed)', {
+                eventCallId,
+                articlesCount: data.articles.length,
+              });
+              return;
+            }
+            
             // Attach intent information to articles
             const articlesWithIntent = data.articles.map((article: KBArticle) => ({
               ...article,
@@ -448,6 +467,14 @@ export default function AgentAssistPanelV2({
     if (onKbArticlesUpdate) {
       // Store the callback so it can be called from outside
       (window as any).__updateKbArticles = (articles: KBArticle[], intent?: string, confidence?: number) => {
+        // GUARD: Don't update if interactionId is empty (disposed)
+        if (!currentInteractionIdRef.current) {
+          console.warn('[AgentAssistPanel] ⚠️ Skipping window.__updateKbArticles - interactionId is empty (call disposed)', {
+            articlesCount: articles.length,
+          });
+          return;
+        }
+        
         console.log('[AgentAssistPanel] 📚 Updating KB articles from API', {
           articlesCount: articles.length,
           intent,
