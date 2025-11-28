@@ -177,6 +177,37 @@ export async function GET(req: Request) {
       note: 'Instant access, no DB query needed',
     });
 
+    // FRESHNESS CHECK: Don't return stale cached transcripts (older than 1 hour)
+    if (cachedTranscripts.length > 0) {
+      const latestTimestamp = cachedTranscripts[cachedTranscripts.length - 1].ts;
+      const latestTime = new Date(latestTimestamp).getTime();
+      const now = Date.now();
+      const ageMinutes = (now - latestTime) / (1000 * 60);
+      const MAX_AGE_MINUTES = 60; // 1 hour
+      
+      if (ageMinutes > MAX_AGE_MINUTES) {
+        console.warn('[transcripts/latest] ⚠️ Cached transcripts are stale, returning empty', {
+          callId,
+          latestTimestamp,
+          ageMinutes: Math.round(ageMinutes),
+          maxAgeMinutes: MAX_AGE_MINUTES,
+          note: 'Transcripts older than 1 hour are considered stale',
+        });
+        
+        return NextResponse.json({
+          ok: true,
+          callId,
+          transcripts: [],
+          count: 0,
+          intent: 'unknown',
+          confidence: 0,
+          articles: [],
+          stale: true,
+          ageMinutes: Math.round(ageMinutes),
+        });
+      }
+    }
+
     // Map cache results to TranscriptUtterance format
     const transcripts: TranscriptUtterance[] = cachedTranscripts.map((t) => ({
       id: `${callId}-${t.seq}`,

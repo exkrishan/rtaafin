@@ -48,17 +48,33 @@ export function getTranscriptsFromCache(callId: string) {
 
 /**
  * Get the most recent callId with transcripts from cache
+ * FRESHNESS CHECK: Only returns calls with activity in the last hour
  */
 export function getLatestCallIdFromCache(): { callId: string; transcriptCount: number; latestActivity: string } | null {
   if (cacheTimestamps.size === 0) {
     return null;
   }
   
-  // Find the callId with the most recent timestamp
+  const now = Date.now();
+  const MAX_AGE_MS = 60 * 60 * 1000; // 1 hour
+  
+  // Find the callId with the most recent timestamp (within the last hour)
   let latestCallId: string | null = null;
   let latestTimestamp = 0;
   
   for (const [callId, timestamp] of cacheTimestamps.entries()) {
+    const age = now - timestamp;
+    
+    // Skip stale calls (older than 1 hour)
+    if (age > MAX_AGE_MS) {
+      console.log('[getLatestCallIdFromCache] ⚠️ Skipping stale call', {
+        callId,
+        ageMinutes: Math.round(age / (1000 * 60)),
+        note: 'Call is older than 1 hour',
+      });
+      continue;
+    }
+    
     if (timestamp > latestTimestamp) {
       latestTimestamp = timestamp;
       latestCallId = callId;
@@ -66,10 +82,17 @@ export function getLatestCallIdFromCache(): { callId: string; transcriptCount: n
   }
   
   if (!latestCallId) {
+    console.log('[getLatestCallIdFromCache] No active calls found (all stale or empty)');
     return null;
   }
   
   const transcripts = transcriptCache.get(latestCallId) || [];
+  
+  console.log('[getLatestCallIdFromCache] ✅ Found active call', {
+    callId: latestCallId,
+    transcriptCount: transcripts.length,
+    ageMinutes: Math.round((now - latestTimestamp) / (1000 * 60)),
+  });
   
   return {
     callId: latestCallId,
