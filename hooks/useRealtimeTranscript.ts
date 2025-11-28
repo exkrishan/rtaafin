@@ -384,6 +384,8 @@ export function useRealtimeTranscript(
                 intent: data.intent || 'unknown',
                 confidence: data.confidence || 0,
                 articlesCount: data.articles?.length || 0,
+                hasArticles: !!(data.articles && Array.isArray(data.articles) && data.articles.length > 0),
+                articlesPreview: data.articles?.slice(0, 2).map((a: any) => ({ id: a.id, title: a.title })) || [],
               });
               
               // Trigger onIntentUpdate callback if available (same format as SSE event)
@@ -406,6 +408,7 @@ export function useRealtimeTranscript(
                     callId,
                     intent: data.intent || 'unknown',
                     articlesCount: data.articles?.length || 0,
+                    callbackExists: !!onIntentUpdateRef.current,
                   });
                 } catch (err) {
                   console.error('[useRealtimeTranscript] Error triggering onIntentUpdate from polling data', {
@@ -413,7 +416,21 @@ export function useRealtimeTranscript(
                     error: err,
                   });
                 }
+              } else {
+                console.warn('[useRealtimeTranscript] ⚠️ onIntentUpdate callback not available', {
+                  callId,
+                  hasCallback: !!onIntentUpdateRef.current,
+                  note: 'KB articles will not be displayed',
+                });
               }
+            } else {
+              // Log when no intent/KB data is received
+              console.debug('[useRealtimeTranscript] No intent/KB data in polling response', {
+                callId,
+                hasIntent: !!data.intent,
+                hasArticles: !!(data.articles && Array.isArray(data.articles)),
+                articlesCount: data.articles?.length || 0,
+              });
             }
             
             logPerformance('Transcript processing (polling mode)', () => {

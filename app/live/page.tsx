@@ -463,83 +463,92 @@ function LivePageContent() {
                   return;
                 }
                 
-                console.log('[Live] End call clicked - generating disposition from current transcript');
+                console.log('[Live] End call clicked - generating disposition from current transcript', { callId });
+                
+                // Store callId in a variable to ensure it's available even if state changes
+                const currentCallId = callId;
                 
                 try {
-                  // Call /api/calls/end to generate disposition from current transcript
-                  const response = await fetch('/api/calls/end', {
+                  // Call /api/calls/end to mark call as ended
+                  await fetch('/api/calls/end', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ 
-                      interactionId: callId,
+                      interactionId: currentCallId,
+                      tenantId,
+                    }),
+                  }).catch(err => {
+                    console.warn('[Live] Failed to send call_end event (non-critical):', err);
+                  });
+
+                  // Call /api/calls/summary to generate disposition
+                  console.log('[Live] Calling /api/calls/summary', { callId: currentCallId, tenantId });
+                  const response = await fetch('/api/calls/summary', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                      callId: currentCallId, // Use stored callId
+                      interactionId: currentCallId, // Also send as interactionId for compatibility
                       tenantId,
                     }),
                   });
 
                   const result = await response.json();
 
-                  if (result.ok && result.disposition) {
-                    // Convert disposition result to DispositionData format
-                    // Note: API returns mappedDispositions, but we check both for compatibility
-                    const dispositions = result.disposition.suggestedDispositions || result.disposition.mappedDispositions || [];
-                    const firstDisposition = dispositions[0];
-                    const dispositionData: DispositionData = {
-                      dispositionId: firstDisposition?.mappedId?.toString() || firstDisposition?.mappedCode || 'GENERAL_INQUIRY',
-                      dispositionTitle: firstDisposition?.mappedTitle || firstDisposition?.originalLabel || 'General Inquiry',
-                      confidence: firstDisposition?.confidence || firstDisposition?.score || 0.5,
-                      subDispositions: firstDisposition?.subDisposition ? [
-                        {
-                          id: firstDisposition?.subDispositionId?.toString() || '1',
-                          title: firstDisposition?.subDisposition || 'Unknown',
-                        }
-                      ] : undefined,
-                      autoNotes: [
-                        result.disposition.issue,
-                        result.disposition.resolution,
-                        result.disposition.nextSteps,
-                      ].filter(Boolean).join('\n\n') || 'No notes generated.',
-                    };
-
-                    // Set disposition data and open modal
-                    setDispositionData({
-                      suggested: dispositions.map((item: any) => ({
-                        code: item.mappedCode || item.code || 'GENERAL_INQUIRY',
-                        title: item.mappedTitle || item.title || 'General Inquiry',
-                        score: typeof item.score === 'number' ? item.score : 0.5,
-                        id: typeof item.mappedId === 'number' ? item.mappedId : undefined,
-                        subDisposition: item.subDisposition || item.sub_disposition || undefined,
-                        subDispositionId: typeof item.subDispositionId === 'number' ? item.subDispositionId : undefined,
-                      })) || [{ code: 'GENERAL_INQUIRY', title: 'General Inquiry', score: 0.1 }],
-                      autoNotes: dispositionData.autoNotes,
-                    });
-                    setDispositionOpen(true);
-                    
-                    console.info('[Live] ✅ Disposition generated and modal opened', {
-                      callId,
-                      hasDisposition: !!result.disposition,
-                      dispositionsCount: dispositions.length,
-                    });
-                  } else {
-                    // Fallback: try to generate using handleDispositionSummary
-                    console.warn('[Live] /api/calls/end did not return disposition, trying summary API', {
-                      callId,
-                      error: result.error,
-                    });
-                    await handleDispositionSummary(callId);
-                    setDispositionOpen(true);
+                  if (!response.ok || !result.ok) {
+                    throw new Error(result?.error || 'Failed to generate summary');
                   }
-                } catch (error: any) {
-                  console.error('[Live] Failed to generate disposition on call end', {
-                    callId,
-                    error: error.message,
+
+                  // Convert disposition result to DispositionData format
+                  const dispositions = result.dispositions || result.mappedDispositions || [];
+                  const summary = result.summary || {};
+                  
+                  // Extract auto notes from summary
+                  const autoNotes = [
+                    summary.issue,
+                    summary.resolution,
+                    summary.next_steps,
+                  ]
+                    .filter((section: string | undefined) => section && section.trim().length > 0)
+                    .join('\n\n') || 'No notes generated.';
+
+                  // Set disposition data and open modal
+                  setDispositionData({
+                    suggested: dispositions.length > 0 
+                      ? dispositions.map((item: any) => ({
+                          code: item.mappedCode || item.code || 'GENERAL_INQUIRY',
+                          title: item.mappedTitle || item.title || 'General Inquiry',
+                          score: typeof item.score === 'number' ? item.score : 0.5,
+                          id: typeof item.mappedId === 'number' ? item.mappedId : undefined,
+                          subDisposition: item.subDisposition || item.sub_disposition || undefined,
+                          subDispositionId: typeof item.subDispositionId === 'number' ? item.subDispositionId : undefined,
+                        }))
+                      : [{ code: 'GENERAL_INQUIRY', title: 'General Inquiry', score: 0.1 }],
+                    autoNotes: autoNotes,
                   });
-                  // Still try to open disposition modal with summary API as fallback
+                  setDispositionOpen(true);
+                  
+                  console.info('[Live] ✅ Disposition generated and modal opened', {
+                    callId: currentCallId,
+                    hasSummary: !!result.summary,
+                    dispositionsCount: dispositions.length,
+                    autoNotesLength: autoNotes.length,
+                  });
+                } catch (err: any) {
+                  console.error('[Live] Failed to generate disposition', {
+                    callId: currentCallId,
+                    error: err.message || String(err),
+                  });
+                  
+                  // Fallback: try to generate using handleDispositionSummary
                   try {
-                    await handleDispositionSummary(callId);
+                    await handleDispositionSummary(currentCallId);
                     setDispositionOpen(true);
-                  } catch (fallbackError: any) {
-                    console.error('[Live] Fallback disposition generation also failed', fallbackError);
-                    alert('Failed to generate disposition: ' + (error?.message || 'Unknown error'));
+                  } catch (fallbackErr: any) {
+                    console.error('[Live] Fallback disposition generation also failed', {
+                      callId: currentCallId,
+                      error: fallbackErr.message || String(fallbackErr),
+                    });
                   }
                 }
               }}
