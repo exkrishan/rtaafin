@@ -529,9 +529,9 @@ export class AzureSpeechProvider implements AsrProvider {
         });
       }
 
-      // Update connection health
+      // Update connection health (mark as healthy since we just sent audio successfully)
       if (this.connectionHealthMonitor) {
-        this.connectionHealthMonitor.recordPong(interactionId);
+        this.connectionHealthMonitor.updateConnectionHealth(interactionId, true);
       }
 
       // Azure uses continuous recognition - transcripts arrive via events
