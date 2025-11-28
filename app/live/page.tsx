@@ -220,17 +220,17 @@ function LivePageContent() {
           } catch (latestErr) {
             console.debug('[Live] Could not fetch latest call:', latestErr);
             // Clear callId if we can't find any calls
-            setCallId(prevCallId => {
-              if (prevCallId) {
-                console.log('[Live] 🛑 No active calls found - clearing callId', {
-                  previousCallId: prevCallId,
-                  note: 'This will stop transcript polling for the ended call',
-                });
-                return '';
-              }
-              return prevCallId;
-            });
-            setLastDiscoveredCallId(null);
+          setCallId(prevCallId => {
+            if (prevCallId) {
+              console.log('[Live] 🛑 No active calls found - clearing callId', {
+                previousCallId: prevCallId,
+                note: 'This will stop transcript polling for the ended call',
+              });
+              return '';
+            }
+            return prevCallId;
+          });
+          setLastDiscoveredCallId(null);
           }
         }
       } catch (err: any) {
@@ -661,35 +661,26 @@ function LivePageContent() {
           suggested={dispositionData.suggested}
           autoNotes={dispositionData.autoNotes}
           onDispose={(disposedCallId) => {
-            // Clear UI and wait for new call
-            console.info('[Live] 🧹 Call disposed - clearing UI and waiting for new call', {
+            // Clear UI and refresh page to zero state
+            console.info('[Live] 🧹 Call disposed - refreshing page to zero state', {
               disposedCallId,
               currentCallId: callId,
               currentKbArticlesCount: kbArticles.length,
               hasDispositionData: !!dispositionData,
             });
             
-            // Close the modal first
+            // Close modal and clear state immediately
             setDispositionOpen(false);
-            
-            // Clear callId to stop polling and SSE
-            console.log('[Live] Clearing callId:', callId, '→ empty');
             setCallId('');
-            
-            // Clear KB articles
-            console.log('[Live] Clearing KB articles:', kbArticles.length, '→ 0');
             setKbArticles([]);
-            
-            // Reset disposition data
-            console.log('[Live] Clearing disposition data');
             setDispositionData(null);
             
-            // Auto-discovery will now pick up the next new call
-            console.log('[Live] ✅ UI cleared - ready for next call', {
-              callId: '',
-              kbArticles: 0,
-              dispositionData: null,
-            });
+            // Full page refresh to zero state after brief delay
+            // This ensures all API calls complete before refresh
+            setTimeout(() => {
+              console.log('[Live] 🔄 Refreshing page to zero state');
+              window.location.href = '/live';
+            }, 300);
           }}
         />
       )}

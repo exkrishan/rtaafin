@@ -297,8 +297,10 @@ export default function AutoDispositionModal({
         console.warn('[AutoDispositionModal] ⚠️ No onDispose callback provided!');
       }
       
+      // Full page refresh to zero state after dispose
       setTimeout(() => {
-        onClose();
+        console.log('[AutoDispositionModal] 🔄 Refreshing page to zero state');
+        window.location.href = '/live';
       }, 500);
     } catch (err: any) {
       clearTimeout(timeoutId);

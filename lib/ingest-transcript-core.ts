@@ -367,7 +367,7 @@ export async function ingestTranscriptCore(
     
     if (!transcriptCache.has(validatedCallId)) {
       transcriptCache.set(validatedCallId, []);
-    }
+        }
     
     const callTranscripts = transcriptCache.get(validatedCallId)!;
     callTranscripts.push({
@@ -376,7 +376,7 @@ export async function ingestTranscriptCore(
       ts: params.ts,
       speaker: detectedSpeaker,
     });
-    
+      
     // Sort by seq to maintain order
     callTranscripts.sort((a, b) => a.seq - b.seq);
     
