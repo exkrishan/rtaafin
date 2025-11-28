@@ -16,10 +16,11 @@ export const runtime = 'nodejs';
 
 export async function POST(
   request: Request,
-  { params }: { params: { callId: string } }
+  { params }: { params: Promise<{ callId: string }> }
 ) {
   try {
-    const callId = params.callId;
+    // Next.js 15+: params is now async and must be awaited
+    const { callId } = await params;
     
     if (!callId) {
       return NextResponse.json(
