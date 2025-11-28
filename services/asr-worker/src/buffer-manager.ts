@@ -213,6 +213,20 @@ export class BufferManager {
           lastActivity,
           chunksCount: buffer.chunksCount,
         });
+        
+        // CRITICAL FIX: Automatically clean up very stale buffers to prevent memory leaks
+        // Clean up if buffer is older than 10 minutes (2x the stale threshold)
+        // These are old calls that never received a proper call_end event
+        if (lastActivity > staleThreshold * 2) {
+          console.info(`[BufferManager] 🧹 Auto-cleaning up very stale buffer: ${id}`, {
+            interactionId: id,
+            age,
+            lastActivity,
+            chunksCount: buffer.chunksCount,
+            note: 'Buffer is very old and likely from a call that ended without proper cleanup',
+          });
+          this.cleanupBuffer(id);
+        }
       } else {
         activeBuffers++;
       }

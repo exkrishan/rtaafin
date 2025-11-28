@@ -73,7 +73,8 @@ export function createAsrProvider(type?: ProviderType, config?: any): AsrProvide
         connectionHealthMonitor: config?.connectionHealthMonitor,
       });
 
-    default:
+
+      default:
       throw new Error(`Unknown ASR provider: ${providerType}`);
   }
 }

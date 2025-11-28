@@ -9,13 +9,9 @@
  */
 
 import { NextResponse } from 'next/server';
-import Redis from 'ioredis';
 import { supabase } from '@/lib/supabase';
 import { getKbAdapter, type KBArticle } from '@/lib/kb-adapter';
 import { getEffectiveConfig } from '@/lib/config';
-
-// Initialize Redis client
-const redis = new Redis(process.env.REDIS_URL || process.env.REDISCLOUD_URL || 'redis://localhost:6379');
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -146,27 +142,30 @@ export async function GET(req: Request) {
       );
     }
 
-    // Fetch all transcripts from Redis List
-    const listKey = `transcripts:${callId}`;
-    const rawTranscripts = await redis.lrange(listKey, 0, -1);
+    // Fetch all transcripts from Supabase ingest_events table
+    const { data: transcriptData, error: transcriptError } = await (supabase as any)
+      .from('ingest_events')
+      .select('seq, text, ts, created_at, speaker')
+      .eq('call_id', callId)
+      .order('seq', { ascending: true });
 
-    // Parse and map transcripts
-    const transcripts: TranscriptUtterance[] = rawTranscripts.map((item, index) => {
-      try {
-        const t = JSON.parse(item);
-        return {
-          id: `${callId}-${t.seq}`,
-          text: t.text,
-          speaker: index % 2 === 0 ? 'customer' : 'agent', // Alternate speaker for now
-          timestamp: new Date(t.timestamp_ms).toISOString(),
-          seq: t.seq,
-          confidence: t.confidence
-        };
-      } catch (e) {
-        console.error('[transcripts/latest] Error parsing transcript item:', e);
-        return null;
-      }
-    }).filter(Boolean) as TranscriptUtterance[];
+    if (transcriptError) {
+      console.error('[transcripts/latest] Error fetching transcripts from Supabase:', transcriptError);
+      return NextResponse.json(
+        { ok: false, error: 'Failed to fetch transcripts' },
+        { status: 500 }
+      );
+    }
+
+    // Map Supabase results to TranscriptUtterance format
+    const transcripts: TranscriptUtterance[] = (transcriptData || []).map((t: any) => ({
+      id: `${callId}-${t.seq}`,
+      text: t.text || '',
+      speaker: t.speaker || 'customer',
+      timestamp: t.ts || t.created_at || new Date().toISOString(),
+      seq: t.seq,
+      confidence: 1.0, // Default confidence for stored transcripts
+    }));
 
     // OPTION 2: Fetch intent first, then KB articles based on intent (if available)
     const intentData = await getLatestIntent(callId).catch(() => null);

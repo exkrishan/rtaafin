@@ -10,12 +10,26 @@
  * Usage:
  *   npx tsx tests/complete-flow.test.ts
  * 
- * Environment Variables Required:
- *   - GEMINI_API_KEY (for intent detection)
+ * Environment Variables Required (for LOCAL testing):
+ *   - GEMINI_API_KEY or LLM_API_KEY (for intent detection)
  *   - NEXT_PUBLIC_SUPABASE_URL
  *   - SUPABASE_SERVICE_ROLE_KEY
  *   - REDIS_URL (optional, for transcript storage)
+ * 
+ * NOTE: If these are already set on Render, you only need them locally
+ * if you want to run this test on your machine. The test runs locally,
+ * not on Render. For Render deployment, env vars are configured in
+ * Render Dashboard → Environment tab.
  */
+
+// CRITICAL: Set NODE_ENV before any imports that might use it
+if (!process.env.NODE_ENV || process.env.NODE_ENV === 'production') {
+  process.env.NODE_ENV = 'development';
+}
+
+// CRITICAL: Disable TLS verification for corporate proxy (dev/test only)
+// This is a workaround for Netskope proxy intercepting connections
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
 import path from 'path';
 import dotenv from 'dotenv';
@@ -23,6 +37,11 @@ import dotenv from 'dotenv';
 // Load environment variables first
 const envPath = path.resolve(process.cwd(), '.env.local');
 dotenv.config({ path: envPath });
+
+// Ensure ALLOW_INSECURE_TLS is set for corporate proxy
+if (!process.env.ALLOW_INSECURE_TLS) {
+  process.env.ALLOW_INSECURE_TLS = 'true';
+}
 
 // Disable TranscriptConsumer auto-start during tests
 process.env.DISABLE_TRANSCRIPT_CONSUMER = 'true';
@@ -83,16 +102,12 @@ class CompleteFlowTest {
 
       const duration = Date.now() - startTime;
 
-      if (!result.ok) {
-        return {
-          stage,
-          passed: false,
-          error: result.error || 'Ingestion failed',
-          duration,
-        };
-      }
-
-      return {
+      const testResult: TestResult = !result.ok ? {
+        stage,
+        passed: false,
+        error: result.error || 'Ingestion failed',
+        duration,
+      } : {
         stage,
         passed: true,
         data: {
@@ -102,13 +117,18 @@ class CompleteFlowTest {
         },
         duration,
       };
+      
+      this.logResult(testResult);
+      return testResult;
     } catch (error: any) {
-      return {
+      const testResult: TestResult = {
         stage,
         passed: false,
         error: error.message || String(error),
         duration: Date.now() - startTime,
       };
+      this.logResult(testResult);
+      return testResult;
     }
   }
 
@@ -152,7 +172,7 @@ class CompleteFlowTest {
       const allPassed = results.every(r => r.match && r.confidence > 0.5);
       const duration = Date.now() - startTime;
 
-      return {
+      const testResult: TestResult = {
         stage,
         passed: allPassed,
         data: {
@@ -161,13 +181,17 @@ class CompleteFlowTest {
         },
         duration,
       };
+      this.logResult(testResult);
+      return testResult;
     } catch (error: any) {
-      return {
+      const testResult: TestResult = {
         stage,
         passed: false,
         error: error.message || String(error),
         duration: Date.now() - startTime,
       };
+      this.logResult(testResult);
+      return testResult;
     }
   }
 
@@ -209,7 +233,7 @@ class CompleteFlowTest {
       const hasResults = results.some(r => r.articlesFound > 0);
       const duration = Date.now() - startTime;
 
-      return {
+      const testResult: TestResult = {
         stage,
         passed: hasResults,
         data: {
@@ -218,13 +242,17 @@ class CompleteFlowTest {
         },
         duration,
       };
+      this.logResult(testResult);
+      return testResult;
     } catch (error: any) {
-      return {
+      const testResult: TestResult = {
         stage,
         passed: false,
         error: error.message || String(error),
         duration: Date.now() - startTime,
       };
+      this.logResult(testResult);
+      return testResult;
     }
   }
 
@@ -262,44 +290,46 @@ Customer: That would be great. Thank you for your help.`;
 
       const duration = Date.now() - startTime;
 
-      if (!summaryResult.ok) {
+      const testResult: TestResult = !summaryResult.ok ? {
+        stage,
+        passed: false,
+        error: summaryResult.error || 'Disposition generation failed',
+        duration,
+      } : (() => {
+        const hasDispositions = summaryResult.mappedDispositions && summaryResult.mappedDispositions.length > 0;
+        const hasSummary = summaryResult.summary && (
+          summaryResult.summary.issue || 
+          summaryResult.summary.resolution || 
+          summaryResult.summary.next_steps
+        );
         return {
           stage,
-          passed: false,
-          error: summaryResult.error || 'Disposition generation failed',
+          passed: hasDispositions && hasSummary,
+          data: {
+            hasDispositions,
+            hasSummary,
+            dispositionsCount: summaryResult.mappedDispositions?.length || 0,
+            summary: {
+              hasIssue: !!summaryResult.summary?.issue,
+              hasResolution: !!summaryResult.summary?.resolution,
+              hasNextSteps: !!summaryResult.summary?.next_steps,
+            },
+          },
           duration,
         };
-      }
-
-      const hasDispositions = summaryResult.mappedDispositions && summaryResult.mappedDispositions.length > 0;
-      const hasSummary = summaryResult.summary && (
-        summaryResult.summary.issue || 
-        summaryResult.summary.resolution || 
-        summaryResult.summary.next_steps
-      );
-
-      return {
-        stage,
-        passed: hasDispositions && hasSummary,
-        data: {
-          hasDispositions,
-          hasSummary,
-          dispositionsCount: summaryResult.mappedDispositions?.length || 0,
-          summary: {
-            hasIssue: !!summaryResult.summary?.issue,
-            hasResolution: !!summaryResult.summary?.resolution,
-            hasNextSteps: !!summaryResult.summary?.next_steps,
-          },
-        },
-        duration,
-      };
+      })();
+      
+      this.logResult(testResult);
+      return testResult;
     } catch (error: any) {
-      return {
+      const testResult: TestResult = {
         stage,
         passed: false,
         error: error.message || String(error),
         duration: Date.now() - startTime,
       };
+      this.logResult(testResult);
+      return testResult;
     }
   }
 
@@ -353,7 +383,7 @@ Customer: That would be great. Thank you for your help.`;
       const hasKB = ingestionResults.some(r => r.articlesCount > 0);
       const hasDisposition = summaryResult.ok && summaryResult.mappedDispositions && summaryResult.mappedDispositions.length > 0;
 
-      return {
+      const testResult: TestResult = {
         stage,
         passed: allIngested && hasIntent && hasKB && hasDisposition,
         data: {
@@ -366,13 +396,17 @@ Customer: That would be great. Thank you for your help.`;
         },
         duration,
       };
+      this.logResult(testResult);
+      return testResult;
     } catch (error: any) {
-      return {
+      const testResult: TestResult = {
         stage,
         passed: false,
         error: error.message || String(error),
         duration: Date.now() - startTime,
       };
+      this.logResult(testResult);
+      return testResult;
     }
   }
 
@@ -391,6 +425,11 @@ Customer: That would be great. Thank you for your help.`;
     if (!process.env.GEMINI_API_KEY && !process.env.LLM_API_KEY) {
       console.error('❌ Missing GEMINI_API_KEY or LLM_API_KEY environment variable');
       console.error('   Intent detection will not work without an API key');
+      console.error('');
+      console.error('💡 Note: If these are set on Render, you only need them locally');
+      console.error('   if you want to run this test. This test runs on your machine,');
+      console.error('   not on Render. For Render deployment, env vars are configured');
+      console.error('   in Render Dashboard → Environment tab.');
       process.exit(1);
     }
 

@@ -12,9 +12,16 @@ This comprehensive unit test validates the entire agent assist pipeline:
 
 ## Prerequisites
 
-### Environment Variables
+### ⚠️ Important: Local vs Render Environment Variables
 
-The test requires the following environment variables (set in `.env.local`):
+**This test runs LOCALLY on your machine**, not on Render. 
+
+- **If you only want to deploy to Render**: You don't need these env vars locally. They're already configured on Render.
+- **If you want to test locally before deploying**: You need these env vars in `.env.local` on your machine.
+
+### Environment Variables (for LOCAL testing only)
+
+The test requires the following environment variables **only if running locally**:
 
 ```bash
 # Required for Intent Detection
@@ -30,6 +37,8 @@ SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
 # Optional (for Redis transcript storage)
 REDIS_URL=your-redis-url
 ```
+
+**Note**: These should be the same values as on Render, but you only need them locally if you want to run the test.
 
 ### Database Setup
 

@@ -107,6 +107,7 @@ async function checkTranscriptStream() {
   }
 }
 
+
 async function checkCallRegistry() {
   console.log('\n📋 Checking Call Registry...');
   console.log('='.repeat(60));
@@ -155,4 +156,5 @@ async function main() {
 }
 
 main();
+
 
