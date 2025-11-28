@@ -139,6 +139,29 @@ export default function AgentAssistPanelV2({
     onConnectionStateChangeRef.current = onConnectionStateChange;
   });
 
+  // CRITICAL FIX: Clear component state when interactionId changes or becomes empty
+  useEffect(() => {
+    if (!interactionId) {
+      console.log('[AgentAssistPanelV2] 🧹 Clearing state (no interactionId)', {
+        kbArticlesCount: kbArticles.length,
+        utterancesCount: utterances.length,
+        timestamp: new Date().toISOString(),
+      });
+      
+      // Clear all call-specific state
+      setKbArticles([]);
+      setUtterances([]);
+      setDispositionData(null);
+      setDispositionNotes('');
+      setSelectedDisposition('');
+      setSelectedSubDispositions([]);
+      setManualSearchQuery('');
+      lastFetchedDispositionIdRef.current = null;
+      
+      console.log('[AgentAssistPanelV2] ✅ State cleared - ready for next call');
+    }
+  }, [interactionId]);
+
   // CTO FIX: Use custom hook for real-time transcripts (replaces direct EventSource usage)
   const { 
     transcripts: hookTranscripts, 

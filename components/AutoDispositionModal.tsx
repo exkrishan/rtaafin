@@ -260,7 +260,9 @@ export default function AutoDispositionModal({
       
       // Call dispose API to clear transcripts from cache
       try {
-        await fetch(`/api/calls/${callId}/dispose`, {
+        console.log('[AutoDispositionModal] 🧹 Calling dispose API...', { callId });
+        
+        const disposeResponse = await fetch(`/api/calls/${callId}/dispose`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -270,13 +272,29 @@ export default function AutoDispositionModal({
           }),
         });
         
-        // Notify parent to clear UI and wait for new call
-        if (onDispose) {
-          onDispose(callId);
+        if (!disposeResponse.ok) {
+          console.error('[AutoDispositionModal] Dispose API failed', {
+            status: disposeResponse.status,
+            callId,
+          });
+        } else {
+          console.log('[AutoDispositionModal] ✅ Dispose API succeeded', { callId });
         }
       } catch (disposeErr) {
         console.error('[AutoDispositionModal] Dispose call failed (non-critical)', disposeErr);
-        // Still close modal even if dispose fails
+      }
+      
+      // ALWAYS notify parent to clear UI, even if dispose API fails
+      console.log('[AutoDispositionModal] 🧹 Calling onDispose callback...', { 
+        callId, 
+        hasCallback: !!onDispose 
+      });
+      
+      if (onDispose) {
+        onDispose(callId);
+        console.log('[AutoDispositionModal] ✅ onDispose callback executed', { callId });
+      } else {
+        console.warn('[AutoDispositionModal] ⚠️ No onDispose callback provided!');
       }
       
       setTimeout(() => {

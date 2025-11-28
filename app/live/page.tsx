@@ -664,20 +664,32 @@ function LivePageContent() {
             // Clear UI and wait for new call
             console.info('[Live] 🧹 Call disposed - clearing UI and waiting for new call', {
               disposedCallId,
-              note: 'UI will wait for a new call with a different callId',
+              currentCallId: callId,
+              currentKbArticlesCount: kbArticles.length,
+              hasDispositionData: !!dispositionData,
             });
             
+            // Close the modal first
+            setDispositionOpen(false);
+            
             // Clear callId to stop polling and SSE
+            console.log('[Live] Clearing callId:', callId, '→ empty');
             setCallId('');
             
             // Clear KB articles
+            console.log('[Live] Clearing KB articles:', kbArticles.length, '→ 0');
             setKbArticles([]);
             
             // Reset disposition data
+            console.log('[Live] Clearing disposition data');
             setDispositionData(null);
             
             // Auto-discovery will now pick up the next new call
-            console.log('[Live] ✅ UI cleared - ready for next call');
+            console.log('[Live] ✅ UI cleared - ready for next call', {
+              callId: '',
+              kbArticles: 0,
+              dispositionData: null,
+            });
           }}
         />
       )}
