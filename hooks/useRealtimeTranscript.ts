@@ -778,14 +778,47 @@ export function useRealtimeTranscript(
                 return prev;
               }
               
+              // OPTIMIZED: Smart sorting - only sort when out of order
+              const newTranscripts = [...prev, utterance];
+              
+              // Quick check: is new item out of order?
+              const lastSeq = prev.length > 0 ? (prev[prev.length - 1].seq || 0) : 0;
+              const newSeq = utterance.seq || 0;
+              
+              // Only sort if new item is out of order (seq less than last)
+              let sortedTranscripts = newTranscripts;
+              if (newSeq < lastSeq || (newSeq === 0 && prev.length > 0)) {
+                // Out of order - need to sort
+                sortedTranscripts = newTranscripts.sort((a, b) => {
+                  // Sort by seq first (most reliable)
+                  if (a.seq !== undefined && b.seq !== undefined) {
+                    return a.seq - b.seq;
+                  }
+                  // If seq not available, sort by timestamp
+                  try {
+                    const timeA = new Date(a.timestamp).getTime();
+                    const timeB = new Date(b.timestamp).getTime();
+                    return timeA - timeB;
+                  } catch (e) {
+                    return 0; // Keep order if timestamps invalid
+                  }
+                });
+                
+                console.debug('[useRealtimeTranscript] 🔄 Sorted transcripts (out of order detected)', {
+                  callId,
+                  newSeq,
+                  lastSeq,
+                  totalCount: sortedTranscripts.length,
+                });
+              }
+              
               // CRITICAL FIX: Limit transcript array size to prevent memory issues (OOM crashes)
               // Keep only the most recent MAX_TRANSCRIPTS to prevent unbounded growth
-              const newTranscripts = [...prev, utterance];
-              if (newTranscripts.length > MAX_TRANSCRIPTS) {
-                const pruned = newTranscripts.slice(-MAX_TRANSCRIPTS);
+              if (sortedTranscripts.length > MAX_TRANSCRIPTS) {
+                const pruned = sortedTranscripts.slice(-MAX_TRANSCRIPTS); // Last N = newest after sorting
                 logMemoryUsage('Pruned transcripts (SSE)', pruned, callId);
                 console.warn('[useRealtimeTranscript] ⚠️ Pruned transcripts to prevent memory issues', {
-                  before: newTranscripts.length,
+                  before: sortedTranscripts.length,
                   after: pruned.length,
                   callId,
                   note: `Keeping only the most recent ${MAX_TRANSCRIPTS} transcripts`,
@@ -793,8 +826,8 @@ export function useRealtimeTranscript(
                 return pruned;
               }
               
-              logMemoryUsage('Updated transcripts (SSE)', newTranscripts, callId);
-              return newTranscripts;
+              logMemoryUsage('Updated transcripts (SSE)', sortedTranscripts, callId);
+              return sortedTranscripts;
             });
           }, callId);
           

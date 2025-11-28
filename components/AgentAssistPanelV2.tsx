@@ -191,13 +191,36 @@ export default function AgentAssistPanelV2({
           isPartial: false,
         };
         
-        // Update local utterances state
+        // Update local utterances state with smart sorting
         setUtterances(prev => {
           const exists = prev.some(u => u.utterance_id === ourUtterance.utterance_id);
           if (exists) {
             return prev;
           }
-          return [...prev, ourUtterance];
+          
+          const updated = [...prev, ourUtterance];
+          
+          // Quick check: is new item out of order?
+          const lastSeq = prev.length > 0 ? (prev[prev.length - 1].seq || 0) : 0;
+          const newSeq = ourUtterance.seq || 0;
+          
+          // Only sort if new item is out of order
+          if (newSeq < lastSeq || (newSeq === 0 && prev.length > 0)) {
+            // Out of order - sort by seq or timestamp
+            return updated.sort((a, b) => {
+              if (a.seq !== undefined && b.seq !== undefined) {
+                return a.seq - b.seq;
+              }
+              try {
+                return new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime();
+              } catch (e) {
+                return 0;
+              }
+            });
+          }
+          
+          // In order - no sort needed
+          return updated;
         });
         
         // Call callbacks
@@ -1541,7 +1564,19 @@ export default function AgentAssistPanelV2({
                 {utterances.length === 0 ? (
                   <div className="text-center py-8 text-sm text-gray-500">Waiting for transcript...</div>
                 ) : (
-                  utterances.map((utterance) => {
+                  // Safety sort: ensure transcripts are in chronological order before displaying
+                  [...utterances].sort((a, b) => {
+                    // Sort by seq first (most reliable)
+                    if (a.seq !== undefined && b.seq !== undefined) {
+                      return a.seq - b.seq;
+                    }
+                    // Fallback to timestamp
+                    try {
+                      return new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime();
+                    } catch (e) {
+                      return 0;
+                    }
+                  }).map((utterance) => {
                     // Filter out system messages
                     if (utterance.text.includes('Connected to realtime stream') || utterance.text.includes('clientId:')) {
                       return null;

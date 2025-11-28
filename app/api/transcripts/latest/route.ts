@@ -218,10 +218,10 @@ export async function GET(req: Request) {
       
       return {
         id: uniqueId,
-        text: t.text || '',
+      text: t.text || '',
         speaker: t.speaker,
         timestamp: t.ts,
-        seq: t.seq,
+      seq: t.seq,
         confidence: 1.0,
       };
     });
