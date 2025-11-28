@@ -51,6 +51,7 @@ export interface TranscriptUtterance {
   text: string;
   confidence: number;
   timestamp: string;
+  seq?: number; // Sequence number for ordering transcripts chronologically
   isPartial?: boolean;
   isAiTriggered?: boolean;
 }
@@ -188,6 +189,7 @@ export default function AgentAssistPanelV2({
           text: utterance.text,
           confidence: utterance.confidence || 0.95,
           timestamp: utterance.timestamp,
+          seq: utterance.seq, // Include seq for chronological ordering
           isPartial: false,
         };
         
