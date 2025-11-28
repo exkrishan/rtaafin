@@ -2,63 +2,47 @@
  * Get Latest Call API
  * GET /api/calls/latest
  * 
- * Returns the most recent call that has transcripts.
+ * Returns the most recent call that has transcripts (from in-memory cache).
  * This enables automated discovery of new calls without manual callId entry.
+ * 
+ * OPTIMIZATION: Uses in-memory cache instead of Supabase for instant access.
  */
 
 import { NextResponse } from 'next/server';
-import { supabase } from '@/lib/supabase';
+import { getLatestCallIdFromCache } from '@/lib/ingest-transcript-core';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
 export async function GET(req: Request) {
   try {
-    // Query for the most recent call_id with transcripts
-    const { data, error } = await (supabase as any)
-      .from('ingest_events')
-      .select('call_id, created_at, seq')
-      .order('created_at', { ascending: false })
-      .limit(1);
-
-    if (error) {
-      console.error('[calls/latest] Error fetching latest call:', error);
-      return NextResponse.json(
-        { ok: false, error: 'Failed to fetch latest call' },
-        { status: 500 }
-      );
-    }
-
-    if (!data || data.length === 0) {
-      return NextResponse.json(
-        { ok: false, error: 'No calls found' },
-        { status: 404 }
-      );
-    }
-
-    const latestCall = data[0];
+    // OPTIMIZATION: Find latest call from in-memory cache
+    // This is instant and doesn't require DB query
+    const latestCall = getLatestCallIdFromCache();
     
-    // Get transcript count for this call
-    const { data: countData, error: countError } = await (supabase as any)
-      .from('ingest_events')
-      .select('seq', { count: 'exact' })
-      .eq('call_id', latestCall.call_id);
+    if (!latestCall) {
+      console.info('[calls/latest] ⚡ No calls in cache yet');
+      return NextResponse.json({
+        ok: false,
+        error: 'No calls found',
+      }, { status: 404 });
+    }
     
-    const transcriptCount = countData?.length || 0;
-
-    console.info('[calls/latest] Found latest call', {
-      callId: latestCall.call_id,
-      transcriptCount,
-      latestActivity: latestCall.created_at,
+    console.info('[calls/latest] ⚡ Found latest call from cache', {
+      callId: latestCall.callId,
+      transcriptCount: latestCall.transcriptCount,
+      latestActivity: latestCall.latestActivity,
+      note: 'Instant access from in-memory cache',
     });
 
     return NextResponse.json({
       ok: true,
-      callId: latestCall.call_id,
-      transcriptCount,
-      latestActivity: latestCall.created_at,
-      viewUrl: `/live?callId=${encodeURIComponent(latestCall.call_id)}`,
+      callId: latestCall.callId,
+      transcriptCount: latestCall.transcriptCount,
+      latestActivity: latestCall.latestActivity,
+      viewUrl: `/live?callId=${encodeURIComponent(latestCall.callId)}`,
     });
+    
   } catch (error: any) {
     console.error('[calls/latest] Error:', error);
     return NextResponse.json(

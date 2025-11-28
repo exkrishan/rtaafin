@@ -1,6 +1,12 @@
 /**
  * Core Ingest Transcript Logic
  * Shared function that can be called directly (by TranscriptConsumer) or via HTTP (by external clients)
+ * 
+ * ARCHITECTURE:
+ * - Transcripts: In-memory only, broadcast directly to UI via SSE (instant, no DB)
+ * - Intents: Stored in Supabase (needed for KB lookup and analytics)
+ * - KB Articles: Fetched from Supabase
+ * - Disposition: Generated from in-memory transcripts + intent data
  */
 
 import { supabase } from '@/lib/supabase';
@@ -8,6 +14,109 @@ import { detectIntent } from '@/lib/intent';
 import { broadcastEvent } from '@/lib/realtime';
 import { getKbAdapter, type KBArticle } from '@/lib/kb-adapter';
 import { getEffectiveConfig } from '@/lib/config';
+
+// In-memory transcript cache (for polling fallback)
+// Key: callId, Value: array of transcripts
+const transcriptCache = new Map<string, Array<{
+  seq: number;
+  text: string;
+  ts: string;
+  speaker: 'agent' | 'customer';
+}>>();
+
+// Cache cleanup (remove old calls after 1 hour)
+const CACHE_TTL = 60 * 60 * 1000; // 1 hour
+const cacheTimestamps = new Map<string, number>();
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [callId, timestamp] of cacheTimestamps.entries()) {
+    if (now - timestamp > CACHE_TTL) {
+      transcriptCache.delete(callId);
+      cacheTimestamps.delete(callId);
+      console.log('[ingest-transcript-core] 🧹 Cleaned up old call from cache:', callId);
+    }
+  }
+}, 5 * 60 * 1000); // Check every 5 minutes
+
+/**
+ * Get transcripts from in-memory cache
+ */
+export function getTranscriptsFromCache(callId: string) {
+  return transcriptCache.get(callId) || [];
+}
+
+/**
+ * Get the most recent callId with transcripts from cache
+ */
+export function getLatestCallIdFromCache(): { callId: string; transcriptCount: number; latestActivity: string } | null {
+  if (cacheTimestamps.size === 0) {
+    return null;
+  }
+  
+  // Find the callId with the most recent timestamp
+  let latestCallId: string | null = null;
+  let latestTimestamp = 0;
+  
+  for (const [callId, timestamp] of cacheTimestamps.entries()) {
+    if (timestamp > latestTimestamp) {
+      latestTimestamp = timestamp;
+      latestCallId = callId;
+    }
+  }
+  
+  if (!latestCallId) {
+    return null;
+  }
+  
+  const transcripts = transcriptCache.get(latestCallId) || [];
+  
+  return {
+    callId: latestCallId,
+    transcriptCount: transcripts.length,
+    latestActivity: new Date(latestTimestamp).toISOString(),
+  };
+}
+
+/**
+ * Detect speaker from text patterns
+ */
+function detectSpeaker(text: string, seq: number): 'agent' | 'customer' {
+  const lowerText = text.toLowerCase().trim();
+  
+  // Agent indicators (common agent phrases)
+  const agentPatterns = [
+    /^(hi|hello|good morning|good afternoon|good evening|thank you for calling|how may i help|how can i assist)/i,
+    /^(i can|i will|i'll|let me|i understand|i see|i'll help|i can help)/i,
+    /^(is there anything else|anything else i can|have a great day|thank you for calling|you're welcome)/i,
+    /^(please hold|one moment|let me check|i'll transfer|i'll connect)/i,
+  ];
+  
+  // Customer indicators (common customer phrases)
+  const customerPatterns = [
+    /^(i need|i want|i would like|i'm calling|i have|i noticed|i saw|i received)/i,
+    /^(my card|my account|my balance|my transaction|my statement)/i,
+    /^(can you|could you|please|help me|i need help)/i,
+    /^(there's|there is|something|someone|fraud|unauthorized|stolen|lost)/i,
+  ];
+  
+  // Check agent patterns first (more specific)
+  for (const pattern of agentPatterns) {
+    if (pattern.test(text)) {
+      return 'agent';
+    }
+  }
+  
+  // Check customer patterns
+  for (const pattern of customerPatterns) {
+    if (pattern.test(text)) {
+      return 'customer';
+    }
+  }
+  
+  // Fallback: alternate based on seq (better than always 'customer')
+  return seq % 2 === 0 ? 'customer' : 'agent';
+}
 
 /**
  * Expand intent label into multiple search terms for better KB matching
@@ -208,79 +317,38 @@ export async function ingestTranscriptCore(
       textPreview: params.text.substring(0, 50),
       tenantId,
       timestamp: new Date().toISOString(),
+      note: 'Transcripts NOT stored in DB - direct streaming to UI only',
     });
 
-    // Insert into Supabase ingest_events table
-    try {
-      const { data, error } = await (supabase as any)
-        .from('ingest_events')
-        .upsert({
-          call_id: validatedCallId,
-          seq: params.seq,
-          ts: params.ts,
-          text: params.text,
-          created_at: new Date().toISOString(),
-        }, {
-          onConflict: 'call_id,seq',
-          ignoreDuplicates: false,
-        })
-        .select();
-
-      if (error) {
-        if (error.code === '23505') {
-          console.debug('[ingest-transcript-core] Duplicate transcript chunk (already exists)', {
-            callId: validatedCallId,
-            seq: params.seq,
-          });
-        } else {
-          console.error('[ingest-transcript-core] Supabase insert error:', error);
-        }
-        console.warn('[ingest-transcript-core] Continuing despite Supabase error');
-      } else {
-        console.info('[ingest-transcript-core] Stored in Supabase:', data);
-      }
-    } catch (supabaseErr) {
-      console.error('[ingest-transcript-core] Supabase error:', supabaseErr);
-      // Continue processing even if Supabase fails
+    // OPTIMIZATION: Store transcripts in-memory cache (not in database)
+    // This enables instant SSE broadcasting + polling fallback without DB overhead
+    const detectedSpeaker = detectSpeaker(params.text, params.seq);
+    
+    if (!transcriptCache.has(validatedCallId)) {
+      transcriptCache.set(validatedCallId, []);
     }
-
-    // CRITICAL FIX: Helper function to detect speaker from text patterns
-    function detectSpeaker(text: string, seq: number): 'agent' | 'customer' {
-      const lowerText = text.toLowerCase().trim();
-      
-      // Agent indicators (common agent phrases)
-      const agentPatterns = [
-        /^(hi|hello|good morning|good afternoon|good evening|thank you for calling|how may i help|how can i assist)/i,
-        /^(i can|i will|i'll|let me|i understand|i see|i'll help|i can help)/i,
-        /^(is there anything else|anything else i can|have a great day|thank you for calling|you're welcome)/i,
-        /^(please hold|one moment|let me check|i'll transfer|i'll connect)/i,
-      ];
-      
-      // Customer indicators (common customer phrases)
-      const customerPatterns = [
-        /^(i need|i want|i would like|i'm calling|i have|i noticed|i saw|i received)/i,
-        /^(my card|my account|my balance|my transaction|my statement)/i,
-        /^(can you|could you|please|help me|i need help)/i,
-        /^(there's|there is|something|someone|fraud|unauthorized|stolen|lost)/i,
-      ];
-      
-      // Check agent patterns first (more specific)
-      for (const pattern of agentPatterns) {
-        if (pattern.test(text)) {
-          return 'agent';
-        }
-      }
-      
-      // Check customer patterns
-      for (const pattern of customerPatterns) {
-        if (pattern.test(text)) {
-          return 'customer';
-        }
-      }
-      
-      // Fallback: alternate based on seq (better than always 'customer')
-      return seq % 2 === 0 ? 'customer' : 'agent';
-    }
+    
+    const callTranscripts = transcriptCache.get(validatedCallId)!;
+    callTranscripts.push({
+      seq: params.seq,
+      text: params.text,
+      ts: params.ts,
+      speaker: detectedSpeaker,
+    });
+    
+    // Sort by seq to maintain order
+    callTranscripts.sort((a, b) => a.seq - b.seq);
+    
+    // Update cache timestamp for TTL
+    cacheTimestamps.set(validatedCallId, Date.now());
+    
+    console.info('[ingest-transcript-core] ✅ Transcript cached in-memory', {
+      callId: validatedCallId,
+      seq: params.seq,
+      cacheSize: callTranscripts.length,
+      speaker: detectedSpeaker,
+      note: 'Instant SSE broadcast + polling fallback (no DB storage)',
+    });
 
     // Broadcast transcript line to real-time listeners
     // CRITICAL FIX: Broadcast IMMEDIATELY (don't wait for intent detection)

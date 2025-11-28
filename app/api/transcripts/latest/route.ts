@@ -12,6 +12,7 @@ import { NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
 import { getKbAdapter, type KBArticle } from '@/lib/kb-adapter';
 import { getEffectiveConfig } from '@/lib/config';
+import { getTranscriptsFromCache } from '@/lib/ingest-transcript-core';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -142,29 +143,48 @@ export async function GET(req: Request) {
       );
     }
 
-    // Fetch all transcripts from Supabase ingest_events table
-    const { data: transcriptData, error: transcriptError } = await (supabase as any)
-      .from('ingest_events')
-      .select('seq, text, ts, created_at, speaker')
-      .eq('call_id', callId)
-      .order('seq', { ascending: true });
-
-    if (transcriptError) {
-      console.error('[transcripts/latest] Error fetching transcripts from Supabase:', transcriptError);
-      return NextResponse.json(
-        { ok: false, error: 'Failed to fetch transcripts' },
-        { status: 500 }
-      );
+    // Check environment variables
+    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    
+    if (!supabaseUrl || !supabaseKey) {
+      console.error('[transcripts/latest] Missing Supabase environment variables', {
+        hasUrl: !!supabaseUrl,
+        hasKey: !!supabaseKey,
+      });
+      return NextResponse.json({
+        ok: true,
+        callId,
+        transcripts: [],
+        count: 0,
+        intent: 'unknown',
+        confidence: 0,
+        articles: [],
+        warning: 'Database configuration missing',
+      });
     }
 
-    // Map Supabase results to TranscriptUtterance format
-    const transcripts: TranscriptUtterance[] = (transcriptData || []).map((t: any) => ({
+    console.log('[transcripts/latest] Fetching transcripts for callId:', callId);
+
+    // OPTIMIZATION: Fetch transcripts from in-memory cache (not Supabase)
+    // Transcripts are cached on the server and broadcast via SSE
+    // This is much faster than DB queries and reduces Supabase load
+    const cachedTranscripts = getTranscriptsFromCache(callId);
+    
+    console.info('[transcripts/latest] ⚡ Retrieved transcripts from in-memory cache', {
+      callId,
+      count: cachedTranscripts.length,
+      note: 'Instant access, no DB query needed',
+    });
+
+    // Map cache results to TranscriptUtterance format
+    const transcripts: TranscriptUtterance[] = cachedTranscripts.map((t) => ({
       id: `${callId}-${t.seq}`,
       text: t.text || '',
-      speaker: t.speaker || 'customer',
-      timestamp: t.ts || t.created_at || new Date().toISOString(),
+      speaker: t.speaker,
+      timestamp: t.ts,
       seq: t.seq,
-      confidence: 1.0, // Default confidence for stored transcripts
+      confidence: 1.0,
     }));
 
     // OPTION 2: Fetch intent first, then KB articles based on intent (if available)
