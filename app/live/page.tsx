@@ -8,6 +8,7 @@ import { Customer } from '@/components/CustomerDetailsHeader';
 import CentralCallView from '@/components/CentralCallView';
 import LeftSidebar from '@/components/LeftSidebar';
 import ToastContainer from '@/components/ToastContainer';
+import DispositionProgressNotification from '@/components/DispositionProgressNotification';
 
 // Mock customer data for live (would come from API in production)
 const mockCustomer: Customer = {
@@ -44,6 +45,9 @@ function LivePageContent() {
   const [callStartTime, setCallStartTime] = useState<number | null>(null);
   const timerIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const hasReceivedTranscriptRef = useRef(false);
+
+  // Disposition progress notification state
+  const [isGeneratingDisposition, setIsGeneratingDisposition] = useState(false);
 
   // Auto-discovery state (silent, always enabled)
   const [lastDiscoveredCallId, setLastDiscoveredCallId] = useState<string | null>(null);
@@ -586,6 +590,9 @@ function LivePageContent() {
                 setCallStartTime(null);
                 hasReceivedTranscriptRef.current = false;
                 
+                // Show progress notification
+                setIsGeneratingDisposition(true);
+                
                 console.log('[Live] End call clicked - generating disposition from current transcript', { callId });
                 
                 // Store callId in a variable to ensure it's available even if state changes
@@ -649,6 +656,9 @@ function LivePageContent() {
                       : [{ code: 'GENERAL_INQUIRY', title: 'General Inquiry', score: 0.1 }],
                     autoNotes: autoNotes,
                   });
+                  
+                  // Hide progress notification when modal is ready
+                  setIsGeneratingDisposition(false);
                   setDispositionOpen(true);
                   
                   console.info('[Live] ✅ Disposition generated and modal opened', {
@@ -663,11 +673,17 @@ function LivePageContent() {
                     error: err.message || String(err),
                   });
                   
+                  // Hide progress on error
+                  setIsGeneratingDisposition(false);
+                  
                   // Fallback: try to generate using handleDispositionSummary
                   try {
+                    setIsGeneratingDisposition(true);
                     await handleDispositionSummary(currentCallId);
+                    setIsGeneratingDisposition(false);
                     setDispositionOpen(true);
                   } catch (fallbackErr: any) {
+                    setIsGeneratingDisposition(false);
                     console.error('[Live] Fallback disposition generation also failed', {
                       callId: currentCallId,
                       error: fallbackErr.message || String(fallbackErr),
@@ -754,6 +770,12 @@ function LivePageContent() {
           }}
         />
       )}
+
+      {/* Disposition Progress Notification */}
+      <DispositionProgressNotification 
+        visible={isGeneratingDisposition}
+        message="Generating disposition..."
+      />
 
       {/* Toast Container */}
       <ToastContainer />
