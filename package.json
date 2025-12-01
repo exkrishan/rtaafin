@@ -20,7 +20,8 @@
     "send-audio": "tsx scripts/send-audio-chunks-every-5sec.ts",
     "test-asr": "tsx scripts/test-asr-transcription-flow.ts",
     "test:complete-flow": "tsx tests/complete-flow.test.ts",
-    "test:external-asr": "tsx scripts/test-external-asr-api.ts"
+    "test:external-asr": "tsx scripts/test-external-asr-api.ts",
+    "test:kb-suggestions": "tsx scripts/test-kb-suggestions.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "latest",
