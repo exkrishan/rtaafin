@@ -291,28 +291,39 @@ export default function AgentAssistPanelV2({
               const updateStartTime = performance.now();
               logMemoryUsage('Previous KB articles (before update)', prev, interactionId);
               
+              const now = Date.now();
               const existingIds = new Set(prev.map(a => a.id));
+              
+              // Add timestamp to existing articles if they don't have one
+              const prevWithTimestamps = prev.map(a => ({
+                ...a,
+                timestamp: (a as any).timestamp || now - 1000, // Give existing articles slightly older timestamp
+              }));
+              
+              // New articles get current timestamp and go to TOP
               const newArticles = articlesWithIntent
                 .filter((a: KBArticle) => !existingIds.has(a.id))
                 .map((a: KBArticle) => ({
                   ...a,
-                  timestamp: Date.now(), // Add timestamp for sorting
+                  timestamp: now, // Latest timestamp for new articles
                 }));
               
-              // Sort by timestamp (newest first), then merge with existing
+              // Prepend new articles to top, then merge with existing
               const sortStartTime = performance.now();
-              const allArticles = [...newArticles, ...prev];
+              const allArticles = [...newArticles, ...prevWithTimestamps];
               const sorted = allArticles.sort((a, b) => {
                 const aTime = (a as any).timestamp || 0;
                 const bTime = (b as any).timestamp || 0;
-                return bTime - aTime; // Newest first
+                return bTime - aTime; // Newest first (latest on top)
               });
               const sortDuration = performance.now() - sortStartTime;
               
-              console.log('[PERF-UI] 🔀 KB articles sort', {
+              console.log('[PERF-UI] 🔀 KB articles sort (newest first)', {
                 interactionId,
                 duration_ms: sortDuration.toFixed(2),
                 items_sorted: sorted.length,
+                newArticlesCount: newArticles.length,
+                note: 'Latest suggestions appear at top',
               });
               
               logMemoryUsage('Updated KB articles (after update)', sorted, interactionId);
@@ -515,19 +526,29 @@ export default function AgentAssistPanelV2({
         }));
         
         setKbArticles(prev => {
+          const now = Date.now();
           const existingIds = new Set(prev.map(a => a.id));
+          
+          // Add timestamp to existing articles if they don't have one
+          const prevWithTimestamps = prev.map(a => ({
+            ...a,
+            timestamp: (a as any).timestamp || now - 1000, // Give existing articles slightly older timestamp
+          }));
+          
+          // New articles get current timestamp and go to TOP
           const newArticles = articlesWithIntent
             .filter((a: KBArticle) => !existingIds.has(a.id))
             .map((a: KBArticle) => ({
               ...a,
-              timestamp: Date.now(),
+              timestamp: now, // Latest timestamp for new articles
             }));
-          // Sort by timestamp (newest first), then merge with existing
-          const allArticles = [...newArticles, ...prev];
+          
+          // Prepend new articles to top, then merge with existing and sort
+          const allArticles = [...newArticles, ...prevWithTimestamps];
           const sorted = allArticles.sort((a, b) => {
             const aTime = (a as any).timestamp || 0;
             const bTime = (b as any).timestamp || 0;
-            return bTime - aTime; // Newest first
+            return bTime - aTime; // Newest first (latest on top)
           });
           
           // CRITICAL FIX: Limit KB articles to prevent memory leaks (max 50 articles)
@@ -862,27 +883,46 @@ export default function AgentAssistPanelV2({
         interactionId,
         recentUtterance,
       });
-      // Add timestamp and sort by latest
-      const resultsWithTimestamp = results.map((r: KBArticle) => ({
-        ...r,
-        timestamp: Date.now(),
-      }));
-      const sortStartTime = performance.now();
-      const sorted = resultsWithTimestamp.sort((a: any, b: any) => {
-        const aTime = a.timestamp || 0;
-        const bTime = b.timestamp || 0;
-        return bTime - aTime; // Newest first
+      // Merge with existing articles and sort by latest (newest on top)
+      const now = Date.now();
+      setKbArticles(prev => {
+        const existingIds = new Set(prev.map(a => a.id));
+        
+        // Add timestamp to existing articles if they don't have one
+        const prevWithTimestamps = prev.map(a => ({
+          ...a,
+          timestamp: (a as any).timestamp || now - 1000,
+        }));
+        
+        // New search results get current timestamp and go to TOP
+        const newArticles = results
+          .filter((r: KBArticle) => !existingIds.has(r.id))
+          .map((r: KBArticle) => ({
+            ...r,
+            timestamp: now, // Latest timestamp for new search results
+          }));
+        
+        // Prepend new articles to top, then merge with existing and sort
+        const allArticles = [...newArticles, ...prevWithTimestamps];
+        const sortStartTime = performance.now();
+        const sorted = allArticles.sort((a: any, b: any) => {
+          const aTime = a.timestamp || 0;
+          const bTime = b.timestamp || 0;
+          return bTime - aTime; // Newest first (latest on top)
+        });
+        const sortDuration = performance.now() - sortStartTime;
+        
+        console.log('[PERF-UI] 🔀 KB search results sort (newest first)', {
+          interactionId,
+          duration_ms: sortDuration.toFixed(2),
+          items_sorted: sorted.length,
+          newArticlesCount: newArticles.length,
+          note: 'Latest suggestions appear at top',
+        });
+        
+        logMemoryUsage('KB search results (before setting state)', sorted, interactionId);
+        return sorted;
       });
-      const sortDuration = performance.now() - sortStartTime;
-      
-      console.log('[PERF-UI] 🔀 KB search results sort', {
-        interactionId,
-        duration_ms: sortDuration.toFixed(2),
-        items_sorted: sorted.length,
-      });
-      
-      logMemoryUsage('KB search results (before setting state)', sorted, interactionId);
-      setKbArticles(sorted);
       emitTelemetry?.('manual_kb_search_triggered', {
         interaction_id: interactionId,
         query: manualSearchQuery,
@@ -904,27 +944,46 @@ export default function AgentAssistPanelV2({
     setIsSearching(true);
     try {
       const results = await triggerKBSearch(text, { interactionId });
-      // Add timestamp and sort by latest
-      const resultsWithTimestamp = results.map((r: KBArticle) => ({
-        ...r,
-        timestamp: Date.now(),
-      }));
-      const sortStartTime = performance.now();
-      const sorted = resultsWithTimestamp.sort((a: any, b: any) => {
-        const aTime = a.timestamp || 0;
-        const bTime = b.timestamp || 0;
-        return bTime - aTime; // Newest first
+      // Merge with existing articles and sort by latest (newest on top)
+      const now = Date.now();
+      setKbArticles(prev => {
+        const existingIds = new Set(prev.map(a => a.id));
+        
+        // Add timestamp to existing articles if they don't have one
+        const prevWithTimestamps = prev.map(a => ({
+          ...a,
+          timestamp: (a as any).timestamp || now - 1000,
+        }));
+        
+        // New search results get current timestamp and go to TOP
+        const newArticles = results
+          .filter((r: KBArticle) => !existingIds.has(r.id))
+          .map((r: KBArticle) => ({
+            ...r,
+            timestamp: now, // Latest timestamp for new search results
+          }));
+        
+        // Prepend new articles to top, then merge with existing and sort
+        const allArticles = [...newArticles, ...prevWithTimestamps];
+        const sortStartTime = performance.now();
+        const sorted = allArticles.sort((a: any, b: any) => {
+          const aTime = a.timestamp || 0;
+          const bTime = b.timestamp || 0;
+          return bTime - aTime; // Newest first (latest on top)
+        });
+        const sortDuration = performance.now() - sortStartTime;
+        
+        console.log('[PERF-UI] 🔀 KB search results sort (newest first)', {
+          interactionId,
+          duration_ms: sortDuration.toFixed(2),
+          items_sorted: sorted.length,
+          newArticlesCount: newArticles.length,
+          note: 'Latest suggestions appear at top',
+        });
+        
+        logMemoryUsage('KB search results (before setting state)', sorted, interactionId);
+        return sorted;
       });
-      const sortDuration = performance.now() - sortStartTime;
-      
-      console.log('[PERF-UI] 🔀 KB search results sort', {
-        interactionId,
-        duration_ms: sortDuration.toFixed(2),
-        items_sorted: sorted.length,
-      });
-      
-      logMemoryUsage('KB search results (before setting state)', sorted, interactionId);
-      setKbArticles(sorted);
       emitTelemetry?.('manual_kb_search_triggered', {
         interaction_id: interactionId,
         query: text,

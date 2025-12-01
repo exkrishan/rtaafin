@@ -537,7 +537,42 @@ function LivePageContent() {
   // Handle KB articles update
   const handleKbArticlesUpdate = (articles: KBArticle[], intent?: string, confidence?: number) => {
     console.log('[Live] KB articles update:', { articlesCount: articles.length, intent, confidence });
-    setKbArticles(articles);
+    
+    // Add timestamps and sort by newest first (latest on top)
+    const now = Date.now();
+    setKbArticles(prev => {
+      const existingIds = new Set(prev.map(a => a.id));
+      
+      // Add timestamp to existing articles if they don't have one
+      const prevWithTimestamps = prev.map(a => ({
+        ...a,
+        timestamp: (a as any).timestamp || now - 1000,
+      }));
+      
+      // New articles get current timestamp and go to TOP
+      const newArticles = articles
+        .filter((a: KBArticle) => !existingIds.has(a.id))
+        .map((a: KBArticle) => ({
+          ...a,
+          timestamp: now, // Latest timestamp for new articles
+        }));
+      
+      // Prepend new articles to top, then merge with existing and sort
+      const allArticles = [...newArticles, ...prevWithTimestamps];
+      const sorted = allArticles.sort((a: any, b: any) => {
+        const aTime = a.timestamp || 0;
+        const bTime = b.timestamp || 0;
+        return bTime - aTime; // Newest first (latest on top)
+      });
+      
+      console.log('[Live] ✅ KB articles sorted (newest first)', {
+        newCount: newArticles.length,
+        totalCount: sorted.length,
+        note: 'Latest suggestions appear at top',
+      });
+      
+      return sorted;
+    });
   };
 
   // Handle transcript events
