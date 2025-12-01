@@ -39,6 +39,12 @@ function LivePageContent() {
   } | null>(null);
   const [kbArticles, setKbArticles] = useState<KBArticle[]>([]);
 
+  // Call timer state
+  const [callDuration, setCallDuration] = useState('00:00');
+  const [callStartTime, setCallStartTime] = useState<number | null>(null);
+  const timerIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const hasReceivedTranscriptRef = useRef(false);
+
   // Auto-discovery state (silent, always enabled)
   const [lastDiscoveredCallId, setLastDiscoveredCallId] = useState<string | null>(null);
   
@@ -56,6 +62,54 @@ function LivePageContent() {
       setLastDiscoveredCallId(urlCallId);
     }
   }, [urlCallId, callId]);
+
+  // Timer effect - runs every second when call is active
+  useEffect(() => {
+    if (callStartTime === null) {
+      // No active call, clear timer
+      if (timerIntervalRef.current) {
+        clearInterval(timerIntervalRef.current);
+        timerIntervalRef.current = null;
+      }
+      setCallDuration('00:00');
+      return;
+    }
+
+    // Update timer every second
+    const updateTimer = () => {
+      const elapsed = Math.floor((Date.now() - callStartTime) / 1000); // seconds
+      const minutes = Math.floor(elapsed / 60);
+      const seconds = elapsed % 60;
+      setCallDuration(`${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`);
+    };
+
+    // Update immediately
+    updateTimer();
+
+    // Then update every second
+    timerIntervalRef.current = setInterval(updateTimer, 1000);
+
+    return () => {
+      if (timerIntervalRef.current) {
+        clearInterval(timerIntervalRef.current);
+        timerIntervalRef.current = null;
+      }
+    };
+  }, [callStartTime]);
+
+  // Reset timer when callId changes or is cleared
+  useEffect(() => {
+    if (!callId) {
+      // Call ended or disposed - stop timer
+      setCallStartTime(null);
+      hasReceivedTranscriptRef.current = false;
+      setCallDuration('00:00');
+    } else {
+      // New callId detected - reset transcript flag but don't start timer yet
+      // Timer will start when first transcript arrives
+      hasReceivedTranscriptRef.current = false;
+    }
+  }, [callId]);
 
   // Auto-discover active calls silently in background
   // Enhanced to fallback to latest call with transcripts for automated API testing
@@ -480,6 +534,13 @@ function LivePageContent() {
   // Handle transcript events
   const handleTranscriptEvent = (event: any) => {
     console.log('[Live] Transcript event:', event);
+    
+    // Start timer when first transcript arrives
+    if (!hasReceivedTranscriptRef.current && callId) {
+      console.log('[Live] ⏱️ First transcript received - starting call timer', { callId });
+      hasReceivedTranscriptRef.current = true;
+      setCallStartTime(Date.now());
+    }
   };
 
   return (
@@ -499,7 +560,7 @@ function LivePageContent() {
           <div className="flex-1 overflow-y-auto p-6">
             <CentralCallView
               customer={mockCustomer}
-              callDuration="00:00"
+              callDuration={callDuration}
               callId={callId || undefined}
               isCallActive={!!callId}
               onMute={() => console.log('[Live] Mute clicked')}
@@ -520,6 +581,10 @@ function LivePageContent() {
                   console.warn('[Live] Cannot end call - no callId');
                   return;
                 }
+                
+                // Stop timer immediately
+                setCallStartTime(null);
+                hasReceivedTranscriptRef.current = false;
                 
                 console.log('[Live] End call clicked - generating disposition from current transcript', { callId });
                 
@@ -668,6 +733,11 @@ function LivePageContent() {
               currentKbArticlesCount: kbArticles.length,
               hasDispositionData: !!dispositionData,
             });
+            
+            // Stop timer
+            setCallStartTime(null);
+            hasReceivedTranscriptRef.current = false;
+            setCallDuration('00:00');
             
             // Close modal and clear state immediately
             setDispositionOpen(false);
