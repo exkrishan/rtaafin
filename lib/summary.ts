@@ -120,7 +120,32 @@ export function resetSummaryCache(): void {
 
 async function fetchTranscript(callId: string): Promise<TranscriptData> {
   try {
-    // First, try to select all columns to see what's available
+    // CRITICAL: First check in-memory cache (primary source for live transcripts)
+    const { getTranscriptsFromCache } = await import('@/lib/ingest-transcript-core');
+    const cachedTranscripts = getTranscriptsFromCache(callId);
+    
+    if (cachedTranscripts && cachedTranscripts.length > 0) {
+      // Sort by sequence number to ensure chronological order
+      const sorted = [...cachedTranscripts].sort((a, b) => a.seq - b.seq);
+      const chunks = sorted.map(t => t.text.trim()).filter(text => Boolean(text));
+      
+      if (chunks.length > 0) {
+        console.info('[summary] ✅ Fetched transcript from in-memory cache', {
+          callId,
+          transcriptChunks: sorted.length,
+          totalLength: chunks.join('\n').length,
+        });
+        
+        return {
+          combined: chunks.join('\n'),
+          chunks,
+        };
+      }
+    }
+    
+    console.info('[summary] In-memory cache empty, checking Supabase (fallback)', { callId });
+    
+    // Fallback to Supabase (for backward compatibility with old transcripts)
     const { data, error } = await (supabase as any)
       .from('ingest_events')
       .select('*')
