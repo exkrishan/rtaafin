@@ -49,6 +49,11 @@ function LivePageContent() {
   // Disposition progress notification state
   const [isGeneratingDisposition, setIsGeneratingDisposition] = useState(false);
 
+  // Safety: Reset progress notification on mount to prevent stuck state
+  useEffect(() => {
+    setIsGeneratingDisposition(false);
+  }, []);
+
   // Auto-discovery state (silent, always enabled)
   const [lastDiscoveredCallId, setLastDiscoveredCallId] = useState<string | null>(null);
   
@@ -750,10 +755,11 @@ function LivePageContent() {
               hasDispositionData: !!dispositionData,
             });
             
-            // Stop timer
+            // Stop timer and reset progress notification
             setCallStartTime(null);
             hasReceivedTranscriptRef.current = false;
             setCallDuration('00:00');
+            setIsGeneratingDisposition(false);
             
             // Close modal and clear state immediately
             setDispositionOpen(false);

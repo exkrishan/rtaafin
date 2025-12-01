@@ -1,5 +1,7 @@
 'use client';
 
+import { useEffect, useState } from 'react';
+
 interface DispositionProgressNotificationProps {
   visible: boolean;
   message?: string;
@@ -9,11 +11,27 @@ export default function DispositionProgressNotification({
   visible,
   message = 'Generating disposition...',
 }: DispositionProgressNotificationProps) {
-  if (!visible) return null;
+  const [shouldRender, setShouldRender] = useState(false);
+
+  // Only render after mount to prevent hydration issues
+  useEffect(() => {
+    setShouldRender(visible);
+  }, [visible]);
+
+  // Safety: Don't render if not visible
+  if (!visible || !shouldRender) {
+    return null;
+  }
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/20 flex items-center justify-center">
-      <div className="bg-white rounded-lg shadow-xl p-6 min-w-[320px] animate-slide-in">
+    <div 
+      className="fixed inset-0 z-50 flex items-center justify-center"
+      style={{ 
+        backgroundColor: 'rgba(0, 0, 0, 0.2)',
+        pointerEvents: 'auto'
+      }}
+    >
+      <div className="bg-white rounded-lg shadow-xl p-6 min-w-[320px] max-w-[400px] animate-slide-in">
         <div className="flex items-center gap-3 mb-4">
           <svg
             className="animate-spin h-6 w-6 text-blue-600"
