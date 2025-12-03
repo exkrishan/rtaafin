@@ -21,7 +21,8 @@
     "test-asr": "tsx scripts/test-asr-transcription-flow.ts",
     "test:complete-flow": "tsx tests/complete-flow.test.ts",
     "test:external-asr": "tsx scripts/test-external-asr-api.ts",
-    "test:kb-suggestions": "tsx scripts/test-kb-suggestions.ts"
+    "test:kb-suggestions": "tsx scripts/test-kb-suggestions.ts",
+    "test:intent-kb": "tsx tests/intent-kb-flow.test.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "latest",
