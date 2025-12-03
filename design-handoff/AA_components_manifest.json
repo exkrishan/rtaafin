@@ -1,0 +1,439 @@
+{
+  "version": "1.0.0",
+  "generated": "2025-01-09",
+  "components": [
+    {
+      "name": "AA_Panel",
+      "description": "Main Agent Assist panel container with collapse/expand functionality",
+      "variants": [
+        {
+          "name": "Collapsed",
+          "props": {
+            "width": "48px",
+            "state": "collapsed",
+            "showToggle": true
+          }
+        },
+        {
+          "name": "Expanded",
+          "props": {
+            "width": "360px",
+            "state": "expanded",
+            "showToggle": true
+          }
+        }
+      ],
+      "interactions": [
+        "Toggle collapse/expand on click",
+        "Persist state in localStorage",
+        "Auto-expand on call start"
+      ],
+      "telemetry": ["agent_assist_panel_opened", "agent_assist_panel_toggled"]
+    },
+    {
+      "name": "AA_TranscriptBubble_Agent",
+      "description": "Transcript bubble for agent utterances",
+      "variants": [
+        {
+          "name": "Default",
+          "props": {
+            "speaker": "agent",
+            "text": "string",
+            "timestamp": "ISO8601",
+            "confidence": "number (0-1)"
+          }
+        },
+        {
+          "name": "Loading",
+          "props": {
+            "speaker": "agent",
+            "isLoading": true,
+            "showShimmer": true
+          }
+        },
+        {
+          "name": "Error",
+          "props": {
+            "speaker": "agent",
+            "hasError": true,
+            "errorMessage": "string"
+          }
+        }
+      ],
+      "interactions": [
+        "Copy text on click",
+        "Show timestamp on hover",
+        "Highlight on AI trigger"
+      ],
+      "telemetry": ["transcript_generated", "transcript_copied"]
+    },
+    {
+      "name": "AA_TranscriptBubble_Customer",
+      "description": "Transcript bubble for customer utterances",
+      "variants": [
+        {
+          "name": "Default",
+          "props": {
+            "speaker": "customer",
+            "text": "string",
+            "timestamp": "ISO8601",
+            "confidence": "number (0-1)"
+          }
+        },
+        {
+          "name": "Highlighted_AI",
+          "props": {
+            "speaker": "customer",
+            "text": "string",
+            "isAiTriggered": true,
+            "aiMarker": "icon"
+          }
+        },
+        {
+          "name": "LowConfidence",
+          "props": {
+            "speaker": "customer",
+            "text": "string",
+            "confidence": "number (<0.7)",
+            "showWarning": true
+          }
+        }
+      ],
+      "interactions": [
+        "Copy text on click",
+        "Show AI marker tooltip",
+        "Show confidence warning"
+      ],
+      "telemetry": ["transcript_generated", "transcript_copied"]
+    },
+    {
+      "name": "AA_KBCard",
+      "description": "Knowledge Base suggestion card with confidence badge",
+      "variants": [
+        {
+          "name": "Default",
+          "props": {
+            "articleId": "string",
+            "title": "string",
+            "snippet": "string",
+            "confidence": "number (0-1)",
+            "rank": "number",
+            "url": "string"
+          }
+        },
+        {
+          "name": "Loading",
+          "props": {
+            "isLoading": true,
+            "showShimmer": true
+          }
+        },
+        {
+          "name": "LowConfidence",
+          "props": {
+            "articleId": "string",
+            "title": "string",
+            "snippet": "string",
+            "confidence": "number (<0.7)",
+            "isGreyedOut": true
+          }
+        },
+        {
+          "name": "Empty",
+          "props": {
+            "isEmpty": true,
+            "message": "No suggestions available"
+          }
+        }
+      ],
+      "interactions": [
+        "Like/Dislike feedback buttons",
+        "Copy snippet to clipboard",
+        "Open article in new tab",
+        "Show confidence badge"
+      ],
+      "telemetry": [
+        "kb_suggestion_shown",
+        "kb_suggestion_feedback_given",
+        "kb_suggestion_copied",
+        "kb_suggestion_clicked"
+      ]
+    },
+    {
+      "name": "AA_DecisionTree_Node",
+      "description": "Decision tree node for guided workflows",
+      "variants": [
+        {
+          "name": "Collapsed",
+          "props": {
+            "nodeId": "string",
+            "label": "string",
+            "isCollapsed": true,
+            "hasChildren": true
+          }
+        },
+        {
+          "name": "Expanded",
+          "props": {
+            "nodeId": "string",
+            "label": "string",
+            "isExpanded": true,
+            "children": "array"
+          }
+        },
+        {
+          "name": "Selected",
+          "props": {
+            "nodeId": "string",
+            "label": "string",
+            "isSelected": true,
+            "isActive": true
+          }
+        }
+      ],
+      "interactions": [
+        "Toggle expand/collapse",
+        "Select node on click",
+        "Navigate to child nodes"
+      ],
+      "telemetry": ["decision_tree_node_expanded", "decision_tree_node_selected"]
+    },
+    {
+      "name": "AA_DispositionPanel",
+      "description": "Post-call disposition and notes panel",
+      "variants": [
+        {
+          "name": "Loading",
+          "props": {
+            "isLoading": true,
+            "showShimmer": true,
+            "message": "Generating recommendation..."
+          }
+        },
+        {
+          "name": "Default",
+          "props": {
+            "dispositionId": "string",
+            "dispositionTitle": "string",
+            "confidence": "number (0-1)",
+            "subDispositions": "array",
+            "autoNotes": "string",
+            "isEditable": true
+          }
+        },
+        {
+          "name": "Retry",
+          "props": {
+            "hasError": false,
+            "canRetry": true,
+            "retryCount": "number"
+          }
+        },
+        {
+          "name": "Error",
+          "props": {
+            "hasError": true,
+            "errorMessage": "string",
+            "canRetry": true
+          }
+        },
+        {
+          "name": "MultiIntent",
+          "props": {
+            "dispositions": "array",
+            "primaryIntent": "object",
+            "secondaryIntents": "array",
+            "showAll": true
+          }
+        }
+      ],
+      "interactions": [
+        "Edit notes",
+        "Select sub-disposition",
+        "Save to CRM",
+        "Retry on error",
+        "Regenerate recommendation"
+      ],
+      "telemetry": [
+        "disposition_recommendation_generated",
+        "disposition_saved_to_crm",
+        "disposition_notes_edited",
+        "disposition_regenerated"
+      ]
+    },
+    {
+      "name": "AA_Button",
+      "description": "Standard button component with multiple variants",
+      "variants": [
+        {
+          "name": "Primary",
+          "props": {
+            "variant": "primary",
+            "size": "sm|md|lg",
+            "label": "string",
+            "icon": "optional"
+          }
+        },
+        {
+          "name": "Secondary",
+          "props": {
+            "variant": "secondary",
+            "size": "sm|md|lg",
+            "label": "string",
+            "icon": "optional"
+          }
+        },
+        {
+          "name": "Ghost",
+          "props": {
+            "variant": "ghost",
+            "size": "sm|md|lg",
+            "label": "string",
+            "icon": "optional"
+          }
+        },
+        {
+          "name": "Disabled",
+          "props": {
+            "variant": "primary|secondary|ghost",
+            "isDisabled": true,
+            "label": "string"
+          }
+        }
+      ],
+      "interactions": [
+        "Click handler",
+        "Loading state",
+        "Keyboard navigation"
+      ]
+    },
+    {
+      "name": "AA_HealthPill",
+      "description": "Health status indicator pill",
+      "variants": [
+        {
+          "name": "Healthy",
+          "props": {
+            "status": "healthy",
+            "label": "Connected",
+            "color": "success"
+          }
+        },
+        {
+          "name": "Slow",
+          "props": {
+            "status": "slow",
+            "label": "Slow",
+            "color": "warning",
+            "latency": "number (ms)"
+          }
+        },
+        {
+          "name": "Error",
+          "props": {
+            "status": "error",
+            "label": "Disconnected",
+            "color": "error"
+          }
+        }
+      ],
+      "interactions": [
+        "Show tooltip on hover",
+        "Auto-update based on connection state"
+      ],
+      "telemetry": ["health_status_changed"]
+    },
+    {
+      "name": "AA_Toggle",
+      "description": "Toggle switch component",
+      "variants": [
+        {
+          "name": "On",
+          "props": {
+            "isOn": true,
+            "label": "string"
+          }
+        },
+        {
+          "name": "Off",
+          "props": {
+            "isOn": false,
+            "label": "string"
+          }
+        }
+      ],
+      "interactions": [
+        "Toggle on click",
+        "Keyboard navigation (Space/Enter)"
+      ]
+    },
+    {
+      "name": "AA_Input",
+      "description": "Text input component",
+      "variants": [
+        {
+          "name": "Normal",
+          "props": {
+            "placeholder": "string",
+            "value": "string",
+            "type": "text|search|textarea"
+          }
+        },
+        {
+          "name": "Focused",
+          "props": {
+            "isFocused": true,
+            "placeholder": "string",
+            "value": "string"
+          }
+        },
+        {
+          "name": "Error",
+          "props": {
+            "hasError": true,
+            "errorMessage": "string",
+            "value": "string"
+          }
+        }
+      ],
+      "interactions": [
+        "Focus handler",
+        "Change handler",
+        "Validation",
+        "Clear button"
+      ]
+    }
+  ],
+  "layout": {
+    "panelWidth": {
+      "collapsed": "48px",
+      "expanded": "360px"
+    },
+    "spacing": {
+      "sectionGap": "24px",
+      "cardGap": "16px",
+      "contentPadding": "16px"
+    }
+  },
+  "accessibility": {
+    "ariaLabels": {
+      "panel": "Agent Assist Panel",
+      "transcript": "Call Transcript",
+      "kbSuggestions": "Knowledge Base Suggestions",
+      "disposition": "Call Disposition"
+    },
+    "keyboardNavigation": {
+      "tabOrder": ["panel-toggle", "transcript-area", "kb-cards", "disposition-panel"],
+      "shortcuts": {
+        "togglePanel": "Ctrl+Shift+A",
+        "copyTranscript": "Ctrl+C",
+        "searchKB": "Ctrl+K"
+      }
+    },
+    "colorContrast": {
+      "text": "WCAG AA compliant (4.5:1 minimum)",
+      "interactive": "WCAG AA compliant (3:1 minimum)"
+    }
+  }
+}
+

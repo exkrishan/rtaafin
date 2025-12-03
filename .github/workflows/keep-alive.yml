@@ -1,0 +1,38 @@
+name: Keep Render Services Alive
+
+on:
+  push:
+    # Run on push to make workflow visible immediately
+    branches: [feat/exotel-deepgram-bridge, main]
+  schedule:
+    # Run every 10 minutes to keep services awake
+    # Cron format: minute hour day month day-of-week
+    - cron: '*/10 * * * *'
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  keep-alive:
+    runs-on: ubuntu-latest
+    name: Ping Render Services
+    
+    steps:
+      - name: Ping Frontend Service
+        run: |
+          echo "🔄 Pinging Frontend Service..."
+          curl -f --max-time 30 https://frontend-8jdd.onrender.com/api/health || echo "⚠️ Frontend service may be sleeping"
+          
+      - name: Ping Ingest Service
+        run: |
+          echo "🔄 Pinging Ingest Service..."
+          curl -f --max-time 30 https://rtaa-ingest.onrender.com/health || echo "⚠️ Ingest service may be sleeping"
+          
+      - name: Ping ASR Worker Service
+        run: |
+          echo "🔄 Pinging ASR Worker Service..."
+          curl -f --max-time 30 https://rtaa-asr-worker.onrender.com/health || echo "⚠️ ASR Worker service may be sleeping"
+          
+      - name: Summary
+        run: |
+          echo "✅ Keep-alive ping completed at $(date)"
+          echo "Services should remain awake for the next 15 minutes"
+

@@ -27,19 +27,23 @@ export type Suggestion = {
 export interface AutoDispositionModalProps {
   open: boolean;
   onClose: () => void;
+  onBack?: () => void;
   callId: string;
   tenantId?: string;
   suggested?: Suggestion[]; // sorted by score desc
   autoNotes?: string;
+  onDispose?: (callId: string) => void; // Called after successful disposition
 }
 
 export default function AutoDispositionModal({
   open,
   onClose,
+  onBack,
   callId,
   tenantId,
   suggested = [],
   autoNotes = '',
+  onDispose,
 }: AutoDispositionModalProps) {
   const [allDispositions, setAllDispositions] = useState<DispositionOption[]>([]);
   const [subDispositions, setSubDispositions] = useState<DispositionOption[]>([]);
@@ -72,6 +76,20 @@ export default function AutoDispositionModal({
 
         if (payload.ok && Array.isArray(payload.dispositions)) {
           setAllDispositions(payload.dispositions);
+          // If we have a selected disposition, ensure it's still valid
+          if (selectedDisposition) {
+            const found = payload.dispositions.find((d: DispositionOption) => d.code === selectedDisposition);
+            if (!found && currentSuggestions.length > 0) {
+              // Keep using current suggestions if selected disposition not in allDispositions
+              const suggestion = currentSuggestions.find(s => s.code === selectedDisposition);
+              if (suggestion) {
+                // Keep the selection from suggestions
+                setSelectedDispositionId(suggestion.id || null);
+              }
+            } else if (found) {
+              setSelectedDispositionId(found.id || null);
+            }
+          }
         } else {
           console.warn('[AutoDispositionModal] Failed to fetch dispositions, using suggested only');
         }
@@ -83,7 +101,7 @@ export default function AutoDispositionModal({
     };
 
     fetchDispositions();
-  }, [open]);
+  }, [open, selectedDisposition, currentSuggestions]);
 
   // Fetch sub-dispositions when disposition changes
   useEffect(() => {
@@ -217,27 +235,15 @@ export default function AutoDispositionModal({
     const timeoutId = setTimeout(() => controller.abort(), 6000);
 
     try {
-      const response = await fetch('/api/calls/auto_notes', {
+      // Use new disposition API endpoint
+      const response = await fetch(`/api/calls/${callId}/disposition`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          callId,
-          tenantId: tenantId || 'default',
-          author: 'agent-ui',
-          notes,
-          dispositions: [
-            {
-              code: selectedDispositionObj.code,
-              title: selectedDispositionObj.title || selectedDispositionObj.code,
-              score: 'score' in selectedDispositionObj && typeof selectedDispositionObj.score === 'number' 
-                ? selectedDispositionObj.score 
-                : 0,
-            },
-          ],
-          dispositionId: selectedDispositionId,
+          disposition: selectedDispositionObj.code,
           subDisposition: selectedSubDisposition || undefined,
-          subDispositionId: selectedSubDispositionId,
-          confidence: averageScore,
+          notes: notes || undefined,
+          agentId: 'agent-ui', // TODO: Get from context
         }),
         signal: controller.signal,
       });
@@ -251,8 +257,50 @@ export default function AutoDispositionModal({
 
       // Success - close modal and show toast
       showToast('Saved and synced', 'success');
+      
+      // Call dispose API to clear transcripts from cache
+      try {
+        console.log('[AutoDispositionModal] 🧹 Calling dispose API...', { callId });
+        
+        const disposeResponse = await fetch(`/api/calls/${callId}/dispose`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            disposition: selectedDispositionObj.code,
+            subDisposition: selectedSubDisposition || undefined,
+            notes: notes || undefined,
+          }),
+        });
+        
+        if (!disposeResponse.ok) {
+          console.error('[AutoDispositionModal] Dispose API failed', {
+            status: disposeResponse.status,
+            callId,
+          });
+        } else {
+          console.log('[AutoDispositionModal] ✅ Dispose API succeeded', { callId });
+        }
+      } catch (disposeErr) {
+        console.error('[AutoDispositionModal] Dispose call failed (non-critical)', disposeErr);
+      }
+      
+      // ALWAYS notify parent to clear UI, even if dispose API fails
+      console.log('[AutoDispositionModal] 🧹 Calling onDispose callback...', { 
+        callId, 
+        hasCallback: !!onDispose 
+      });
+      
+      if (onDispose) {
+        onDispose(callId);
+        console.log('[AutoDispositionModal] ✅ onDispose callback executed', { callId });
+      } else {
+        console.warn('[AutoDispositionModal] ⚠️ No onDispose callback provided!');
+      }
+      
+      // Full page refresh to zero state after dispose
       setTimeout(() => {
-        onClose();
+        console.log('[AutoDispositionModal] 🔄 Refreshing page to zero state');
+        window.location.href = '/live';
       }, 500);
     } catch (err: any) {
       clearTimeout(timeoutId);
@@ -266,7 +314,7 @@ export default function AutoDispositionModal({
     } finally {
       setLoading(null);
     }
-  }, [selectedDispositionObj, notes, callId, tenantId, averageScore, onClose]);
+  }, [selectedDispositionObj, notes, callId, tenantId, averageScore, onClose, selectedDispositionId, selectedSubDisposition, selectedSubDispositionId]);
 
   // Handle Retry
   const handleRetry = useCallback(async () => {
@@ -319,22 +367,13 @@ export default function AutoDispositionModal({
         .filter((section: string | undefined) => section && section.trim().length > 0)
         .join('\n\n');
 
+      // Update suggestions and notes - regenerate notes specifically
       setCurrentSuggestions(newSuggestions.length > 0 ? newSuggestions : currentSuggestions);
       setCurrentAutoNotes(newNotes || '');
-      setNotes(newNotes || '');
+      setNotes(newNotes || ''); // Regenerate notes
       
-      // Auto-select best match
-      if (newSuggestions.length > 0) {
-        const bestSuggestion = newSuggestions.reduce((best, current) => {
-          const bestScore = best.score || 0;
-          const currentScore = current.score || 0;
-          return currentScore > bestScore ? current : best;
-        });
-        setSelectedDisposition(bestSuggestion.code);
-        setSelectedSubDisposition(bestSuggestion.subDisposition || '');
-        setSelectedDispositionId(bestSuggestion.id || null);
-        setSelectedSubDispositionId(bestSuggestion.subDispositionId || null);
-      }
+      // Keep current disposition selection, only update notes
+      // Don't auto-select new disposition unless user wants to change it
     } catch (err: any) {
       clearTimeout(timeoutId);
       console.error('[AutoDispositionModal] Retry failed', err);
@@ -386,17 +425,44 @@ export default function AutoDispositionModal({
         {/* Modal */}
         <div
           ref={modalRef}
-          className="relative z-50 w-full max-w-[420px] bg-panel-bg rounded-lg shadow-card my-auto"
+          className="relative z-50 w-full max-w-[480px] bg-white rounded-lg shadow-lg my-auto"
           role="dialog"
           aria-modal="true"
           aria-labelledby="modal-title"
           onClick={(e) => e.stopPropagation()}
         >
         {/* Header */}
-        <div className="flex items-center justify-between p-6 border-b border-border-soft">
-          <h2 id="modal-title" className="text-lg font-semibold text-gray-900">
-            Auto-Generated Disposition & Notes
-          </h2>
+        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
+          <div className="flex items-center gap-3">
+            {onBack && (
+              <button
+                type="button"
+                onClick={onBack}
+                disabled={isLoading}
+                className="text-gray-600 hover:text-gray-900 transition-colors disabled:opacity-50"
+                aria-label="Go back to agent assist"
+                role="button"
+              >
+                <svg
+                  className="w-5 h-5"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M15 19l-7-7 7-7"
+                  />
+                </svg>
+              </button>
+            )}
+            <h2 id="modal-title" className="text-lg font-semibold text-gray-900">
+              Agent Assist
+            </h2>
+            <div className="w-2 h-2 rounded-full bg-green-500"></div>
+          </div>
           <button
             type="button"
             onClick={onClose}
@@ -422,11 +488,11 @@ export default function AutoDispositionModal({
         </div>
 
         {/* Body */}
-        <div className="p-6 space-y-4">
-          {/* Disposition Select */}
+        <div className="px-6 py-5 space-y-5">
+          {/* Recommended Disposition Select */}
           <div>
-            <label htmlFor="disposition-select" className="block text-sm font-medium text-gray-700 mb-2">
-              Disposition
+            <label htmlFor="disposition-select" className="block text-sm font-semibold text-gray-900 mb-2">
+              Recommended Disposition
             </label>
             <select
               id="disposition-select"
@@ -435,46 +501,42 @@ export default function AutoDispositionModal({
                 const newCode = e.target.value;
                 setSelectedDisposition(newCode);
                 // Find the selected disposition to get its ID
-                const selected = allDispositions.find(d => d.code === newCode);
+                const selected = allDispositions.find(d => d.code === newCode) || 
+                                currentSuggestions.find(s => s.code === newCode);
                 setSelectedDispositionId(selected?.id || null);
                 // Clear sub-disposition when disposition changes
                 setSelectedSubDisposition('');
                 setSelectedSubDispositionId(null);
               }}
-              disabled={isLoading}
-              className="w-full rounded-md border border-border-soft p-2 text-sm text-gray-900 bg-panel-bg focus:outline-none focus:ring-2 focus:ring-brand/20 focus:border-brand disabled:cursor-not-allowed disabled:bg-gray-50"
+              disabled={isLoading || (allDispositions.length === 0 && currentSuggestions.length === 0)}
+              className="w-full rounded-md border border-gray-300 px-3 py-2.5 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:cursor-not-allowed disabled:bg-gray-100"
+              style={{ color: '#111827' }}
               aria-label="Select disposition"
+              required
             >
-              <option value="">Select disposition...</option>
+              <option value="" style={{ color: '#9CA3AF' }}>Select disposition...</option>
               {allDispositions.length > 0 ? (
                 allDispositions.map((disposition) => (
-                  <option key={disposition.code} value={disposition.code}>
-                    {disposition.title}
+                  <option key={disposition.code} value={disposition.code} style={{ color: '#111827' }}>
+                    {disposition.title || disposition.label || disposition.code}
                   </option>
                 ))
               ) : currentSuggestions.length > 0 ? (
                 currentSuggestions.map((suggestion) => (
-                  <option key={suggestion.code} value={suggestion.code}>
-                    {suggestion.title}
+                  <option key={suggestion.code} value={suggestion.code} style={{ color: '#111827' }}>
+                    {suggestion.title} {suggestion.score ? `(${Math.round(suggestion.score * 100)}%)` : ''}
                   </option>
                 ))
               ) : (
-                <option value="">Loading dispositions...</option>
+                <option value="" disabled style={{ color: '#9CA3AF' }}>Loading dispositions...</option>
               )}
             </select>
-            {/* Show auto-selected indicator if suggested disposition matches */}
-            {currentSuggestions.length > 0 && selectedDisposition && 
-             currentSuggestions.some(s => s.code === selectedDisposition) && (
-              <p className="mt-1 text-xs text-text-muted">
-                ✓ Auto-selected based on transcript analysis
-              </p>
-            )}
           </div>
 
           {/* Sub-Disposition Select */}
           <div>
-            <label htmlFor="sub-disposition-select" className="block text-sm font-medium text-gray-700 mb-2">
-              Sub-Disposition <span className="text-text-muted font-normal">(Optional)</span>
+            <label htmlFor="sub-disposition-select" className="block text-sm font-semibold text-gray-900 mb-2">
+              Sub-Disposition
             </label>
             <select
               id="sub-disposition-select"
@@ -483,73 +545,58 @@ export default function AutoDispositionModal({
                 const newCode = e.target.value;
                 setSelectedSubDisposition(newCode);
                 // Find the selected sub-disposition to get its ID
-                const selected = subDispositions.find(sd => sd.code === newCode);
+                const selected = subDispositions.find(sd => sd.code === newCode || sd.title === newCode);
                 setSelectedSubDispositionId(selected?.id || null);
               }}
               disabled={isLoading || !selectedDisposition || subDispositions.length === 0}
-              className="w-full rounded-md border border-border-soft p-2 text-sm text-gray-900 bg-panel-bg focus:outline-none focus:ring-2 focus:ring-brand/20 focus:border-brand disabled:cursor-not-allowed disabled:bg-gray-50"
+              className="w-full rounded-md border border-gray-300 px-3 py-2.5 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:cursor-not-allowed disabled:bg-gray-100"
+              style={{ color: '#111827' }}
               aria-label="Select sub-disposition"
             >
-              <option value="">Select sub-disposition...</option>
+              <option value="" style={{ color: '#9CA3AF' }}>Select sub-disposition...</option>
               {subDispositions.length > 0 ? (
                 subDispositions.map((subDisp) => (
-                  <option key={subDisp.code} value={subDisp.code}>
-                    {subDisp.title}
+                  <option key={subDisp.code || subDisp.title} value={subDisp.code || subDisp.title} style={{ color: '#111827' }}>
+                    {subDisp.title || subDisp.label || subDisp.code}
                   </option>
                 ))
               ) : selectedDisposition ? (
-                <option value="">Loading sub-dispositions...</option>
+                <option value="" disabled style={{ color: '#9CA3AF' }}>Loading sub-dispositions...</option>
               ) : (
-                <option value="">Select a disposition first</option>
+                <option value="" disabled style={{ color: '#9CA3AF' }}>Select a disposition first</option>
               )}
             </select>
-            {currentSuggestions.length > 0 && 
-             currentSuggestions.some(s => s.code === selectedDisposition && s.subDisposition) &&
-             selectedSubDisposition && (
-              <p className="mt-1 text-xs text-text-muted">
-                ✓ Auto-selected based on transcript analysis
-              </p>
-            )}
           </div>
 
           {/* Notes Textarea */}
           <div>
-            <label htmlFor="notes-textarea" className="block text-sm font-medium text-gray-700 mb-2">
-              Notes
-            </label>
+            <div className="flex items-center gap-2 mb-2">
+              <label htmlFor="notes-textarea" className="block text-sm font-semibold text-gray-900">
+                Notes (AI-generated, editable)
+              </label>
+              {averageScore > 0 && (
+                <span className={`px-2 py-0.5 rounded text-xs font-medium ${
+                  averageScore >= 0.8 ? 'bg-green-100 text-green-700' :
+                  averageScore >= 0.6 ? 'bg-yellow-100 text-yellow-700' :
+                  'bg-red-100 text-red-700'
+                }`}>
+                  Confidence: {Math.round(averageScore * 100)}%
+                </span>
+              )}
+            </div>
             <div className="relative">
               <textarea
                 id="notes-textarea"
                 value={notes}
                 onChange={(e) => setNotes(e.target.value)}
                 disabled={isLoading}
-                rows={5}
-                className="w-full rounded-lg border border-border-soft p-3 text-sm text-gray-900 bg-panel-bg resize-none focus:outline-none focus:ring-2 focus:ring-brand/20 focus:border-brand disabled:cursor-not-allowed disabled:bg-gray-50"
-                style={{ height: '120px' }}
+                rows={4}
+                className="w-full rounded-md border border-gray-300 px-3 py-2.5 text-sm text-gray-900 bg-white resize-none focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:cursor-not-allowed disabled:bg-gray-100 disabled:text-gray-500"
+                style={{ color: '#111827' }}
                 aria-label="Call notes"
               />
-              {/* LLM Icon Badge */}
-              {notes && (
-                <div className="absolute bottom-2 right-2">
-                  <div className="w-5 h-5 rounded-full bg-purple-500/20 flex items-center justify-center">
-                    <svg
-                      className="w-3 h-3 text-purple-600"
-                      fill="currentColor"
-                      viewBox="0 0 20 20"
-                      aria-label="AI-generated"
-                    >
-                      <path d="M9 2a1 1 0 000 2h2a1 1 0 100-2H9z" />
-                      <path
-                        fillRule="evenodd"
-                        d="M4 5a2 2 0 012-2 3 3 0 003 3h2a3 3 0 003-3 2 2 0 012 2v11a2 2 0 01-2 2H6a2 2 0 01-2-2V5zm3 4a1 1 0 000 2h.01a1 1 0 100-2H7zm3 0a1 1 0 000 2h3a1 1 0 100-2h-3zm-3 4a1 1 0 100 2h.01a1 1 0 100-2H7zm3 0a1 1 0 100 2h3a1 1 0 100-2h-3z"
-                        clipRule="evenodd"
-                      />
-                    </svg>
-                  </div>
-                </div>
-              )}
             </div>
-            <p className="mt-2 text-xs text-text-muted">
+            <p className="mt-2 text-xs text-gray-500">
               AI-suggested dispositions may be inaccurate, review before applying.
             </p>
           </div>
@@ -566,12 +613,12 @@ export default function AutoDispositionModal({
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-end gap-3 p-6 border-t border-border-soft">
+        <div className="flex items-center justify-end gap-3 px-6 py-4 border-t border-gray-200 bg-gray-50">
           <button
             type="button"
             onClick={handleRetry}
             disabled={isLoading}
-            className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-border-soft rounded-md hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-brand/20 disabled:cursor-not-allowed disabled:opacity-50"
+            className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-50 transition-colors"
             aria-label="Retry summary generation"
           >
             {loading === 'retry' && <Spinner />}
@@ -581,11 +628,23 @@ export default function AutoDispositionModal({
             type="button"
             onClick={handleSave}
             disabled={isLoading || !selectedDispositionObj}
-            className="inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold text-white bg-brand rounded-md hover:bg-brand/90 focus:outline-none focus:ring-2 focus:ring-brand/20 disabled:cursor-not-allowed disabled:opacity-50"
+            className="inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold text-white bg-blue-600 rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-50 transition-colors"
             aria-label="Save and sync disposition"
           >
             {loading === 'save' && <Spinner />}
-            Save & Sync
+            Save and Dispose
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              handleSave();
+              // TODO: Trigger dial next
+            }}
+            disabled={isLoading || !selectedDispositionObj}
+            className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 border border-gray-300 rounded-md hover:bg-gray-200 focus:outline-none focus:ring-2 focus:ring-gray-500 disabled:cursor-not-allowed disabled:opacity-50 transition-colors"
+            aria-label="Dispose and dial next"
+          >
+            Dispose and Dial
           </button>
         </div>
       </div>

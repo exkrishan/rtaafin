@@ -1,199 +1,217 @@
-# 🚀 Cloud Deployment Readiness Summary
+# ✅ Deployment Ready - ElevenLabs ASR Worker
 
-## ✅ Services Prepared for Render Deployment
-
-Both `services/ingest` and `services/asr-worker` are now ready for cloud deployment on Render or any Node.js hosting platform.
-
----
-
-## 📦 Service 1: `services/ingest` (WebSocket Ingestion)
-
-### ✅ Package.json Scripts
-- **`dev`**: `ts-node src/server.ts` - Development mode
-- **`build`**: `tsc -p tsconfig.json` - TypeScript compilation
-- **`start`**: `node dist/server.js` - Production start (for Render)
-
-### ✅ Dependencies Verified
-- ✅ `ws` - WebSocket support
-- ✅ `typescript`, `ts-node` - TypeScript tooling
-- ✅ `@types/node` - TypeScript definitions
-- ✅ `dotenv` - Environment variable support
-- ✅ `jsonwebtoken` - JWT authentication
-- ✅ `ioredis` - Redis pub/sub support
-
-### ✅ Server Configuration
-- **PORT**: Uses `process.env.PORT || 5000` (Render-compatible)
-- **Health Endpoint**: `GET /health` returns `{status: "ok", service: "ingest"}`
-- **WebSocket Endpoint**: `ws://host:PORT/v1/ingest`
-- **Comments Added**: Clear markers for HTTP routes and WebSocket setup
-
-### ✅ TypeScript Configuration
-- **Target**: ES2020 (Node 18+ compatible)
-- **Output**: `dist/` directory
-- **Root Dir**: `src/` directory
-- **Module**: CommonJS
-
-### ✅ .gitignore
-- ✅ Excludes `node_modules/`
-- ✅ Excludes `dist/`
-- ✅ Excludes `.env` and `.env.local`
+**Commit:** `cfdbc5b` - ElevenLabs integration improvements  
+**Branch:** `feat/exotel-deepgram-bridge`  
+**Status:** ✅ Ready for deployment
 
 ---
 
-## 📦 Service 2: `services/asr-worker` (ASR Worker)
+## 🎯 Key Fixes in This Deployment
 
-### ✅ Package.json Scripts
-- **`dev`**: `ts-node src/index.ts` - Development mode
-- **`build`**: `tsc -p tsconfig.json` - TypeScript compilation
-- **`start`**: `node dist/index.js` - Production start (for Render)
+### 1. ✅ EXO_BRIDGE_ENABLED Fix (CRITICAL)
+- **Problem:** Flag was blocking ALL providers (ElevenLabs, Google, etc.)
+- **Fix:** Now only blocks Deepgram (as intended)
+- **Impact:** ElevenLabs now works without the flag
 
-### ✅ Dependencies Verified
-- ✅ `typescript`, `ts-node` - TypeScript tooling
-- ✅ `@types/node` - TypeScript definitions
-- ✅ `dotenv` - Environment variable support
-- ✅ `@deepgram/sdk` - Deepgram ASR provider
+### 2. ✅ Default Sample Rate: 8kHz → 16kHz
+- **Problem:** 8kHz produces 0% transcription success
+- **Fix:** Default changed to 16kHz (37.5% success rate)
+- **Impact:** Better transcription quality by default
 
-### ✅ Worker Configuration
-- **ASR_PROVIDER**: Reads `process.env.ASR_PROVIDER` (supports `mock`, `deepgram`, `whisper`)
-- **Provider Logging**: Logs which provider is active on startup
-- **Health Endpoint**: `GET /health` returns `{status: "ok", service: "asr-worker"}`
-- **Metrics Endpoint**: `GET /metrics` returns Prometheus metrics
-- **SIGTERM Handling**: Graceful shutdown on SIGTERM/SIGINT
+### 3. ✅ Chunk Size: 100ms → 500ms
+- **Problem:** 100ms chunks were suboptimal
+- **Fix:** Changed to 500ms (optimal from testing)
+- **Impact:** Better throughput, fewer timeouts
 
-### ✅ TypeScript Configuration
-- **Target**: ES2020 (Node 18+ compatible)
-- **Output**: `dist/` directory
-- **Root Dir**: `src/` directory
-- **Module**: CommonJS
-
-### ✅ .gitignore
-- ✅ Excludes `node_modules/`
-- ✅ Excludes `dist/`
-- ✅ Excludes `.env` and `.env.local`
+### 4. ✅ Silence Detection Re-enabled
+- **Problem:** Was disabled, causing wasted API calls
+- **Fix:** Re-enabled with proper thresholds
+- **Impact:** Cost savings, better efficiency
 
 ---
 
-## 🔧 Environment Variables Required
+## 🚀 Quick Deployment Steps
 
-### For `services/ingest`:
+### Option 1: Update Existing Service (If Already Deployed)
+
+1. **Go to Render Dashboard**
+   - Navigate to your ASR Worker service
+
+2. **Update Environment Variables** (if needed):
+   ```
+   ASR_PROVIDER=elevenlabs
+   ELEVENLABS_API_KEY=sk_07ea93ab35b807e962d4bc99f3978177f5d56d5b0563938e
+   ELEVENLABS_PREFERRED_SAMPLE_RATE=16000  # Optional (default is now 16000)
+   # EXO_BRIDGE_ENABLED is NOT required for ElevenLabs
+   ```
+
+3. **Manual Deploy** (if auto-deploy is off):
+   - Click "Manual Deploy" → "Deploy latest commit"
+   - Or push to trigger auto-deploy
+
+### Option 2: Create New Service
+
+Follow: `RENDER_ASR_WORKER_ELEVENLABS_DEPLOYMENT.md`
+
+---
+
+## 🔐 Required Environment Variables
+
+### Minimum Required (for ElevenLabs)
 ```bash
-PORT=5000                    # Optional, defaults to 5000
-JWT_PUBLIC_KEY=...          # Required for JWT authentication
-PUBSUB_ADAPTER=redis_streams # Optional, defaults to in-memory
-REDIS_URL=...               # Required if using Redis
-SUPPORT_EXOTEL=true          # Optional, for Exotel protocol support
+REDIS_URL=redis://default:password@host:port
+PUBSUB_ADAPTER=redis_streams
+ASR_PROVIDER=elevenlabs
+ELEVENLABS_API_KEY=sk_07ea93ab35b807e962d4bc99f3978177f5d56d5b0563938e
 ```
 
-### For `services/asr-worker`:
+### Recommended (for optimal performance)
 ```bash
-PORT=3001                   # Optional, defaults to 3001
-ASR_PROVIDER=mock           # Required: mock, deepgram, or whisper
-DEEPGRAM_API_KEY=...        # Required if ASR_PROVIDER=deepgram
-PUBSUB_ADAPTER=redis_streams # Optional, defaults to in-memory
-REDIS_URL=...               # Required if using Redis
+ELEVENLABS_PREFERRED_SAMPLE_RATE=16000  # Default is now 16000
+ELEVENLABS_VAD_SILENCE_THRESHOLD=1.0
+ELEVENLABS_VAD_THRESHOLD=0.4
+ELEVENLABS_MIN_SPEECH_DURATION_MS=100
+ELEVENLABS_MIN_SILENCE_DURATION_MS=100
+```
+
+### NOT Required (Important!)
+```bash
+# EXO_BRIDGE_ENABLED is NOT required for ElevenLabs
+# It only applies to Deepgram provider
 ```
 
 ---
 
-## 🚀 Render Deployment Steps
+## ✅ Pre-Deployment Checklist
 
-### 1. Deploy Ingestion Service
-
-**Build Command**: `npm run build`  
-**Start Command**: `npm run start`  
-**Root Directory**: `services/ingest`
-
-**Environment Variables**:
-- `PORT` (auto-set by Render)
-- `JWT_PUBLIC_KEY`
-- `PUBSUB_ADAPTER` (if using Redis)
-- `REDIS_URL` (if using Redis)
-
-### 2. Deploy ASR Worker
-
-**Build Command**: `npm run build`  
-**Start Command**: `npm run start`  
-**Root Directory**: `services/asr-worker`
-
-**Environment Variables**:
-- `PORT` (auto-set by Render)
-- `ASR_PROVIDER` (mock, deepgram, or whisper)
-- `DEEPGRAM_API_KEY` (if using Deepgram)
-- `PUBSUB_ADAPTER` (if using Redis)
-- `REDIS_URL` (if using Redis)
+- [x] Code committed and pushed
+- [ ] Environment variables configured in Render
+- [ ] Service configured (or existing service updated)
+- [ ] Build command: `cd ../.. && npm ci && cd services/asr-worker && npm run build`
+- [ ] Start command: `npm run start`
+- [ ] Root directory: `services/asr-worker`
+- [ ] Health check path: `/health`
 
 ---
 
-## ✅ Verification Checklist
+## 🔍 Verification After Deployment
 
-- [x] Both services have `build` and `start` scripts
-- [x] TypeScript compiles to `dist/` directory
-- [x] Ingestion service uses `process.env.PORT || 5000`
-- [x] Ingestion service exposes `/health` endpoint
-- [x] Ingestion service exposes `/v1/ingest` WebSocket endpoint
-- [x] ASR worker reads `process.env.ASR_PROVIDER`
-- [x] ASR worker logs active provider
-- [x] ASR worker handles SIGTERM gracefully
-- [x] Both services have proper `tsconfig.json` with ES2020 target
-- [x] Both services exclude `node_modules/` and `dist/` in `.gitignore`
+### 1. Check Build Logs
+Look for:
+```
+✅ Compiled lib/pubsub
+✅ Build successful: dist/index.js exists
+```
 
----
+### 2. Check Runtime Logs
+Look for:
+```
+[ASRWorker] Using ASR provider: elevenlabs
+[ElevenLabsProvider] Initialized
+[pubsub] ✅ Pub/Sub adapter initialized
+[ASRWorker] 🔔 Subscribing to audio topic: audio_stream
+```
 
-## 📝 Files Modified
+### 3. Check Health Endpoint
+```bash
+curl https://your-service.onrender.com/health
+```
 
-### `services/ingest/package.json`
-- ✅ Updated `build` script to use `tsc -p tsconfig.json`
+Expected:
+```json
+{
+  "status": "ok",
+  "service": "asr-worker",
+  "provider": "elevenlabs",
+  "activeBuffers": 0,
+  "subscriptions": 2
+}
+```
 
-### `services/asr-worker/package.json`
-- ✅ Updated `build` script to use `tsc -p tsconfig.json`
+### 4. Verify ElevenLabs Connection
+When audio arrives, look for:
+```
+[ElevenLabsProvider] 🔑 Creating single-use token
+[ElevenLabsProvider] ✅ Connection opened
+[ElevenLabsProvider] 📤 Sent audio chunk to ElevenLabs
+```
 
-### `services/ingest/src/server.ts`
-- ✅ Changed default PORT from 8443 to 5000 (Render-compatible)
-- ✅ Added comments marking HTTP routes and WebSocket setup sections
-
-### `services/asr-worker/src/index.ts`
-- ✅ Enhanced provider logging to show active ASR provider
-
-### `services/ingest/tsconfig.json`
-- ✅ Added `rootDir: "./src"`
-- ✅ Changed target from ES2022 to ES2020
-
-### `services/asr-worker/tsconfig.json`
-- ✅ Added `rootDir: "./src"`
-- ✅ Changed target from ES2022 to ES2020
-
----
-
-## 🎯 Next Steps
-
-1. **Commit Changes**:
-   ```bash
-   git add services/ingest services/asr-worker
-   git commit -m "Prepare services for cloud deployment (Render)"
-   ```
-
-2. **Push to GitHub**:
-   ```bash
-   git push origin main
-   ```
-
-3. **Deploy on Render**:
-   - Create two separate services (one for ingest, one for asr-worker)
-   - Set build and start commands as specified above
-   - Configure environment variables
-   - Deploy!
+### 5. Check ElevenLabs Dashboard
+- Should see API requests in dashboard
+- Graph should show activity when calls are active
 
 ---
 
-## 📚 Additional Notes
+## 🐛 Troubleshooting
 
-- Both services are self-contained and can be deployed independently
-- The ingestion service supports both JWT authentication and Exotel protocol
-- The ASR worker supports multiple providers (mock, Deepgram, Whisper)
-- Both services use the shared `lib/pubsub` abstraction for messaging
-- Health endpoints are available for monitoring and load balancer checks
+### Issue: No requests in ElevenLabs dashboard
+
+**Check:**
+1. Is `ASR_PROVIDER=elevenlabs` set?
+2. Is `ELEVENLABS_API_KEY` set correctly?
+3. Are audio frames being received? (Check logs for "Processing audio")
+4. Is `EXO_BRIDGE_ENABLED` blocking? (Should NOT block ElevenLabs anymore)
+
+**Solution:**
+- Verify environment variables
+- Check logs for errors
+- Ensure audio is being sent from Ingest service
+
+### Issue: Empty transcripts
+
+**Expected:** 60-70% empty transcripts are normal (silence, background noise)
+
+**If 100% empty:**
+- Check sample rate (should be 16kHz)
+- Check audio quality (should have speech)
+- Check ElevenLabs dashboard for API activity
 
 ---
 
-**Status**: ✅ **READY FOR DEPLOYMENT**
+## 📊 Expected Behavior
 
+### Sample Rate
+- **Default:** 16kHz (optimal)
+- **Can override:** `ELEVENLABS_PREFERRED_SAMPLE_RATE=8000` (not recommended)
+
+### Chunk Size
+- **Optimal:** 500ms chunks
+- **Automatic:** Service handles chunking
+
+### Success Rate
+- **16kHz:** ~37.5% transcription success (normal for real-world audio)
+- **8kHz:** 0% transcription success (will warn in logs)
+
+### Latency
+- **Average:** 3-4 seconds for transcriptions
+- **Normal range:** 3-5 seconds
+
+---
+
+## 🎉 Success Indicators
+
+✅ Service builds successfully  
+✅ Health endpoint returns 200 OK  
+✅ Logs show "Using ASR provider: elevenlabs"  
+✅ Logs show "Pub/Sub adapter initialized"  
+✅ ElevenLabs dashboard shows API requests  
+✅ Transcripts are generated (when audio contains speech)
+
+---
+
+## 📝 Next Steps After Deployment
+
+1. **Monitor logs** for first few calls
+2. **Check ElevenLabs dashboard** for API activity
+3. **Verify transcripts** are being generated
+4. **Monitor costs** in ElevenLabs dashboard
+5. **Tune settings** based on production data
+
+---
+
+## 📚 Related Documentation
+
+- `ELEVENLABS_TESTING_LEARNINGS.md` - Complete testing learnings
+- `ELEVENLABS_IMPLEMENTATION_FIXES.md` - All fixes applied
+- `ELEVENLABS_ASR_SERVICE_FIX.md` - EXO_BRIDGE_ENABLED fix details
+- `RENDER_ASR_WORKER_ELEVENLABS_DEPLOYMENT.md` - Full deployment guide

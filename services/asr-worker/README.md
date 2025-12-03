@@ -45,6 +45,15 @@ PUBSUB_ADAPTER=in_memory ts-node scripts/asr_worker_demo.ts
 | `REDIS_URL` | Redis connection URL | `redis://localhost:6379` |
 | `REDIS_CONSUMER_GROUP` | Redis consumer group | `asr-worker` |
 | `REDIS_CONSUMER_NAME` | Redis consumer name | `asr-worker-1` |
+| `EXO_BRIDGE_ENABLED` | Enable Exotel→Deepgram bridge feature | `false` |
+| `EXO_IDLE_CLOSE_S` | Idle timeout before closing Deepgram connection (1-300s) | `10` |
+| `DG_MODEL` | Deepgram model (e.g., `nova-3`, `nova-2`) | `nova-3` |
+| `DG_ENCODING` | Audio encoding (`linear16`, `mulaw`, etc.) | `linear16` |
+| `DG_SAMPLE_RATE` | Audio sample rate (Hz) | Auto-detected |
+| `DG_CHANNELS` | Audio channels (1=mono, 2=stereo) | `1` |
+| `DG_SMART_FORMAT` | Enable smart formatting | `true` |
+| `DG_DIARIZE` | Enable speaker diarization | `false` |
+| `EXO_EARLY_AUDIO_FILTER` | Filter early audio (ringing, etc.) | `true` |
 
 ## ASR Providers
 

@@ -9,6 +9,14 @@
 
 export async function register() {
   if (process.env.NEXT_RUNTIME === 'nodejs') {
+    // TranscriptConsumer is disabled by default with the new external ASR API integration
+    // The new /api/transcripts/receive endpoint handles transcript ingestion directly
+    // Set ENABLE_TRANSCRIPT_CONSUMER=true to re-enable the old Redis Stream consumer
+    if (process.env.ENABLE_TRANSCRIPT_CONSUMER !== 'true') {
+      console.info('[instrumentation] TranscriptConsumer disabled (using direct API integration)');
+      return;
+    }
+    
     // Only run on Node.js runtime (not Edge)
     const { startTranscriptConsumer } = await import('./lib/transcript-consumer');
     

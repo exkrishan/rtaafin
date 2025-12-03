@@ -1,0 +1,99 @@
+[
+  {
+    "seq": 1,
+    "speaker": "Agent",
+    "text": "Good morning! Thank you for calling MoneyAssure Bank. This is Priya from the Card Services team. How may I help you today?",
+    "ts": "2025-01-09T10:00:00.000Z"
+  },
+  {
+    "seq": 2,
+    "speaker": "Customer",
+    "text": "Hi, I'm following up on my replacement Platinum Credit Card. I reported fraud a few days ago, and I haven't received any update on the delivery status.",
+    "ts": "2025-01-09T10:00:15.000Z"
+  },
+  {
+    "seq": 3,
+    "speaker": "Agent",
+    "text": "I understand your concern. Let me quickly check the latest dispatch status for your card. Can you please provide your card number or account number?",
+    "ts": "2025-01-09T10:00:30.000Z"
+  },
+  {
+    "seq": 4,
+    "speaker": "Customer",
+    "text": "Sure, it's ending in 7792.",
+    "ts": "2025-01-09T10:00:45.000Z"
+  },
+  {
+    "seq": 5,
+    "speaker": "Agent",
+    "text": "Thank you. Let me pull up your account information. One moment please.",
+    "ts": "2025-01-09T10:01:00.000Z"
+  },
+  {
+    "seq": 6,
+    "speaker": "Agent",
+    "text": "Yes, I can confirm that your Platinum Credit Card ending in 7792 was shipped on November 08, 2025 via India Post. It's currently In Transit and expected to be delivered by November 15, 2025.",
+    "ts": "2025-01-09T10:01:15.000Z"
+  },
+  {
+    "seq": 7,
+    "speaker": "Customer",
+    "text": "Alright, thanks for the update. Can you please share the tracking number?",
+    "ts": "2025-01-09T10:01:30.000Z"
+  },
+  {
+    "seq": 8,
+    "speaker": "Agent",
+    "text": "Of course. The tracking number is IN123456789. You can track it on the India Post website.",
+    "ts": "2025-01-09T10:01:45.000Z"
+  },
+  {
+    "seq": 9,
+    "speaker": "Customer",
+    "text": "Perfect. Also, I wanted to check if there are any additional security measures I should take since I reported fraud earlier.",
+    "ts": "2025-01-09T10:02:00.000Z"
+  },
+  {
+    "seq": 10,
+    "speaker": "Agent",
+    "text": "Absolutely. Since you reported fraud, I recommend enabling transaction alerts and setting up two-factor authentication. I can help you with that right now.",
+    "ts": "2025-01-09T10:02:15.000Z"
+  },
+  {
+    "seq": 11,
+    "speaker": "Customer",
+    "text": "That would be great. Let's do that.",
+    "ts": "2025-01-09T10:02:30.000Z"
+  },
+  {
+    "seq": 12,
+    "speaker": "Agent",
+    "text": "Excellent. I've enabled transaction alerts for your account. You'll receive SMS notifications for all transactions above Rs. 1000. I'm also sending you a link to set up two-factor authentication.",
+    "ts": "2025-01-09T10:02:45.000Z"
+  },
+  {
+    "seq": 13,
+    "speaker": "Customer",
+    "text": "Thank you so much for your help. This has been very helpful.",
+    "ts": "2025-01-09T10:03:00.000Z"
+  },
+  {
+    "seq": 14,
+    "speaker": "Agent",
+    "text": "You're most welcome. Is there anything else I can assist you with today?",
+    "ts": "2025-01-09T10:03:15.000Z"
+  },
+  {
+    "seq": 15,
+    "speaker": "Customer",
+    "text": "No, that's all. Thanks again!",
+    "ts": "2025-01-09T10:03:30.000Z"
+  },
+  {
+    "seq": 16,
+    "speaker": "Agent",
+    "text": "Thank you for calling MoneyAssure Bank. Have a great day!",
+    "ts": "2025-01-09T10:03:45.000Z"
+  }
+]
+

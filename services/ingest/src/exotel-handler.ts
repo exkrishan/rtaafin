@@ -8,6 +8,10 @@ import { ExotelMessage, ExotelStartEvent, ExotelMediaEvent, ExotelStopEvent } fr
 import { AudioFrame } from './types';
 import { PubSubAdapter } from './types';
 import { callEndTopic } from '@rtaa/pubsub/topics';
+import { dumpAudioChunk } from './audio-dumper';
+import * as path from 'path';
+import * as fs from 'fs';
+import { logger } from './logger';
 
 export interface ExotelConnectionState {
   streamSid: string;
@@ -23,15 +27,45 @@ export interface ExotelConnectionState {
   started: boolean;
 }
 
+interface BoundedBuffer {
+  frames: Array<{ frame: AudioFrame; timestamp: number }>;
+  maxDurationMs: number;
+  totalDurationMs: number;
+}
+
 export class ExotelHandler {
   private pubsub: PubSubAdapter;
   private connections: Map<string, ExotelConnectionState> = new Map();
+  private boundedBuffers: Map<string, BoundedBuffer> = new Map();
+  private exoBridgeEnabled: boolean;
+  private exoMaxBufferMs: number;
+  // Metrics counters (simple in-memory for now)
+  private metrics = {
+    framesIn: 0,
+    bytesIn: 0,
+    bufferDrops: 0,
+    publishFailures: 0,
+  };
 
   constructor(pubsub: PubSubAdapter) {
     this.pubsub = pubsub;
+    this.exoBridgeEnabled = process.env.EXO_BRIDGE_ENABLED === 'true';
+    this.exoMaxBufferMs = parseInt(process.env.EXO_MAX_BUFFER_MS || '500', 10);
+    
+    if (this.exoBridgeEnabled) {
+      console.info('[exotel] Exotel→Deepgram bridge: ENABLED', {
+        maxBufferMs: this.exoMaxBufferMs,
+      });
+    } else {
+      console.info('[exotel] Exotel→Deepgram bridge: DISABLED (set EXO_BRIDGE_ENABLED=true to enable)');
+    }
   }
 
   handleMessage(ws: WebSocket & { exotelState?: ExotelConnectionState }, message: string): void {
+    // CRITICAL FIX: Always process messages (start, media, stop) regardless of bridge feature flag
+    // The bridge feature flag should only control bridge-specific functionality, not core audio ingestion
+    // Media events must always be published to Redis for ASR worker processing
+    
     try {
       const data: ExotelMessage = JSON.parse(message);
 
@@ -41,15 +75,22 @@ export class ExotelHandler {
           break;
 
         case 'start':
-          this.handleStart(ws, data as ExotelStartEvent);
+          // Fire and forget - don't block on async call
+          this.handleStart(ws, data as ExotelStartEvent).catch((err) => {
+            console.error('[exotel] Error in handleStart:', err);
+          });
           break;
 
         case 'media':
+          // CRITICAL: Always process media events - they must be published to Redis
           this.handleMedia(ws, data as ExotelMediaEvent);
           break;
 
         case 'stop':
-          this.handleStop(ws, data as ExotelStopEvent);
+          // Fire and forget - don't block on async call
+          this.handleStop(ws, data as ExotelStopEvent).catch((err) => {
+            console.error('[exotel] Error in handleStop:', err);
+          });
           break;
 
         case 'dtmf':
@@ -76,12 +117,55 @@ export class ExotelHandler {
     // We can acknowledge or just wait for start event
   }
 
-  private handleStart(
+  private async handleStart(
     ws: WebSocket & { exotelState?: ExotelConnectionState },
     event: ExotelStartEvent
-  ): void {
+  ): Promise<void> {
     const { stream_sid, start } = event;
-    const sampleRate = parseInt(start.media_format.sample_rate, 10) || 8000;
+    // Exotel can send 8kHz, 16kHz, or 24kHz (per Exotel docs)
+    // ElevenLabs supports 8kHz and 16kHz - accept both, prefer 16kHz for better transcription
+    // Only force correction if sample rate is invalid (not 8000, 16000, or 24000)
+    let sampleRate = parseInt(start.media_format.sample_rate, 10) || 8000;
+    const ALLOWED_EXOTEL_RATES = [8000, 16000, 24000];
+    const ELEVENLABS_SUPPORTED_RATES = [8000, 16000];
+    
+    if (!ALLOWED_EXOTEL_RATES.includes(sampleRate)) {
+      // Invalid sample rate from Exotel - default to 8000 for telephony compatibility
+      console.warn(`[exotel] ⚠️ Invalid sample rate ${sampleRate} from Exotel, defaulting to 8000 Hz`, {
+        stream_sid,
+        call_sid: start.call_sid,
+        received_sample_rate: start.media_format.sample_rate,
+        corrected_sample_rate: 8000,
+        note: 'Exotel should send 8kHz, 16kHz, or 24kHz. Defaulting to 8kHz for telephony compatibility.',
+      });
+      sampleRate = 8000;
+    } else if (sampleRate === 24000) {
+      // Exotel sent 24kHz, but ElevenLabs only supports up to 16kHz - convert to 16kHz
+      console.info(`[exotel] ℹ️ Exotel sent 24kHz audio, converting to 16kHz for ElevenLabs (optimal for transcription)`, {
+        stream_sid,
+        call_sid: start.call_sid,
+        received_sample_rate: 24000,
+        converted_sample_rate: 16000,
+        note: 'ElevenLabs supports up to 16kHz. 16kHz provides better transcription quality than 8kHz.',
+      });
+      sampleRate = 16000;
+    } else if (sampleRate === 16000) {
+      // Exotel sent 16kHz - optimal for transcription
+      console.info(`[exotel] ✅ Exotel sent 16kHz audio (optimal for transcription quality)`, {
+        stream_sid,
+        call_sid: start.call_sid,
+        sample_rate: 16000,
+        note: '16kHz provides better transcription quality than 8kHz telephony audio.',
+      });
+    } else {
+      // Exotel sent 8kHz - standard telephony, acceptable but not optimal
+      console.debug(`[exotel] ℹ️ Exotel sent 8kHz audio (telephony standard)`, {
+        stream_sid,
+        call_sid: start.call_sid,
+        sample_rate: 8000,
+        note: '8kHz is standard for telephony. For better transcription quality, configure Exotel to send 16kHz.',
+      });
+    }
 
     const state: ExotelConnectionState = {
       streamSid: stream_sid,
@@ -100,7 +184,8 @@ export class ExotelHandler {
     ws.exotelState = state;
     this.connections.set(stream_sid, state);
 
-    console.info('[exotel] Start event received', {
+    // Keep start event log - it indicates ingestion is happening
+    logger.info('[exotel] Start event received', {
       stream_sid,
       call_sid: start.call_sid,
       sample_rate: sampleRate,
@@ -119,6 +204,24 @@ export class ExotelHandler {
       encoding: start.media_format.encoding,
       timestamp: new Date().toISOString(),
     }));
+
+    // CRITICAL: Register call in call registry for auto-discovery
+    // Use callSid as interactionId (consistent throughout pipeline)
+    const interactionId = start.call_sid || stream_sid;
+    // Register call asynchronously (don't block the handler)
+    this.registerCallInRegistry(interactionId, {
+      callSid: start.call_sid,
+      from: start.from,
+      to: start.to,
+      tenantId: start.account_sid || 'exotel',
+    }).catch((error: any) => {
+      // Non-critical - log but don't fail
+      console.warn('[exotel] Failed to register call in registry', {
+        error: error.message,
+        interactionId,
+        callSid: start.call_sid,
+      });
+    });
   }
 
   private handleMedia(
@@ -312,6 +415,10 @@ export class ExotelHandler {
       state.seq += 1;
       state.lastChunk = media.chunk;
 
+      // Update metrics
+      this.metrics.framesIn += 1;
+      this.metrics.bytesIn += audioBuffer.length;
+
       // Create audio frame in our internal format
       const frame: AudioFrame = {
         tenant_id: state.accountSid || 'exotel',
@@ -323,11 +430,31 @@ export class ExotelHandler {
         audio: audioBuffer,
       };
 
-      // Publish to pub/sub
+      // Dump audio chunk to file if enabled
+      dumpAudioChunk(
+        frame.interaction_id,
+        frame.seq,
+        audioBuffer,
+        state.sampleRate,
+        'pcm16'
+      ).catch((err) => {
+        // Non-critical - don't block processing
+        console.debug('[exotel] Audio dump failed (non-critical)', { error: err.message });
+      });
+
+      // Publish to pub/sub with bounded buffer fallback
       this.pubsub.publish(frame).then(() => {
-        // Log first frame and every 10th frame
-        if (state.seq === 1 || state.seq % 10 === 0) {
-          console.info('[exotel] ✅ Published audio frame', {
+        // Clear bounded buffer on successful publish
+        const callId = frame.interaction_id;
+        const buffer = this.boundedBuffers.get(callId);
+        if (buffer && buffer.frames.length > 0) {
+          // Try to flush any buffered frames
+          this.flushBoundedBuffer(callId);
+        }
+
+        // Log first frame and every 100th frame (reduced from every 10th to reduce logs)
+        if (state.seq === 1 || state.seq % 100 === 0) {
+          logger.info('[exotel] ✅ Published audio frame', {
             stream_sid: state.streamSid,
             call_sid: state.callSid,
             seq: state.seq,
@@ -335,15 +462,23 @@ export class ExotelHandler {
             interaction_id: frame.interaction_id,
             tenant_id: frame.tenant_id,
             audio_size: frame.audio.length,
+            metrics: {
+              framesIn: this.metrics.framesIn,
+              bytesIn: this.metrics.bytesIn,
+            },
           });
         }
       }).catch((error) => {
-        console.error('[exotel] ❌ CRITICAL: Failed to publish frame:', {
+        this.metrics.publishFailures += 1;
+        console.error('[exotel] ❌ Failed to publish frame, using bounded buffer fallback:', {
           error: error.message,
           stream_sid: state.streamSid,
           call_sid: state.callSid,
           seq: state.seq,
         });
+
+        // Add to bounded buffer as fallback
+        this.addToBoundedBuffer(frame);
       });
     } catch (error: any) {
       console.error('[exotel] ❌ Failed to decode base64 audio payload:', {
@@ -355,10 +490,10 @@ export class ExotelHandler {
     }
   }
 
-  private handleStop(
+  private async handleStop(
     ws: WebSocket & { exotelState?: ExotelConnectionState },
     event: ExotelStopEvent
-  ): void {
+  ): Promise<void> {
     const state = ws.exotelState;
     if (state) {
       console.info('[exotel] Stop event received', {
@@ -369,6 +504,7 @@ export class ExotelHandler {
       });
 
       // Publish call end message to notify ASR worker and other services
+      // CRITICAL: Use callSid as interactionId (consistent with start event)
       const interactionId = state.callSid || state.streamSid;
       const callEndMessage = {
         interaction_id: interactionId,
@@ -389,13 +525,209 @@ export class ExotelHandler {
         console.error('[exotel] Failed to publish call end event:', error);
       });
 
+      // Mark call as ended in call registry (async, don't block)
+      this.endCallInRegistry(interactionId).catch((error: any) => {
+        console.warn('[exotel] Failed to update call registry on end', {
+          error: error.message,
+          interactionId,
+        });
+      });
+
       this.connections.delete(state.streamSid);
       ws.exotelState = undefined;
+      
+      // Clean up bounded buffer for this call (reuse interactionId from above)
+      this.boundedBuffers.delete(interactionId);
     }
   }
 
   getConnectionState(streamSid: string): ExotelConnectionState | undefined {
     return this.connections.get(streamSid);
+  }
+
+  /**
+   * Register call in call registry (helper method to avoid path alias issues)
+   */
+  private async registerCallInRegistry(
+    interactionId: string,
+    metadata: { callSid: string; from: string; to: string; tenantId: string }
+  ): Promise<void> {
+    try {
+      // Use absolute path resolution to ensure it works after compilation
+      // Build script copies lib/call-registry.js to services/ingest/dist/call-registry.js
+      // So it's in the same directory as exotel-handler.js after compilation
+      // Try same directory first (./call-registry), then fallback to lib/call-registry
+      const distPath = path.resolve(__dirname, './call-registry');
+      const libPath = path.resolve(__dirname, '../../../../lib/call-registry');
+      let callRegistryPath: string;
+      
+      // Check if dist/call-registry.js exists (production build)
+      if (fs.existsSync(distPath + '.js')) {
+        callRegistryPath = distPath;
+      } else if (fs.existsSync(libPath + '.js')) {
+        // Fallback to lib/call-registry.js (dev or if dist copy failed)
+        callRegistryPath = libPath;
+      } else {
+        // Last resort: try require.resolve (handles .js extension automatically)
+        try {
+          require.resolve(distPath);
+          callRegistryPath = distPath;
+        } catch {
+          callRegistryPath = libPath;
+        }
+      }
+      
+      const { getCallRegistry } = require(callRegistryPath);
+      const callRegistry = getCallRegistry();
+      
+      await callRegistry.registerCall({
+        interactionId,
+        callSid: metadata.callSid,
+        from: metadata.from,
+        to: metadata.to,
+        tenantId: metadata.tenantId,
+        startTime: Date.now(),
+        status: 'active',
+        lastActivity: Date.now(),
+      });
+      
+      console.info('[exotel] ✅ Call registered in call registry', {
+        interactionId,
+        callSid: metadata.callSid,
+        from: metadata.from,
+        to: metadata.to,
+      });
+    } catch (error: any) {
+      throw error; // Re-throw to be caught by caller
+    }
+  }
+
+  /**
+   * Mark call as ended in call registry (helper method)
+   */
+  private async endCallInRegistry(interactionId: string): Promise<void> {
+    try {
+      // Use absolute path resolution to ensure it works after compilation
+      // Build script copies lib/call-registry.js to services/ingest/dist/call-registry.js
+      // So it's in the same directory as exotel-handler.js after compilation
+      // Try same directory first (./call-registry), then fallback to lib/call-registry
+      const distPath = path.resolve(__dirname, './call-registry');
+      const libPath = path.resolve(__dirname, '../../../../lib/call-registry');
+      let callRegistryPath: string;
+      
+      // Check if dist/call-registry.js exists (production build)
+      if (fs.existsSync(distPath + '.js')) {
+        callRegistryPath = distPath;
+      } else if (fs.existsSync(libPath + '.js')) {
+        // Fallback to lib/call-registry.js (dev or if dist copy failed)
+        callRegistryPath = libPath;
+      } else {
+        // Last resort: try require.resolve (handles .js extension automatically)
+        try {
+          require.resolve(distPath);
+          callRegistryPath = distPath;
+        } catch {
+          callRegistryPath = libPath;
+        }
+      }
+      
+      const { getCallRegistry } = require(callRegistryPath);
+      const callRegistry = getCallRegistry();
+      await callRegistry.endCall(interactionId);
+      console.info('[exotel] ✅ Call marked as ended in registry', { interactionId });
+    } catch (error: any) {
+      throw error; // Re-throw to be caught by caller
+    }
+  }
+
+  /**
+   * Add frame to bounded buffer (fallback when pub/sub fails)
+   */
+  private addToBoundedBuffer(frame: AudioFrame): void {
+    const callId = frame.interaction_id;
+    let buffer = this.boundedBuffers.get(callId);
+    
+    if (!buffer) {
+      buffer = {
+        frames: [],
+        maxDurationMs: this.exoMaxBufferMs,
+        totalDurationMs: 0,
+      };
+      this.boundedBuffers.set(callId, buffer);
+    }
+
+    // Calculate frame duration (approximate)
+    const frameDurationMs = (frame.audio.length / (frame.sample_rate * 2)) * 1000; // 2 bytes per sample for PCM16
+    const now = Date.now();
+
+    // Add frame
+    buffer.frames.push({ frame, timestamp: now });
+    buffer.totalDurationMs += frameDurationMs;
+
+    // Trim buffer if exceeds max duration
+    while (buffer.totalDurationMs > buffer.maxDurationMs && buffer.frames.length > 0) {
+      const dropped = buffer.frames.shift();
+      if (dropped) {
+        const droppedDurationMs = (dropped.frame.audio.length / (dropped.frame.sample_rate * 2)) * 1000;
+        buffer.totalDurationMs -= droppedDurationMs;
+        this.metrics.bufferDrops += 1;
+        
+        // Rate-limit warning (log every 10th drop)
+        if (this.metrics.bufferDrops % 10 === 0) {
+          console.warn('[exotel] ⚠️ Bounded buffer full, dropping oldest frames', {
+            callId,
+            bufferDepth: buffer.frames.length,
+            totalDurationMs: buffer.totalDurationMs.toFixed(0),
+            maxDurationMs: buffer.maxDurationMs,
+            drops: this.metrics.bufferDrops,
+          });
+        }
+      }
+    }
+  }
+
+  /**
+   * Flush bounded buffer (try to publish buffered frames)
+   */
+  private flushBoundedBuffer(callId: string): void {
+    const buffer = this.boundedBuffers.get(callId);
+    if (!buffer || buffer.frames.length === 0) {
+      return;
+    }
+
+    const framesToPublish = [...buffer.frames];
+    buffer.frames = [];
+    buffer.totalDurationMs = 0;
+
+    // Try to publish each frame
+    let published = 0;
+    for (const { frame } of framesToPublish) {
+      this.pubsub.publish(frame).then(() => {
+        published += 1;
+      }).catch((error) => {
+        // If still failing, re-add to buffer
+        this.addToBoundedBuffer(frame);
+      });
+    }
+
+    if (published > 0) {
+      console.info('[exotel] ✅ Flushed bounded buffer', {
+        callId,
+        published,
+        total: framesToPublish.length,
+      });
+    }
+  }
+
+  /**
+   * Get metrics for health endpoint
+   */
+  getMetrics() {
+    return {
+      ...this.metrics,
+      bufferDepth: Array.from(this.boundedBuffers.values()).reduce((sum, buf) => sum + buf.frames.length, 0),
+      activeBuffers: this.boundedBuffers.size,
+    };
   }
 }
 

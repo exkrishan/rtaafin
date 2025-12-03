@@ -9,39 +9,51 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start",
+    "start": "NODE_OPTIONS='--max-old-space-size=480' next start",
     "lint": "echo \"lint skipped (temporary Phase 0 bypass)\"; exit 0",
     "format": "prettier --write \"**/*.{ts,tsx,js,json,md}\"",
     "prepare": "husky install || true",
-    "demo:dev": "NEXT_PUBLIC_SUPABASE_URL=http://localhost:54321 NEXT_PUBLIC_SUPABASE_ANON_KEY=dev npm run dev"
+    "demo:dev": "NEXT_PUBLIC_SUPABASE_URL=http://localhost:54321 NEXT_PUBLIC_SUPABASE_ANON_KEY=dev npm run dev",
+    "logs:render": "node scripts/fetch-render-logs.js",
+    "logs:render:last": "node scripts/fetch-render-logs.js",
+    "logs:analyze": "node scripts/analyze-transcript-logs.js",
+    "send-audio": "tsx scripts/send-audio-chunks-every-5sec.ts",
+    "test-asr": "tsx scripts/test-asr-transcription-flow.ts",
+    "test:complete-flow": "tsx tests/complete-flow.test.ts",
+    "test:external-asr": "tsx scripts/test-external-asr-api.ts",
+    "test:kb-suggestions": "tsx scripts/test-kb-suggestions.ts",
+    "test:intent-kb": "tsx tests/intent-kb-flow.test.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "latest",
     "@types/lodash": "^4.17.20",
-    "dotenv": "latest",
-    "lodash": "^4.17.21",
-    "next": "latest",
-    "react": "latest",
-    "react-dom": "latest",
-    "zod": "latest"
-  },
-  "devDependencies": {
-    "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "latest",
     "@types/react": "latest",
     "@types/react-dom": "latest",
     "autoprefixer": "^10.4.21",
+    "dotenv": "latest",
+    "lodash": "^4.17.21",
+    "next": "latest",
+    "postcss": "^8.5.6",
+    "react": "latest",
+    "react-dom": "latest",
+    "tailwindcss": "^3.4.18",
+    "typescript": "latest",
+    "undici": "^7.16.0",
+    "zod": "latest"
+  },
+  "devDependencies": {
+    "@types/jsonwebtoken": "^9.0.10",
     "eslint": "latest",
     "eslint-config-next": "latest",
     "husky": "latest",
     "jsonwebtoken": "^9.0.2",
     "lint-staged": "latest",
-    "postcss": "^8.5.6",
     "prettier": "latest",
-    "tailwindcss": "^3.4.18",
-    "tsx": "latest",
-    "typescript": "latest",
-    "undici": "^7.16.0"
+    "tsx": "latest"
+  },
+  "optionalDependencies": {
+    "kafkajs": "^2.2.4"
   },
   "lint-staged": {
     "*.{js,jsx,ts,tsx,json,md}": [

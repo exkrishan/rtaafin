@@ -120,7 +120,32 @@ export function resetSummaryCache(): void {
 
 async function fetchTranscript(callId: string): Promise<TranscriptData> {
   try {
-    // First, try to select all columns to see what's available
+    // CRITICAL: First check in-memory cache (primary source for live transcripts)
+    const { getTranscriptsFromCache } = await import('@/lib/ingest-transcript-core');
+    const cachedTranscripts = getTranscriptsFromCache(callId);
+    
+    if (cachedTranscripts && cachedTranscripts.length > 0) {
+      // Sort by sequence number to ensure chronological order
+      const sorted = [...cachedTranscripts].sort((a, b) => a.seq - b.seq);
+      const chunks = sorted.map(t => t.text.trim()).filter(text => Boolean(text));
+      
+      if (chunks.length > 0) {
+        console.info('[summary] ✅ Fetched transcript from in-memory cache', {
+          callId,
+          transcriptChunks: sorted.length,
+          totalLength: chunks.join('\n').length,
+        });
+        
+        return {
+          combined: chunks.join('\n'),
+          chunks,
+        };
+      }
+    }
+    
+    console.info('[summary] In-memory cache empty, checking Supabase (fallback)', { callId });
+    
+    // Fallback to Supabase (for backward compatibility with old transcripts)
     const { data, error } = await (supabase as any)
       .from('ingest_events')
       .select('*')
@@ -164,27 +189,76 @@ Original error: ${error.message}`;
       throw new Error(`Failed to load transcript: ${error.message}`);
     }
 
-    if (!data || data.length === 0) {
-      throw new Error('No transcript events found for call. Make sure you clicked "Start Call" and waited for transcript lines to appear.');
+    // If Supabase has data, use it
+    if (data && data.length > 0) {
+      // Extract text from the data - try 'text' column first
+      const chunks = data
+        .map((row: any) => {
+          // Try 'text' column first, then fallback to other possible names
+          const textValue = row?.text || row?.transcript || row?.content || row?.message || '';
+          return String(textValue).trim();
+        })
+        .filter((text: string) => Boolean(text));
+
+      if (chunks.length > 0) {
+        return {
+          combined: chunks.join('\n'),
+          chunks,
+        };
+      }
     }
 
-    // Extract text from the data - try 'text' column first
-    const chunks = data
-      .map((row: any) => {
-        // Try 'text' column first, then fallback to other possible names
-        const textValue = row?.text || row?.transcript || row?.content || row?.message || '';
-        return String(textValue).trim();
-      })
-      .filter((text: string) => Boolean(text));
-
-    if (chunks.length === 0) {
-      throw new Error('No transcript events found for call');
+    // CRITICAL FIX: Fallback to Redis Lists if Supabase is empty
+    // This ensures disposition can be generated even if transcripts haven't been ingested to Supabase yet
+    console.info('[summary] Supabase transcript empty, checking Redis Lists', { callId });
+    try {
+      const Redis = require('ioredis');
+      const redis = new Redis(process.env.REDIS_URL || process.env.REDISCLOUD_URL || 'redis://localhost:6379');
+      
+      const listKey = `transcripts:${callId}`;
+      const rawTranscripts = await redis.lrange(listKey, 0, -1);
+      
+      if (rawTranscripts && rawTranscripts.length > 0) {
+        // Parse and combine transcripts from Redis List
+        const transcripts = rawTranscripts
+          .map((item: string) => {
+            try {
+              return JSON.parse(item);
+            } catch (e) {
+              return null;
+            }
+          })
+          .filter((t: any) => t && t.text && t.text.trim().length > 0)
+          .sort((a: any, b: any) => (a.seq || 0) - (b.seq || 0)); // Sort by seq
+        
+        const chunks = transcripts.map((t: any) => t.text.trim());
+        
+        if (chunks.length > 0) {
+          console.info('[summary] Fetched complete transcript from Redis List', {
+            callId,
+            transcriptChunks: transcripts.length,
+            totalLength: chunks.join('\n').length,
+            note: 'Using Redis List as fallback since Supabase was empty',
+          });
+          
+          await redis.quit();
+          return {
+            combined: chunks.join('\n'),
+            chunks,
+          };
+        }
+      }
+      
+      await redis.quit();
+    } catch (redisError: any) {
+      console.error('[summary] Error fetching transcript from Redis List', {
+        error: redisError.message,
+        callId,
+      });
+      // Continue to throw original error
     }
 
-    return {
-      combined: chunks.join('\n'),
-      chunks,
-    };
+    throw new Error('No transcript events found for call. Make sure you clicked "Start Call" and waited for transcript lines to appear.');
   } catch (err: any) {
     // Re-throw with better context
     if (err.message.includes('Database schema')) {
@@ -196,9 +270,27 @@ Original error: ${error.message}`;
 
 function buildPrompt(transcript: string): string {
   return [
-    'You are an assistant that summarizes a customer support call into structured JSON with fields:',
-    'issue (string), resolution (string), next_steps (string), dispositions (array of {label, score between 0 and 1, subDisposition optional}), confidence (0-1).',
-    'For dispositions, select the most relevant disposition label and provide a specific subDisposition if applicable (e.g., "credit card fraud", "card replacement", "account balance inquiry").',
+    'You are an assistant that summarizes a customer support call for Gexa Energy (U.S. electricity retail provider) into structured JSON.',
+    '',
+    'Context: Gexa Energy is a Texas-based electricity retail provider. Customers may call about:',
+    '- Service activation (move-in, new service)',
+    '- Billing and payment issues',
+    '- Account management',
+    '- Plan changes and renewals',
+    '- Power outages (redirect to utility)',
+    '- Service disconnection',
+    '',
+    'Required JSON fields:',
+    '- issue (string): Main problem or topic discussed',
+    '- resolution (string): How the issue was resolved or what was done',
+    '- next_steps (string): What needs to happen next',
+    '- dispositions (array): [{label: string, score: 0-1, subDisposition?: string}]',
+    '- confidence (0-1): How confident you are in the summary',
+    '',
+    'For dispositions, use Gexa Energy-specific labels like:',
+    '- "Service Activation", "Billing Inquiry", "Payment Arrangement", "Plan Change", "Account Update", etc.',
+    'Provide specific subDisposition when applicable (e.g., "Move-in Request", "Payment Plan Setup").',
+    '',
     'Return ONLY valid JSON. Do not include markdown, prose, or explanations.',
     '',
     'Transcript:',
@@ -233,9 +325,13 @@ function parseRateLimitError(errorText: string): { retryAfterSeconds: number | n
 }
 
 async function callLLM(prompt: string, timeoutMs: number, retryOnRateLimit = true): Promise<string> {
-  const apiKey = process.env.LLM_API_KEY;
-  const llmUrl = process.env.LLM_API_URL;
+  // Support both LLM_API_KEY and GEMINI_API_KEY (for backward compatibility)
+  // When provider is gemini, prefer GEMINI_API_KEY over LLM_API_KEY
   const provider = process.env.LLM_PROVIDER || 'openai'; // Default to OpenAI for backward compatibility
+  const apiKey = (provider === 'gemini' || provider === 'google')
+    ? (process.env.GEMINI_API_KEY || process.env.LLM_API_KEY)
+    : (process.env.LLM_API_KEY || process.env.GEMINI_API_KEY);
+  const llmUrl = process.env.LLM_API_URL;
 
   // Use LLM API if API key is provided
   if (apiKey) {
@@ -249,8 +345,23 @@ async function callLLM(prompt: string, timeoutMs: number, retryOnRateLimit = tru
         
         // Use gemini-2.5-flash (latest, fastest) or gemini-2.5-pro (more capable)
         // Note: Model names should NOT include "models/" prefix in the URL
-        const model = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
-        const url = `https://generativelanguage.googleapis.com/v1/models/${model}:generateContent?key=${apiKey}`;
+        let model = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+        
+        // CRITICAL FIX: Auto-fallback invalid model names to gemini-2.0-flash
+        // gemini-1.5-flash is not available in v1 API and causes 404 errors
+        const invalidModels = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-1.0'];
+        if (invalidModels.includes(model)) {
+          console.warn('[summary] ⚠️ Invalid Gemini model detected, falling back to gemini-2.0-flash', {
+            invalidModel: model,
+            fallback: 'gemini-2.0-flash',
+            note: 'Update GEMINI_MODEL environment variable to gemini-2.0-flash',
+          });
+          model = 'gemini-2.0-flash';
+        }
+        
+        // Convert 2.5 to 2.0 to avoid thinking token issues
+        const actualModel = model.includes('2.5') ? 'gemini-2.0-flash' : model;
+        const url = `https://generativelanguage.googleapis.com/v1/models/${actualModel}:generateContent?key=${apiKey}`;
         
         const fullPrompt = `You are an assistant that summarizes customer support calls into structured JSON. Return ONLY valid JSON, no markdown code blocks, no explanations, no text before or after the JSON.
 

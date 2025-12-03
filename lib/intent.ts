@@ -26,8 +26,12 @@ export async function detectIntent(
   text: string,
   context?: string[]
 ): Promise<IntentResult> {
-  const apiKey = process.env.LLM_API_KEY;
+  // Support both LLM_API_KEY and GEMINI_API_KEY (for backward compatibility)
+  // When provider is gemini, prefer GEMINI_API_KEY over LLM_API_KEY
   const provider = process.env.LLM_PROVIDER || 'openai';
+  const apiKey = (provider === 'gemini' || provider === 'google')
+    ? (process.env.GEMINI_API_KEY || process.env.LLM_API_KEY)
+    : (process.env.LLM_API_KEY || process.env.GEMINI_API_KEY);
 
   if (!apiKey) {
     console.warn('[intent] LLM_API_KEY not configured, returning unknown intent');
@@ -98,6 +102,18 @@ Use specific intents: credit_card_block, credit_card_fraud, credit_card_replacem
       // Note: Model names should NOT include "models/" prefix in the URL
       let model = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
       
+      // CRITICAL FIX: Auto-fallback invalid model names to gemini-2.0-flash
+      // gemini-1.5-flash is not available in v1 API and causes 404 errors
+      const invalidModels = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-1.0'];
+      if (invalidModels.includes(model)) {
+        console.warn('[intent] ⚠️ Invalid Gemini model detected, falling back to gemini-2.0-flash', {
+          invalidModel: model,
+          fallback: 'gemini-2.0-flash',
+          note: 'Update GEMINI_MODEL environment variable to gemini-2.0-flash',
+        });
+        model = 'gemini-2.0-flash';
+      }
+      
       // Use gemini-2.0-flash if 2.5 is specified (to avoid thinking token issues)
       const actualModel = model.includes('2.5') ? 'gemini-2.0-flash' : model;
       const url = `https://generativelanguage.googleapis.com/v1/models/${actualModel}:generateContent?key=${apiKey}`;
@@ -113,40 +129,118 @@ Use specific intents: credit_card_block, credit_card_fraud, credit_card_replacem
       
       let response;
       try {
-        response = await fetch(url, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            contents: [{
-              parts: [{
-                text: fullPrompt,
-              }],
-            }],
-            generationConfig: {
-              temperature: 0.3,
-              maxOutputTokens: 200, // Sufficient for gemini-2.0-flash (doesn't use thinking tokens)
+        // CRITICAL FIX: Add timeout to prevent hanging requests
+        const controller = new AbortController();
+        const timeoutMs = 5000; // 5 second timeout
+        const timeoutId = setTimeout(() => {
+          controller.abort();
+        }, timeoutMs);
+
+        try {
+          response = await fetch(url, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
             },
-          }),
-        });
-      } catch (fetchErr: any) {
-        console.error('[intent] Fetch error (network/timeout):', {
-          error: fetchErr.message,
-          name: fetchErr.name,
-          code: fetchErr.code,
-        });
+            signal: controller.signal, // CRITICAL: Add abort signal
+            body: JSON.stringify({
+              contents: [{
+                parts: [{
+                  text: fullPrompt,
+                }],
+              }],
+              generationConfig: {
+                temperature: 0.3,
+                maxOutputTokens: 200, // Sufficient for gemini-2.0-flash (doesn't use thinking tokens)
+              },
+            }),
+          });
+          
+          // CRITICAL FIX: Clear timeout on success
+          clearTimeout(timeoutId);
+        } catch (fetchErr: any) {
+          // CRITICAL FIX: Clear timeout on error
+          clearTimeout(timeoutId);
+          
+          // Check if it's a timeout/abort error
+          if (fetchErr.name === 'AbortError' || fetchErr.message?.includes('aborted')) {
+            console.warn('[intent] Gemini API request timeout (5s), returning unknown intent', {
+              timeoutMs,
+              suggestion: 'Request took too long, falling back to unknown intent',
+            });
+            return { intent: 'unknown', confidence: 0 };
+          }
+          
+          // Other network errors
+          console.error('[intent] Fetch error (network/timeout):', {
+            error: fetchErr.message,
+            name: fetchErr.name,
+            code: fetchErr.code,
+          });
+          return { intent: 'unknown', confidence: 0 };
+        }
+      } catch (err: any) {
+        // Fallback for any other errors
+        console.error('[intent] Unexpected error in fetch:', err);
         return { intent: 'unknown', confidence: 0 };
       }
 
       if (!response.ok) {
         const errorText = await response.text();
+        
+        // CRITICAL FIX: Parse error JSON properly to extract actual error message
+        let errorMessage = `Gemini API error: ${response.status} ${response.statusText}`;
+        let errorDetails: any = null;
+        
+        try {
+          errorDetails = JSON.parse(errorText);
+          if (errorDetails?.error?.message) {
+            errorMessage = `Gemini API error: ${errorDetails.error.message}`;
+          } else if (errorDetails?.error) {
+            errorMessage = `Gemini API error: ${JSON.stringify(errorDetails.error)}`;
+          }
+        } catch {
+          // If error text is not JSON, use it directly
+          if (errorText) {
+            errorMessage += ` - ${errorText.substring(0, 200)}`;
+          }
+        }
+        
+        // Handle specific error types
+        if (response.status === 429) {
+          console.warn('[intent] ⚠️ Gemini API rate limit exceeded - returning unknown intent', {
+            status: response.status,
+            error: errorDetails?.error?.message || errorText.substring(0, 100),
+          });
+          return { intent: 'unknown', confidence: 0 };
+        }
+        
+        if (response.status === 403) {
+          console.error('[intent] ❌ Gemini API access forbidden - check API key and quota', {
+            status: response.status,
+            error: errorDetails?.error?.message || errorText.substring(0, 100),
+          });
+          return { intent: 'unknown', confidence: 0 };
+        }
+        
+        if (response.status === 400) {
+          console.error('[intent] ❌ Gemini API bad request - check model name and prompt', {
+            status: response.status,
+            error: errorDetails?.error?.message || errorText.substring(0, 100),
+            model: actualModel,
+          });
+          return { intent: 'unknown', confidence: 0 };
+        }
+        
+        // Log other errors with parsed details
         console.error('[intent] Gemini API error:', {
           status: response.status,
           statusText: response.statusText,
-          error: errorText,
-          url: url.substring(0, 100) + '...',
+          error: errorMessage,
+          errorDetails: errorDetails?.error || errorText.substring(0, 200),
+          model: actualModel,
         });
+        
         return { intent: 'unknown', confidence: 0 };
       }
 
@@ -273,7 +367,29 @@ Use specific intents: credit_card_block, credit_card_fraud, credit_card_replacem
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error('[intent] OpenAI API error:', response.status, errorText);
+      let errorData;
+      try {
+        errorData = JSON.parse(errorText);
+      } catch {
+        errorData = { message: errorText };
+      }
+      
+      // Check for rate limit errors
+      if (response.status === 429 || errorData.code === 'rate_limit_exceeded') {
+        console.error('[intent] ❌ OpenAI API Rate Limit Exceeded:', {
+          status: response.status,
+          error: errorData.message || errorText,
+          code: errorData.code,
+          type: errorData.type,
+          suggestion: 'Wait for rate limit to reset, use a different API key, or switch to Gemini',
+        });
+      } else {
+        console.error('[intent] OpenAI API error:', {
+          status: response.status,
+          error: errorData.message || errorText,
+          code: errorData.code,
+        });
+      }
       return { intent: 'unknown', confidence: 0 };
     }
 

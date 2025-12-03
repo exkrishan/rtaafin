@@ -6,88 +6,189 @@
  */
 
 import { createServer } from 'http';
+import Redis from 'ioredis';
 import { createPubSubAdapterFromEnv } from '@rtaa/pubsub';
 import { audioTopic, transcriptTopic, callEndTopic } from '@rtaa/pubsub/topics';
 import { createAsrProvider } from './providers';
 import { AudioFrameMessage, TranscriptMessage } from './types';
 import { MetricsCollector } from './metrics';
+import { BufferManager } from './buffer-manager';
+import { ConnectionHealthMonitor } from './connection-health-monitor';
+import { ElevenLabsCircuitBreaker } from './circuit-breaker';
+import { dumpBufferedAudioChunk } from './audio-dumper';
+import { logger } from './logger';
 
 // Load environment variables from project root .env.local
 require('dotenv').config({ path: require('path').join(__dirname, '../../../.env.local') });
 
 const PORT = parseInt(process.env.PORT || '3001', 10);
 
-// Deepgram-optimized chunk sizing configuration
-// Deepgram recommends 20-250ms chunks for optimal real-time performance
-// CRITICAL: Minimum chunk size for reliable transcription is 100ms (not 20ms)
-// 20ms is the absolute minimum Deepgram accepts, but 100ms+ is needed for accuracy
-// Initial chunk: 200ms minimum for reliable transcription start
-const INITIAL_CHUNK_DURATION_MS = parseInt(process.env.INITIAL_CHUNK_DURATION_MS || '200', 10);
-// Continuous chunks: 100ms for real-time streaming
-const CONTINUOUS_CHUNK_DURATION_MS = parseInt(process.env.CONTINUOUS_CHUNK_DURATION_MS || '100', 10);
-// Maximum chunk size: 250ms per Deepgram recommendation
-const MAX_CHUNK_DURATION_MS = parseInt(process.env.MAX_CHUNK_DURATION_MS || '250', 10);
-// Minimum audio duration before processing (reduced from 500ms to 200ms)
-const MIN_AUDIO_DURATION_MS = parseInt(process.env.MIN_AUDIO_DURATION_MS || '200', 10);
-// CRITICAL: Minimum chunk size for continuous streaming (increased from 20ms to 100ms)
-// Deepgram needs at least 100ms of contiguous audio for reliable transcription
-const ASR_CHUNK_MIN_MS = parseInt(process.env.ASR_CHUNK_MIN_MS || '100', 10);
+// Real-time chunk sizing configuration - optimized for minimal latency
+// CRITICAL: Reduced all buffers to 20ms minimum for real-time transcription
+// This enables transcripts to be generated as soon as audio chunks arrive from websocket
+// Initial chunk: 20ms minimum (reduced from 200ms for real-time processing)
+const INITIAL_CHUNK_DURATION_MS = parseInt(process.env.INITIAL_CHUNK_DURATION_MS || '20', 10);
+// Continuous chunks: 20ms for real-time streaming (reduced from 100ms)
+const CONTINUOUS_CHUNK_DURATION_MS = parseInt(process.env.CONTINUOUS_CHUNK_DURATION_MS || '20', 10);
+// Maximum chunk size: 100ms (reduced from 250ms for faster processing)
+const MAX_CHUNK_DURATION_MS = parseInt(process.env.MAX_CHUNK_DURATION_MS || '100', 10);
+// Minimum audio duration before processing: 20ms (reduced from 200ms for real-time)
+const MIN_AUDIO_DURATION_MS = parseInt(process.env.MIN_AUDIO_DURATION_MS || '20', 10);
+// CRITICAL: Minimum chunk size for continuous streaming: 20ms (reduced from 100ms)
+// This allows immediate processing of audio chunks as they arrive
+const ASR_CHUNK_MIN_MS = parseInt(process.env.ASR_CHUNK_MIN_MS || '20', 10);
 
 // Legacy buffer window (kept for backward compatibility, but not used for Deepgram)
 const BUFFER_WINDOW_MS = parseInt(process.env.BUFFER_WINDOW_MS || '1000', 10);
 // Stale buffer timeout: if no new audio arrives for this duration, clean up the buffer
 // This prevents processing old audio after a call has ended
 const STALE_BUFFER_TIMEOUT_MS = parseInt(process.env.STALE_BUFFER_TIMEOUT_MS || '5000', 10); // 5 seconds
-const ASR_PROVIDER = (process.env.ASR_PROVIDER || 'mock') as 'mock' | 'deepgram' | 'whisper';
+const ASR_PROVIDER = (process.env.ASR_PROVIDER || 'mock') as 'mock' | 'deepgram' | 'whisper' | 'google' | 'elevenlabs' | 'azure';
+// CRITICAL: PCM16 audio format constant - used for duration calculations
+// Formula: durationMs = (bytes / BYTES_PER_SAMPLE / sampleRate) * 1000
+// Example: 640 bytes at 16kHz = (640 / 2 / 16000) * 1000 = 20ms
+const BYTES_PER_SAMPLE = 2; // 16-bit PCM = 2 bytes per sample
 
 interface AudioBuffer {
   interactionId: string;
   tenantId: string;
   sampleRate: number;
-  chunks: Buffer[];
-  timestamps: number[];
-  lastProcessed: number;
-  lastChunkReceived: number; // Timestamp of last audio chunk received
-  hasSentInitialChunk: boolean; // Track if we've sent the initial 500ms chunk
-  isProcessing: boolean; // Prevent concurrent processing of the same buffer
-  lastContinuousSendTime: number; // Timestamp of last continuous chunk send (doesn't reset on buffer clear)
-  processTimer?: NodeJS.Timeout; // Timer for periodic processing (ensures sends every 200ms)
+  chunks: Buffer[]; // Buffered audio chunks
+  timestamps: number[]; // Timestamps of each chunk
+  sequences: number[]; // Sequence numbers from incoming frames
+  lastProcessed: number; // Last time buffer was processed
+  lastChunkReceived: number; // Last time a chunk was received
 }
 
 class AsrWorker {
   private pubsub: ReturnType<typeof createPubSubAdapterFromEnv>;
+  private redis: Redis;
   private asrProvider: ReturnType<typeof createAsrProvider>;
   private buffers: Map<string, AudioBuffer> = new Map();
   private metrics: MetricsCollector;
   private server: ReturnType<typeof createServer>;
   private subscriptions: any[] = [];
   private bufferTimers: Map<string, NodeJS.Timeout> = new Map(); // Track timers per buffer for cleanup
+  private endedCalls: Map<string, number> = new Map(); // Track ended calls with timestamp for grace period
+  private ENDED_CALL_GRACE_PERIOD_MS = 10000; // 10 seconds grace period for late-arriving audio
+  private bufferManager: BufferManager; // Comprehensive buffer lifecycle management
+  private connectionHealthMonitor: ConnectionHealthMonitor; // Connection health monitoring
+  private circuitBreaker: ElevenLabsCircuitBreaker; // Circuit breaker for ElevenLabs API
+  private queuedTranscriptProcessorInterval: NodeJS.Timeout | null = null; // Background processor for queued transcripts
 
   constructor() {
     this.pubsub = createPubSubAdapterFromEnv();
+    this.redis = new Redis(process.env.REDIS_URL || process.env.REDISCLOUD_URL || 'redis://localhost:6379');
+    
+    // Check Exotel Bridge feature flag
+    const exoBridgeEnabled = process.env.EXO_BRIDGE_ENABLED === 'true';
     
     // Validate provider configuration before creating
     // This ensures we fail fast if required env vars are missing
     if (ASR_PROVIDER === 'deepgram' && !process.env.DEEPGRAM_API_KEY) {
-      console.error('[ASRWorker] ❌ CRITICAL: ASR_PROVIDER=deepgram but DEEPGRAM_API_KEY is not set!');
+      if (exoBridgeEnabled) {
+        console.error('[ASRWorker] ❌ CRITICAL: EXO_BRIDGE_ENABLED=true but DEEPGRAM_API_KEY is not set!');
+        console.error('[ASRWorker] Exotel→Deepgram bridge requires DEEPGRAM_API_KEY. Disabling STT to avoid broken prod.');
+        console.error('[ASRWorker] Please set DEEPGRAM_API_KEY environment variable or set EXO_BRIDGE_ENABLED=false.');
+        // Don't throw - log warning and continue (bridge will be disabled)
+        console.warn('[ASRWorker] ⚠️ Continuing without Deepgram STT - bridge feature disabled');
+      } else {
+        console.error('[ASRWorker] ❌ CRITICAL: ASR_PROVIDER=deepgram but DEEPGRAM_API_KEY is not set!');
+        console.error('[ASRWorker] The system will NOT fall back to mock provider.');
+        console.error('[ASRWorker] Please set DEEPGRAM_API_KEY environment variable or change ASR_PROVIDER to "mock".');
+        throw new Error(
+          'DEEPGRAM_API_KEY is required when ASR_PROVIDER=deepgram. ' +
+          'No fallback to mock provider - this ensures proper testing.'
+        );
+      }
+    }
+    
+    if (ASR_PROVIDER === 'elevenlabs' && !process.env.ELEVENLABS_API_KEY) {
+      console.error('[ASRWorker] ❌ CRITICAL: ASR_PROVIDER=elevenlabs but ELEVENLABS_API_KEY is not set!');
       console.error('[ASRWorker] The system will NOT fall back to mock provider.');
-      console.error('[ASRWorker] Please set DEEPGRAM_API_KEY environment variable or change ASR_PROVIDER to "mock".');
+      console.error('[ASRWorker] Please set ELEVENLABS_API_KEY environment variable or change ASR_PROVIDER to "mock".');
       throw new Error(
-        'DEEPGRAM_API_KEY is required when ASR_PROVIDER=deepgram. ' +
+        'ELEVENLABS_API_KEY is required when ASR_PROVIDER=elevenlabs. ' +
         'No fallback to mock provider - this ensures proper testing.'
       );
     }
     
+    // Log Exotel Bridge status
+    if (exoBridgeEnabled) {
+      const deepgramKey = process.env.DEEPGRAM_API_KEY;
+      const keyMasked = deepgramKey ? `${deepgramKey.substring(0, 8)}...${deepgramKey.substring(deepgramKey.length - 4)}` : 'NOT SET';
+      console.info('[ASRWorker] Exotel→Deepgram bridge: ENABLED', {
+        deepgramApiKey: keyMasked,
+        model: process.env.DG_MODEL || process.env.DEEPGRAM_MODEL || 'nova-3',
+        encoding: process.env.DG_ENCODING || 'linear16',
+        sampleRate: process.env.DG_SAMPLE_RATE || '8000',
+        channels: process.env.DG_CHANNELS || '1',
+        smartFormat: process.env.DG_SMART_FORMAT !== 'false',
+        diarize: process.env.DG_DIARIZE === 'true',
+      });
+    } else {
+      console.info('[ASRWorker] Exotel→Deepgram bridge: DISABLED (set EXO_BRIDGE_ENABLED=true to enable)');
+    }
+    
+    this.metrics = new MetricsCollector();
+
+    // Initialize buffer manager, connection health monitor, and circuit breaker
+    this.bufferManager = new BufferManager();
+    this.connectionHealthMonitor = new ConnectionHealthMonitor();
+    this.circuitBreaker = new ElevenLabsCircuitBreaker({
+      failureThreshold: parseInt(process.env.CIRCUIT_BREAKER_THRESHOLD || '5', 10),
+      timeout: parseInt(process.env.CIRCUIT_BREAKER_TIMEOUT || '60000', 10),
+      resetTimeout: parseInt(process.env.CIRCUIT_BREAKER_RESET_TIMEOUT || '300000', 10),
+    });
+
+    // Create ASR provider with circuit breaker and connection health monitor (for ElevenLabs)
     try {
-      this.asrProvider = createAsrProvider(ASR_PROVIDER);
+      this.asrProvider = createAsrProvider(ASR_PROVIDER, {
+        circuitBreaker: this.circuitBreaker,
+        connectionHealthMonitor: this.connectionHealthMonitor,
+      });
+      
+      // Set up transcript callback for event-driven providers (Azure, ElevenLabs)
+      // This allows transcripts to be published immediately when they arrive asynchronously
+      if (['azure', 'elevenlabs'].includes(ASR_PROVIDER) && 'setTranscriptCallback' in this.asrProvider) {
+        (this.asrProvider as any).setTranscriptCallback((transcript: any, interactionId: string, seq: number) => {
+          console.info(`[ASRWorker] 📨 Transcript callback invoked`, {
+            interaction_id: interactionId,
+            provider: ASR_PROVIDER,
+            seq,
+            textLength: transcript.text?.length || 0,
+            textPreview: transcript.text?.substring(0, 50) || '(empty)',
+            type: transcript.type,
+            note: 'Publishing transcript to Redis List',
+          });
+          // Publish transcript immediately when it arrives in event-driven mode
+          this.publishTranscript(interactionId, transcript, seq).catch((err: any) => {
+            console.error(`[ASRWorker] ❌ Error publishing transcript from callback:`, {
+              interaction_id: interactionId,
+              provider: ASR_PROVIDER,
+              seq,
+              error: err.message,
+            });
+          });
+        });
+        console.info('[ASRWorker] ✅ Transcript callback set for event-driven provider', {
+          provider: ASR_PROVIDER,
+          hasCallback: true,
+          note: 'Transcripts will be published automatically when received',
+        });
+      } else {
+        console.warn('[ASRWorker] ⚠️ Transcript callback not set', {
+          provider: ASR_PROVIDER,
+          hasMethod: 'setTranscriptCallback' in (this.asrProvider as any),
+          note: 'Event-driven mode may not work correctly for this provider',
+        });
+      }
     } catch (error: any) {
       console.error('[ASRWorker] ❌ Failed to create ASR provider:', error.message);
       console.error('[ASRWorker] Provider type:', ASR_PROVIDER);
       console.error('[ASRWorker] This is a fatal error - service will not start.');
       throw error; // Re-throw to fail fast
     }
-    
-    this.metrics = new MetricsCollector();
 
     // Create HTTP server for metrics endpoint
     this.server = createServer((req, res) => {
@@ -102,19 +203,62 @@ class AsrWorker {
           service: 'asr-worker',
           provider: ASR_PROVIDER,
           activeBuffers: this.buffers.size,
+          subscriptions: this.subscriptions.length,
+          exoBridgeEnabled: process.env.EXO_BRIDGE_ENABLED === 'true',
         };
         
-        // Safely check for Deepgram provider connections and metrics
+        // Add buffer details
+        const bufferDetails: any[] = [];
+        for (const [interactionId, buffer] of this.buffers.entries()) {
+          bufferDetails.push({
+            interactionId,
+            chunksCount: buffer.chunks.length,
+            totalAudioMs: buffer.chunks.length > 0 
+              ? ((buffer.chunks.reduce((sum, chunk) => sum + chunk.length, 0) / 2 / buffer.sampleRate) * 1000).toFixed(0)
+              : 0,
+            lastChunkReceived: buffer.lastChunkReceived > 0 
+              ? `${Date.now() - buffer.lastChunkReceived}ms ago`
+              : 'never',
+          });
+        }
+        health.buffers = bufferDetails;
+        
+        // Provider-specific metrics
         try {
           const providerAny = this.asrProvider as any;
+          
+          // Get active connections count (works for most providers)
           if (providerAny.connections && typeof providerAny.connections.size === 'number') {
             health.activeConnections = providerAny.connections.size;
+          } else if (providerAny.recognizers && typeof providerAny.recognizers.size === 'number') {
+            health.activeConnections = providerAny.recognizers.size;
           } else {
             health.activeConnections = 'N/A';
           }
           
-          // Add Deepgram metrics if available
-          if (providerAny.getMetrics && typeof providerAny.getMetrics === 'function') {
+          // Azure metrics
+          if (ASR_PROVIDER === 'azure' && providerAny.getMetrics && typeof providerAny.getMetrics === 'function') {
+            const azureMetrics = providerAny.getMetrics();
+            health.azureMetrics = {
+              connectionsCreated: azureMetrics.connectionsCreated,
+              connectionsClosed: azureMetrics.connectionsClosed,
+              audioChunksSent: azureMetrics.audioChunksSent,
+              transcriptsReceived: azureMetrics.transcriptsReceived,
+              emptyTranscriptsReceived: azureMetrics.emptyTranscriptsReceived,
+              partialTranscriptsReceived: azureMetrics.partialTranscriptsReceived,
+              finalTranscriptsReceived: azureMetrics.finalTranscriptsReceived,
+              emptyTranscriptRate: azureMetrics.transcriptsReceived > 0
+                ? ((azureMetrics.emptyTranscriptsReceived / azureMetrics.transcriptsReceived) * 100).toFixed(1) + '%'
+                : '0%',
+              errors: azureMetrics.errors,
+              sessionsCanceled: azureMetrics.sessionsCanceled,
+              averageLatencyMs: azureMetrics.averageLatencyMs?.toFixed(0) + 'ms' || 'N/A',
+              averageSessionDurationMs: azureMetrics.averageSessionDurationMs?.toFixed(0) + 'ms' || 'N/A',
+            };
+          }
+          
+          // Deepgram metrics (only if using Deepgram)
+          if (ASR_PROVIDER === 'deepgram' && providerAny.getMetrics && typeof providerAny.getMetrics === 'function') {
             const deepgramMetrics = providerAny.getMetrics();
             health.deepgramMetrics = {
               connectionsCreated: deepgramMetrics.connectionsCreated,
@@ -135,11 +279,58 @@ class AsrWorker {
               averageChunkSizeMs: deepgramMetrics.averageChunkSizeMs.toFixed(0) + 'ms',
             };
           }
+          
+          // ElevenLabs metrics (only if using ElevenLabs)
+          if (ASR_PROVIDER === 'elevenlabs' && providerAny.getMetrics && typeof providerAny.getMetrics === 'function') {
+            const elevenLabsMetrics = providerAny.getMetrics();
+            health.elevenLabsMetrics = {
+              connectionsCreated: elevenLabsMetrics.connectionsCreated,
+              connectionsReused: elevenLabsMetrics.connectionsReused,
+              connectionsClosed: elevenLabsMetrics.connectionsClosed,
+              audioChunksSent: elevenLabsMetrics.audioChunksSent,
+              transcriptsReceived: elevenLabsMetrics.transcriptsReceived,
+              emptyTranscriptsReceived: elevenLabsMetrics.emptyTranscriptsReceived,
+              errors: elevenLabsMetrics.errors,
+              averageLatencyMs: elevenLabsMetrics.averageLatencyMs?.toFixed(0) + 'ms' || 'N/A',
+            };
+          }
         } catch (e) {
           health.activeConnections = 'N/A';
         }
         
-        res.end(JSON.stringify(health));
+        // Add buffer manager health
+        const bufferHealth = this.bufferManager.getSystemHealth();
+        health.bufferManager = {
+          totalBuffers: bufferHealth.totalBuffers,
+          activeBuffers: bufferHealth.activeBuffers,
+          staleBuffers: bufferHealth.staleBuffers,
+          memoryUsage: {
+            heapUsed: Math.round(bufferHealth.memoryUsage.heapUsed / 1024 / 1024) + 'MB',
+            heapTotal: Math.round(bufferHealth.memoryUsage.heapTotal / 1024 / 1024) + 'MB',
+            rss: Math.round(bufferHealth.memoryUsage.rss / 1024 / 1024) + 'MB',
+          },
+        };
+        
+        // Add connection health monitor stats
+        const connectionHealth = this.connectionHealthMonitor.performHealthCheck();
+        health.connectionHealth = {
+          totalConnections: connectionHealth.totalConnections,
+          healthyConnections: connectionHealth.healthyConnections,
+          unhealthyConnections: connectionHealth.unhealthyConnections,
+          unhealthyDetails: connectionHealth.unhealthyDetails,
+        };
+        
+        // Add circuit breaker stats
+        const circuitBreakerStats = this.circuitBreaker.getStats();
+        health.circuitBreaker = {
+          state: circuitBreakerStats.state,
+          failureCount: circuitBreakerStats.failureCount,
+          threshold: circuitBreakerStats.threshold,
+          timeSinceLastFailure: Math.round(circuitBreakerStats.timeSinceLastFailure / 1000) + 's',
+          timeout: Math.round(circuitBreakerStats.timeout / 1000) + 's',
+        };
+        
+        res.end(JSON.stringify(health, null, 2));
       } else {
         res.writeHead(404);
         res.end('Not Found');
@@ -157,6 +348,12 @@ class AsrWorker {
   }
 
   async start(): Promise<void> {
+    // Start background processor for queued transcripts (ElevenLabs only)
+    // This ensures transcripts queued during silence detection are still published
+    if (ASR_PROVIDER === 'elevenlabs') {
+      this.startQueuedTranscriptProcessor();
+    }
+
     // Subscribe to audio topics
     // For POC, subscribe to audio_stream (shared stream)
     // In production, would subscribe to audio.{tenant_id} per tenant
@@ -165,7 +362,48 @@ class AsrWorker {
 
     try {
       const audioHandle = await this.pubsub.subscribe(audioTopicName, async (msg) => {
-        await this.handleAudioFrame(msg as any);
+        // CRITICAL FIX: Explicit validation before processing
+        if (!msg || !msg.audio) {
+          console.error(`[ASRWorker] ❌ CRITICAL: Message missing audio field!`, {
+            interaction_id: msg?.interaction_id || 'unknown',
+            seq: msg?.seq || 'unknown',
+            msgKeys: msg ? Object.keys(msg) : [],
+            msgStructure: msg ? JSON.stringify(msg, null, 2).substring(0, 1000) : 'null',
+          });
+          return; // Don't process invalid messages
+        }
+        
+        // Only log if there's actual audio data (ingestion happening)
+        if (msg.audio.length > 0) {
+          logger.info(`[ASRWorker] 📨 Message received from Redis for topic ${audioTopicName}`, {
+            interaction_id: msg?.interaction_id || 'unknown',
+            seq: msg?.seq || 'unknown',
+            has_audio: !!msg?.audio,
+            audio_length: msg?.audio?.length || 0,
+            audio_type: typeof msg?.audio,
+            msg_keys: Object.keys(msg || {}),
+            msg_preview: JSON.stringify(msg).substring(0, 500),
+            timestamp: new Date().toISOString(),
+          });
+        } else {
+          // Empty messages - only log at debug level
+          logger.debug(`[ASRWorker] 📨 Empty message received from Redis (no audio)`, {
+            interaction_id: msg?.interaction_id || 'unknown',
+            seq: msg?.seq || 'unknown',
+          });
+        }
+        
+        try {
+          await this.handleAudioFrame(msg as any);
+        } catch (error: any) {
+          console.error(`[ASRWorker] ❌ Error in handleAudioFrame:`, {
+            error: error.message,
+            stack: error.stack,
+            interaction_id: msg?.interaction_id,
+            seq: msg?.seq,
+            error_name: error.name,
+          });
+        }
       });
       console.info(`[ASRWorker] ✅ Successfully subscribed to audio topic: ${audioTopicName}`, {
         subscriptionId: audioHandle.id,
@@ -195,330 +433,169 @@ class AsrWorker {
 
     // Start HTTP server
     this.server.listen(PORT, () => {
+      const exoBridgeEnabled = process.env.EXO_BRIDGE_ENABLED === 'true';
       console.info(`[ASRWorker] Server listening on port ${PORT}`);
       console.info(`[ASRWorker] Metrics: http://localhost:${PORT}/metrics`);
       console.info(`[ASRWorker] Health: http://localhost:${PORT}/health`);
+      
+      // Log condensed config summary (mask secrets)
+      const configSummary: any = {
+        asrProvider: ASR_PROVIDER,
+        exoBridgeEnabled,
+      };
+      
+      if (exoBridgeEnabled && ASR_PROVIDER === 'deepgram') {
+        const deepgramKey = process.env.DEEPGRAM_API_KEY;
+        configSummary.deepgramApiKey = deepgramKey ? `${deepgramKey.substring(0, 8)}...${deepgramKey.substring(deepgramKey.length - 4)}` : 'NOT SET';
+        configSummary.model = process.env.DG_MODEL || process.env.DEEPGRAM_MODEL || 'nova-3';
+        configSummary.encoding = process.env.DG_ENCODING || 'linear16';
+        configSummary.sampleRate = process.env.DG_SAMPLE_RATE || '8000';
+        configSummary.channels = process.env.DG_CHANNELS || '1';
+        configSummary.diarize = process.env.DG_DIARIZE === 'true';
+      }
+      
+      console.info(`[ASRWorker] Configuration:`, configSummary);
     });
   }
 
+  /**
+   * Simple audio frame handler - just buffers audio chunks in memory
+   * Timer job will process buffered chunks every 5 seconds
+   * Azure: Sends audio immediately without buffering (continuous recognition)
+   */
   private async handleAudioFrame(msg: any): Promise<void> {
+    const interactionId = msg?.interaction_id;
+    const seq = msg?.seq;
+    
     try {
-      // Validate audio field exists and is a string
-      if (!msg.audio || typeof msg.audio !== 'string') {
-        console.error('[ASRWorker] ❌ Invalid audio field in message:', {
-          interaction_id: msg.interaction_id,
-          seq: msg.seq,
-          audio_type: typeof msg.audio,
-          audio_length: msg.audio?.length,
-          msg_keys: Object.keys(msg),
-        });
+      // Skip if call has ended
+    if (interactionId && this.endedCalls.has(interactionId)) {
         return;
       }
 
-      // Log raw audio field for first few frames to debug
-      if (msg.seq === undefined || msg.seq < 3) {
-        console.info('[ASRWorker] 🔍 Raw audio field received:', {
-          interaction_id: msg.interaction_id,
-          seq: msg.seq,
-          audio_type: typeof msg.audio,
-          audio_length: msg.audio?.length,
-          audio_preview: msg.audio?.substring(0, 100),
-          first_20_chars: msg.audio?.substring(0, 20),
+      // Get audio data from message (support multiple field names)
+      let audioData: string | undefined = msg.audio || msg.audio_data || msg.data || msg.payload;
+      
+      // AZURE: Send audio immediately, no buffering
+      if (ASR_PROVIDER === 'azure') {
+        if (!audioData || typeof audioData !== 'string') {
+          console.error('[ASRWorker] ❌ Missing audio data:', {
+            interaction_id: interactionId,
+            seq,
+          });
+          return;
+        }
+
+        // Decode base64 to buffer
+        const audioBuffer = Buffer.from(audioData, 'base64');
+        if (audioBuffer.length === 0) {
+          return;
+        }
+
+        // Get sample rate (default to 16000)
+        const sampleRate = msg.sample_rate || 16000;
+
+        // Send directly to Azure (continuous recognition)
+        await this.asrProvider.sendAudioChunk(audioBuffer, {
+          interactionId,
+          seq,
+          sampleRate,
         });
+        
+        // Log every 20th chunk to avoid spam
+        if (seq % 20 === 0) {
+          console.debug(`[ASRWorker] 📤 Sent audio chunk to Azure`, {
+            interaction_id: interactionId,
+            seq,
+            audio_size_bytes: audioBuffer.length,
+            sample_rate: sampleRate,
+          });
+        }
+        
+        // Update metrics
+        this.metrics.recordAudioChunk(interactionId);
+        
+        return; // Skip buffering logic below
       }
 
-      // CRITICAL: Check if audio field contains JSON instead of base64
-      const audioPreview = msg.audio.substring(0, 20).trim();
-      if (audioPreview.startsWith('{') || audioPreview.startsWith('[')) {
-        console.error('[ASRWorker] ❌ CRITICAL: Audio field contains JSON text, not base64!', {
-          interaction_id: msg.interaction_id,
-          seq: msg.seq,
-          audio_preview: msg.audio.substring(0, 200),
-          full_msg: JSON.stringify(msg).substring(0, 500),
+      // EXISTING BUFFERING LOGIC for other providers
+      
+      if (!audioData || typeof audioData !== 'string') {
+        console.error('[ASRWorker] ❌ Missing audio data:', {
+        interaction_id: interactionId,
+          seq,
         });
         return;
       }
 
       // Validate base64 format
       const base64Regex = /^[A-Za-z0-9+/]*={0,2}$/;
-      if (!base64Regex.test(msg.audio)) {
-        console.error('[ASRWorker] ❌ Invalid base64 format in audio field:', {
-          interaction_id: msg.interaction_id,
-          seq: msg.seq,
-          audio_preview: msg.audio.substring(0, 100),
+      if (!base64Regex.test(audioData)) {
+        console.error('[ASRWorker] ❌ Invalid base64 format:', {
+          interaction_id: interactionId,
+          seq,
         });
         return;
       }
 
-      // Parse audio frame message
-      const frame: AudioFrameMessage = {
-        tenant_id: msg.tenant_id,
-        interaction_id: msg.interaction_id,
-        seq: msg.seq,
-        timestamp_ms: msg.timestamp_ms || Date.now(),
-        sample_rate: msg.sample_rate || 24000,
-        encoding: msg.encoding || 'pcm16',
-        audio: msg.audio, // base64 string
-      };
+      // Decode base64 to buffer
+      const audioBuffer = Buffer.from(audioData, 'base64');
+      if (audioBuffer.length === 0) {
+        return;
+      }
 
-      const { interaction_id, tenant_id, seq, sample_rate, audio } = frame;
+      // Get sample rate (default to 16000 for ElevenLabs optimal quality)
+      const sampleRate = msg.sample_rate || 16000;
+      const tenantId = msg.tenant_id;
 
-      // Get or create buffer for this interaction
-      let buffer = this.buffers.get(interaction_id);
+      // Get or create buffer
+      let buffer = this.buffers.get(interactionId);
       if (!buffer) {
+        // Remove from endedCalls if reused
+        if (this.endedCalls.has(interactionId)) {
+          this.endedCalls.delete(interactionId);
+        }
+        
+        this.bufferManager.createBuffer(interactionId, tenantId, sampleRate);
+        
         buffer = {
-          interactionId: interaction_id,
-          tenantId: tenant_id,
-          sampleRate: sample_rate,
+          interactionId,
+          tenantId,
+          sampleRate,
           chunks: [],
           timestamps: [],
+          sequences: [],
           lastProcessed: Date.now(),
           lastChunkReceived: Date.now(),
-          hasSentInitialChunk: false, // Haven't sent initial chunk yet
-          isProcessing: false, // Not currently processing
-          lastContinuousSendTime: 0, // Will be set after initial chunk
         };
-        this.buffers.set(interaction_id, buffer);
+        this.buffers.set(interactionId, buffer);
+        
+        // Start 10-second timer for this interaction
+        this.startBufferProcessingTimer(interactionId);
       }
 
-      // Update last chunk received timestamp
-      buffer.lastChunkReceived = Date.now();
-
-      // Decode base64 audio
-      let audioBuffer: Buffer;
-      try {
-        audioBuffer = Buffer.from(audio, 'base64');
-      } catch (error: any) {
-        console.error('[ASRWorker] ❌ Failed to decode base64 audio:', {
-          interaction_id,
-          seq,
-          error: error.message,
-          audio_preview: audio.substring(0, 100),
-        });
-        return;
-      }
-
-      // Validate decoded buffer is not empty and looks like audio (not JSON)
-      if (audioBuffer.length === 0) {
-        console.warn('[ASRWorker] ⚠️ Empty audio buffer decoded:', {
-          interaction_id,
-          seq,
-        });
-        return;
-      }
-
-      // Check first few bytes - should be binary audio, not JSON text
-      const firstBytes = Array.from(audioBuffer.slice(0, Math.min(8, audioBuffer.length)));
-      if (firstBytes[0] === 0x7b || firstBytes[0] === 0x5b) { // '{' or '['
-        const firstBytesHex = firstBytes.map(b => `0x${b.toString(16).padStart(2, '0')}`).join(', ');
-        
-        // Try to parse as JSON to see what Exotel is actually sending
-        try {
-          const jsonText = audioBuffer.toString('utf8');
-          const parsedJson = JSON.parse(jsonText);
-          
-          // Log detailed error with parsed JSON structure
-          console.error('[ASRWorker] ❌ CRITICAL: Decoded audio buffer contains JSON text!', {
-            interaction_id,
-            seq,
-            first_bytes_hex: firstBytesHex,
-            buffer_length: audioBuffer.length,
-            audio_field_length: audio.length,
-            parsed_json_keys: Object.keys(parsedJson),
-            parsed_json_event: parsedJson.event,
-            parsed_json_structure: JSON.stringify(parsedJson).substring(0, 1000),
-            note: 'This indicates Exotel is sending base64-encoded JSON instead of base64-encoded audio. Check Ingest service logs for [exotel] errors.',
-          });
-          
-          // Log this only once per interaction to avoid spam
-          if (seq === 1 || seq === 2) {
-            console.error('[ASRWorker] 🔍 Full parsed JSON (first occurrence):', {
-              interaction_id,
-              seq,
-              full_json: JSON.stringify(parsedJson, null, 2),
-            });
-          }
-        } catch (parseError) {
-          console.error('[ASRWorker] ❌ CRITICAL: Decoded audio buffer contains JSON text (but not valid JSON)!', {
-            interaction_id,
-            seq,
-            first_bytes_hex: firstBytesHex,
-            buffer_length: audioBuffer.length,
-            audio_field_length: audio.length,
-            buffer_preview: audioBuffer.toString('utf8').substring(0, 200),
-            parse_error: parseError instanceof Error ? parseError.message : String(parseError),
-          });
-        }
-        return;
-      }
-
-      // COMPREHENSIVE VALIDATION: Verify PCM16 format (16-bit signed integers, little-endian)
-      // This ensures audio is valid before sending to Deepgram
-      if (audioBuffer.length >= 2) {
-        const sampleCount = Math.min(20, Math.floor(audioBuffer.length / 2));
-        let validSamples = 0;
-        let invalidSamples = 0;
-        let allZeros = true;
-        const sampleValues: number[] = [];
-        
-        for (let i = 0; i < sampleCount; i++) {
-          const offset = i * 2;
-          if (offset + 1 >= audioBuffer.length) break;
-          
-          // Read as little-endian signed 16-bit integer
-          const sample = (audioBuffer[offset] | (audioBuffer[offset + 1] << 8)) << 16 >> 16;
-          sampleValues.push(sample);
-          
-          // Validate range: PCM16 should be in range [-32768, 32767]
-          if (sample >= -32768 && sample <= 32767) {
-            validSamples++;
-            if (sample !== 0) allZeros = false;
-          } else {
-            invalidSamples++;
-          }
-        }
-        
-        // Log warning if format issues detected (only for first few chunks)
-        if (invalidSamples > 0 && seq <= 5) {
-          console.error('[ASRWorker] ❌ CRITICAL: Audio format validation failed - not valid PCM16!', {
-            interaction_id,
-            seq,
-            validSamples,
-            invalidSamples,
-            totalChecked: sampleCount,
-            sampleValues: sampleValues.slice(0, 10),
-            firstBytes: Array.from(audioBuffer.slice(0, 4)).map(b => `0x${b.toString(16).padStart(2, '0')}`),
-            note: 'Audio may not be PCM16 format. Expected 16-bit signed integers in range [-32768, 32767].',
-          });
-          // Don't return - allow it to proceed but log the issue
-        }
-        
-        // Validate sample rate calculation makes sense
-        const bytesPerSample = 2; // 16-bit = 2 bytes
-        const samples = audioBuffer.length / bytesPerSample;
-        const calculatedDurationMs = (samples / sample_rate) * 1000;
-        const expectedBytesFor20ms = (sample_rate * 0.02) * 2; // 20ms at declared sample rate
-        
-        // Warn if audio duration doesn't match expected for declared sample rate
-        if (seq <= 5 && Math.abs((expectedBytesFor20ms / audioBuffer.length) * calculatedDurationMs - 20) > 5) {
-          console.warn('[ASRWorker] ⚠️ Sample rate validation warning', {
-            interaction_id,
-            seq,
-            declaredSampleRate: sample_rate,
-            audioLength: audioBuffer.length,
-            calculatedDurationMs: calculatedDurationMs.toFixed(2),
-            expectedBytesFor20ms: expectedBytesFor20ms.toFixed(0),
-            note: 'Audio duration may not match declared sample rate. Verify actual audio sample rate.',
-          });
-        }
-        
-        // Warn if audio is all zeros (silence) - this is normal but worth noting
-        if (allZeros && seq <= 3) {
-          console.debug('[ASRWorker] ℹ️ Audio appears to be silence (all zeros)', {
-            interaction_id,
-            seq,
-            samplesChecked: sampleCount,
-            note: 'This is normal for silence, but may cause empty transcripts from Deepgram.',
-          });
-        }
-      }
-
+      // Add chunk to buffer
       buffer.chunks.push(audioBuffer);
-      buffer.timestamps.push(frame.timestamp_ms);
-      buffer.lastChunkReceived = Date.now(); // Update last chunk received time
-
-      // CRITICAL: Start/restart processing timer to ensure frequent sends
-      // This ensures we check every 200ms if we should send, regardless of chunk arrival frequency
-      this.startBufferProcessingTimer(interaction_id);
-
-      // Calculate current audio duration in buffer
-      const totalSamples = buffer.chunks.reduce((sum, chunk) => sum + chunk.length, 0) / 2; // 16-bit = 2 bytes per sample
-      const currentAudioDurationMs = (totalSamples / sample_rate) * 1000;
+      buffer.timestamps.push(msg.timestamp_ms || Date.now());
+      buffer.sequences.push(seq);
+      buffer.lastChunkReceived = Date.now();
       
-      // Log new chunk arrival to verify new audio is coming in
-      console.info(`[ASRWorker] 📥 Received audio chunk:`, {
-        interaction_id,
-        seq,
-        audioSize: audioBuffer.length,
-        chunkDurationMs: ((audioBuffer.length / 2) / sample_rate) * 1000,
-        totalChunksInBuffer: buffer.chunks.length,
-        totalAudioDurationMs: currentAudioDurationMs.toFixed(0),
-        bufferAge: Date.now() - buffer.lastProcessed,
-        meetsMinimum: currentAudioDurationMs >= MIN_AUDIO_DURATION_MS,
-      });
-
-      // Record metrics
-      this.metrics.recordAudioChunk(interaction_id);
-
-      // CRITICAL: Deepgram streaming requires CONTINUOUS audio flow
-      // Strategy:
-      // 1. First chunk: Wait for 500ms minimum before sending (initial chunk)
-      // 2. After initial chunk: Send continuously - process every 500-1000ms OR when we have 200ms+ of new audio
-      // This ensures Deepgram receives continuous audio, not one chunk then silence
+      this.bufferManager.updateBufferActivity(interactionId);
+      this.metrics.recordAudioChunk(interactionId);
       
-      const bufferAge = Date.now() - buffer.lastProcessed;
-      
-      // Prevent concurrent processing of the same buffer (race condition fix)
-      if (buffer.isProcessing) {
-        console.debug(`[ASRWorker] ⏸️ Buffer already processing, skipping for ${interaction_id}`);
-        return;
-      }
-      
-        if (!buffer.hasSentInitialChunk) {
-        // First chunk: Wait for initial chunk duration (200ms, reduced from 500ms)
-        // CRITICAL: Also check time since buffer creation to prevent long delays
-        // If audio arrives slowly, don't wait forever - send after 1 second max
-        const timeSinceBufferCreation = Date.now() - buffer.lastProcessed;
-        const MAX_INITIAL_WAIT_MS = 1000; // Send first chunk within 1 second max
-        const hasEnoughAudio = currentAudioDurationMs >= INITIAL_CHUNK_DURATION_MS;
-        const hasWaitedTooLong = timeSinceBufferCreation >= MAX_INITIAL_WAIT_MS;
+      // Log every 10th chunk to avoid spam
+      if (seq % 10 === 0) {
+      const totalBytes = buffer.chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+        const totalAudioMs = (totalBytes / 2 / sampleRate) * 1000;
         
-        // Send if we have enough audio OR if we've waited too long (prevent timeout)
-        if (hasEnoughAudio || (hasWaitedTooLong && currentAudioDurationMs >= 20)) {
-          // CRITICAL: Don't await processBuffer - it sends audio asynchronously
-          // This prevents buffer from being locked during 5-second transcript wait
-          buffer.isProcessing = true;
-          this.processBuffer(buffer, hasWaitedTooLong).then(() => {
-            // Clear processing flag after send completes (not after transcript arrives)
-            buffer.isProcessing = false;
-            buffer.lastProcessed = Date.now();
-            buffer.hasSentInitialChunk = true;
-            buffer.lastContinuousSendTime = Date.now();
-            if (hasWaitedTooLong) {
-              console.warn(`[ASRWorker] ⚠️ First chunk sent early (${currentAudioDurationMs.toFixed(0)}ms) due to timeout risk (${timeSinceBufferCreation}ms wait)`, {
-                interaction_id,
-                audioDuration: currentAudioDurationMs.toFixed(0),
-                waitTime: timeSinceBufferCreation,
-              });
-            }
-          }).catch((error: any) => {
-            buffer.isProcessing = false;
-            console.error(`[ASRWorker] Error processing initial chunk for ${interaction_id}:`, error);
-            this.metrics.recordError(error.message || String(error));
-          });
-        }
-      } else {
-        // After initial chunk: Stream continuously with Deepgram-optimized sizing
-        // CRITICAL: Timer-based processing handles ALL continuous streaming
-        // Event-driven processing is DISABLED for continuous mode to avoid race conditions
-        // The timer checks every 200ms and sends when needed, ensuring continuous audio flow
-        
-        // Initialize lastContinuousSendTime if needed (for timer to calculate time since last send)
-        if (buffer.lastContinuousSendTime === 0) {
-          buffer.lastContinuousSendTime = buffer.lastProcessed;
-        }
-        
-        // Just log that chunk was received - timer will handle all sending
-        const timeSinceLastSend = buffer.lastContinuousSendTime > 0 ? Date.now() - buffer.lastContinuousSendTime : 'never';
-        console.debug(`[ASRWorker] 📥 Chunk received (continuous mode) - timer will handle sending for ${interaction_id}`, {
-          chunksCount: buffer.chunks.length,
-          totalAudioDurationMs: currentAudioDurationMs.toFixed(0),
-          timeSinceLastSend: timeSinceLastSend,
-          note: 'Timer checks every 200ms and sends when needed',
+        console.info(`[ASRWorker] 📥 Buffered chunk ${seq}`, {
+          interaction_id: interactionId,
+          chunks_buffered: buffer.chunks.length,
+          total_audio_ms: totalAudioMs.toFixed(0),
         });
       }
     } catch (error: any) {
-      console.error('[ASRWorker] Error handling audio frame:', error);
+      console.error('[ASRWorker] Error buffering audio:', error);
       this.metrics.recordError(error.message || String(error));
     }
   }
@@ -531,15 +608,30 @@ class AsrWorker {
         return;
       }
 
-      console.info('[ASRWorker] Call end event received', {
+      // CRITICAL: Mark call as ended with timestamp (for grace period)
+      this.endedCalls.set(interactionId, Date.now());
+      console.info('[ASRWorker] Call end event received - will stop processing after grace period', {
         interaction_id: interactionId,
         reason: msg.reason,
         call_sid: msg.call_sid,
+        grace_period_ms: this.ENDED_CALL_GRACE_PERIOD_MS,
+        note: 'Late-arriving audio frames will be processed for 10 seconds after call_end',
       });
+
+      // Use BufferManager to handle call end (includes comprehensive logging)
+      this.bufferManager.handleCallEnd(interactionId);
 
       // Clean up buffer for this interaction
       const buffer = this.buffers.get(interactionId);
       if (buffer) {
+        // Update buffer stats in BufferManager before cleanup
+        const totalBytes = buffer.chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+        const totalAudioMs = (totalBytes / 2 / buffer.sampleRate) * 1000;
+        this.bufferManager.updateBufferStats(interactionId, {
+          chunksCount: buffer.chunks.length,
+          totalAudioMs,
+        });
+        
         console.info('[ASRWorker] Cleaning up buffer for ended call', {
           interaction_id: interactionId,
           chunksCount: buffer.chunks.length,
@@ -557,17 +649,20 @@ class AsrWorker {
         
         // Close ASR provider connection for this specific interaction if supported
         try {
-          // Check if provider supports closing a specific connection (e.g., Deepgram)
+          // Check if provider supports closing a specific connection (e.g., Deepgram, ElevenLabs)
           if (typeof (this.asrProvider as any).closeConnection === 'function') {
             await (this.asrProvider as any).closeConnection(interactionId);
           }
         } catch (error: any) {
           console.warn('[ASRWorker] Error closing ASR provider connection:', error.message);
         }
+        
+        // Untrack connection in health monitor
+        this.connectionHealthMonitor.untrackConnection(interactionId);
       } else {
-        console.debug('[ASRWorker] No buffer found for ended call', {
-          interaction_id: interactionId,
-        });
+        // BufferManager already logged the "No buffer found" warning with detailed diagnostics
+        // Just ensure connection is untracked
+        this.connectionHealthMonitor.untrackConnection(interactionId);
       }
     } catch (error: any) {
       console.error('[ASRWorker] Error handling call end event:', error);
@@ -581,16 +676,20 @@ class AsrWorker {
       const now = Date.now();
       const staleBuffers: string[] = [];
 
+      // Clean up old ended calls (older than 1 minute)
+      for (const [interactionId, endedAt] of this.endedCalls.entries()) {
+        if (now - endedAt > 60000) { // 1 minute
+          this.endedCalls.delete(interactionId);
+        }
+      }
+
       for (const [interactionId, buffer] of this.buffers.entries()) {
         const timeSinceLastChunk = now - buffer.lastChunkReceived;
         // CRITICAL: Don't clean up buffers that have sent initial chunk but are waiting for continuous streaming
-        // Only clean up if no audio received AND no initial chunk sent (call never started)
-        // OR if no audio received for a very long time (call definitely ended)
+        // Clean up if no audio received for a long time (stale buffer)
         const isStale = timeSinceLastChunk >= STALE_BUFFER_TIMEOUT_MS;
-        const hasNoInitialChunk = !buffer.hasSentInitialChunk;
-        const isVeryStale = timeSinceLastChunk >= (STALE_BUFFER_TIMEOUT_MS * 2); // 10 seconds
         
-        if (isStale && (hasNoInitialChunk || isVeryStale)) {
+        if (isStale) {
           staleBuffers.push(interactionId);
         }
       }
@@ -626,283 +725,231 @@ class AsrWorker {
    * The timer checks every 200ms if we should send audio, regardless of when chunks arrive.
    * This ensures continuous audio flow even if chunks arrive every 3 seconds.
    */
+  /**
+   * Process buffered audio if it exceeds the minimum duration
+   * This replaces the timer-based approach for lower latency
+   */
+  private async checkAndProcessBuffer(interactionId: string): Promise<void> {
+      const buffer = this.buffers.get(interactionId);
+    if (!buffer || buffer.chunks.length === 0) return;
+
+    // Calculate total audio duration
+    const totalBytes = buffer.chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+    const totalAudioMs = (totalBytes / 2 / buffer.sampleRate) * 1000;
+
+    // CRITICAL: Only send if we have enough audio (100ms)
+    // This prevents "commit_throttled" errors and 10s timeouts from ElevenLabs
+    const MIN_SEND_DURATION_MS = 100;
+
+    if (totalAudioMs < MIN_SEND_DURATION_MS) {
+      return; // Keep buffering
+    }
+
+    try {
+      // Get all buffered chunks
+      const chunksToProcess = [...buffer.chunks];
+      const numChunks = chunksToProcess.length;
+      
+      // Merge all chunks into a single buffer
+      const mergedAudio = Buffer.concat(chunksToProcess);
+      
+      // Clear the buffer (we're sending everything)
+      buffer.chunks = [];
+      buffer.timestamps = [];
+      buffer.sequences = [];
+      
+      // Create a single sequence number for this merged chunk
+      const seq = Math.floor(Date.now() / 1000);
+      
+      console.info(`[ASRWorker] 🚀 Sending buffered audio (threshold reached)`, {
+        interaction_id: interactionId,
+        chunks_found: numChunks,
+        total_audio_ms: totalAudioMs.toFixed(0),
+        threshold_ms: MIN_SEND_DURATION_MS,
+      });
+      
+      // Send to ElevenLabs and measure response time
+      const startTime = Date.now();
+      const transcript = await this.asrProvider.sendAudioChunk(mergedAudio, {
+          interactionId,
+        seq,
+        sampleRate: buffer.sampleRate,
+      });
+      const responseTimeMs = Date.now() - startTime;
+      
+      // Log results
+      console.info(`[ASRWORKER] ✅ ElevenLabs response received`, {
+        interaction_id: interactionId,
+        chunks_sent: numChunks,
+        audio_duration_ms: totalAudioMs.toFixed(0),
+        response_time_ms: responseTimeMs,
+        transcript_text: transcript.text || '(empty)',
+        transcript_type: transcript.type,
+        transcript_length: transcript.text?.length || 0,
+      });
+      
+      // CRITICAL FIX: Filter empty transcripts before publishing
+      const hasText = transcript.text && transcript.text.trim().length > 0;
+      if (hasText) {
+        await this.publishTranscript(interactionId, transcript, seq);
+      }
+      
+    } catch (error: any) {
+      console.error(`[ASRWORKER] ❌ Buffer processing error for ${interactionId}:`, error);
+          this.metrics.recordError(error.message || String(error));
+    }
+  }
+
+  /**
+   * Simple timer-based processing: runs every 10 seconds
+   * Merges all buffered chunks and sends to ElevenLabs
+   */
   private startBufferProcessingTimer(interactionId: string): void {
+    // Azure uses continuous recognition - no timer needed
+    if (ASR_PROVIDER === 'azure') {
+      console.info(`[ASRWorker] ⏭️ Skipping timer for Azure (continuous recognition)`, {
+        interaction_id: interactionId,
+        provider: 'azure',
+        note: 'Azure sends audio immediately, no buffering',
+      });
+      return;
+    }
+
     // Clear existing timer if any
     const existingTimer = this.bufferTimers.get(interactionId);
     if (existingTimer) {
       clearInterval(existingTimer);
-      console.debug(`[ASRWorker] 🔄 Restarting timer for ${interactionId}`);
-    } else {
-      console.info(`[ASRWorker] 🚀 Starting timer for ${interactionId} (checks every 200ms)`);
     }
 
-    // Start new timer: check every 200ms
-    const PROCESSING_TIMER_INTERVAL_MS = 200; // Check every 200ms
+    console.info(`[ASRWorker] 🚀 Starting 4-second timer for ${interactionId}`);
+
+    // Timer interval: 4 seconds (configurable)
+    const TIMER_INTERVAL_MS = parseInt(process.env.ASR_BUFFER_TIMER_INTERVAL_MS || '4000', 10);
+
     const timer = setInterval(async () => {
       const buffer = this.buffers.get(interactionId);
+      
+      // Clean up timer if buffer is gone
       if (!buffer) {
-        // Buffer was cleaned up, clear timer
         clearInterval(timer);
         this.bufferTimers.delete(interactionId);
         return;
       }
 
-      // Skip if already processing or no chunks
-      if (buffer.isProcessing || buffer.chunks.length === 0) {
-        if (buffer.chunks.length === 0) {
-          // Log when timer runs but buffer is empty (for debugging)
-          console.debug(`[ASRWorker] ⏸️ Timer tick: buffer empty for ${interactionId}`, {
-            timeSinceLastSend: buffer.lastContinuousSendTime > 0 ? Date.now() - buffer.lastContinuousSendTime : 'never',
-            hasSentInitialChunk: buffer.hasSentInitialChunk,
-          });
-        }
+      // Stop if call has ended
+      if (this.endedCalls.has(interactionId)) {
+        clearInterval(timer);
+        this.bufferTimers.delete(interactionId);
         return;
       }
 
-      // Only process if we've sent initial chunk (continuous mode)
-      // Initial chunk logic is handled in handleAudioFrame
-      if (!buffer.hasSentInitialChunk) {
-        return;
-      }
-      
-      // Log timer tick for debugging
-      console.debug(`[ASRWorker] ⏰ Timer tick for ${interactionId}`, {
-        chunksCount: buffer.chunks.length,
-        isProcessing: buffer.isProcessing,
-        hasSentInitialChunk: buffer.hasSentInitialChunk,
-      });
-
-      // Calculate current audio duration
-      const totalSamples = buffer.chunks.reduce((sum, chunk) => sum + chunk.length, 0) / 2;
-      const currentAudioDurationMs = (totalSamples / buffer.sampleRate) * 1000;
-
-      // Initialize lastContinuousSendTime if needed
-      if (buffer.lastContinuousSendTime === 0) {
-        buffer.lastContinuousSendTime = buffer.lastProcessed;
-      }
-
-      const timeSinceLastContinuousSend = Date.now() - buffer.lastContinuousSendTime;
-      
-      // CRITICAL FIX: Updated thresholds for aggregation
-      // Minimum 100ms chunks, max 200ms gaps (prevents 8-9s gaps)
-      // These values are optimized for Deepgram's requirements:
-      // - Deepgram recommends 20-250ms chunks
-      // - Minimum 100ms ensures reliable transcription
-      // - Max 200ms gaps prevent timeouts (Deepgram closes after ~5-10s inactivity)
-      const MIN_CHUNK_DURATION_MS = 100; // Minimum chunk size for reliable transcription
-      const MAX_TIME_BETWEEN_SENDS_MS = 200; // Maximum gap between sends (prevents timeout)
-      const MIN_CHUNK_FOR_TIMEOUT_PREVENTION_MS = 20; // Minimum for timeout prevention (Deepgram's absolute minimum)
-      
-      const isTooLongSinceLastSend = timeSinceLastContinuousSend >= MAX_TIME_BETWEEN_SENDS_MS;
-      const hasMinimumChunkSize = currentAudioDurationMs >= MIN_CHUNK_DURATION_MS;
-      const hasEnoughForTimeoutPrevention = currentAudioDurationMs >= MIN_CHUNK_FOR_TIMEOUT_PREVENTION_MS;
-      const exceedsMaxChunkSize = currentAudioDurationMs >= MAX_CHUNK_DURATION_MS;
-
-      // Process if:
-      // 1. Gap > 200ms AND we have at least 20ms (timeout risk) - FORCE SEND
-      // 2. We have >= 100ms (normal case) - SEND
-      // 3. Buffer exceeds max chunk size (250ms) - SEND (split)
-      const shouldProcess = 
-        (isTooLongSinceLastSend && hasEnoughForTimeoutPrevention) ||
-        hasMinimumChunkSize ||
-        exceedsMaxChunkSize;
-
-      // Minimum chunk for send: 20ms if timeout risk, 100ms normally
-      const minChunkForSend = isTooLongSinceLastSend ? MIN_CHUNK_FOR_TIMEOUT_PREVENTION_MS : MIN_CHUNK_DURATION_MS;
-      
-      if (shouldProcess && currentAudioDurationMs >= minChunkForSend) {
-        // Enhanced logging for chunk aggregation decisions
-        console.debug(`[ASRWorker] 🎯 Timer: Processing buffer for ${interactionId}`, {
-          currentAudioDurationMs: currentAudioDurationMs.toFixed(0),
-          timeSinceLastSend: timeSinceLastContinuousSend,
-          chunksCount: buffer.chunks.length,
-          reason: isTooLongSinceLastSend ? 'timeout-prevention' : (exceedsMaxChunkSize ? 'max-size' : 'optimal-chunk'),
-          minRequired: minChunkForSend,
-        });
-        // CRITICAL: Don't await processBuffer - it sends audio asynchronously
-        // This prevents buffer from being locked during 5-second transcript wait
-        buffer.isProcessing = true;
-        const chunksBeforeProcessing = buffer.chunks.length;
-        const audioDurationBeforeProcessing = currentAudioDurationMs;
-        
-        // Fire and forget - processBuffer handles async transcript response
-        this.processBuffer(buffer, isTooLongSinceLastSend).then(() => {
-          // Clear processing flag after send completes (not after transcript arrives)
-          buffer.isProcessing = false;
-          
-          if (buffer.chunks.length < chunksBeforeProcessing) {
-            buffer.lastProcessed = Date.now();
-            buffer.lastContinuousSendTime = Date.now();
-            console.info(`[ASRWorker] ✅ Timer-triggered send completed for ${interactionId}`, {
-              timeSinceLastSend: timeSinceLastContinuousSend,
-              audioDuration: audioDurationBeforeProcessing.toFixed(0),
-              chunksCount: chunksBeforeProcessing,
-              chunksRemaining: buffer.chunks.length,
-              strategy: isTooLongSinceLastSend ? 'timeout-prevention' : 'optimal-chunk',
-            });
-          }
-        }).catch((error: any) => {
-          buffer.isProcessing = false;
-          console.error(`[ASRWorker] Error in timer-based processing for ${interactionId}:`, error);
-          this.metrics.recordError(error.message || String(error));
-        });
-      }
-    }, PROCESSING_TIMER_INTERVAL_MS);
-
-    this.bufferTimers.set(interactionId, timer);
-  }
-
-  /**
-   * Helper method to send audio to ASR provider
-   * Extracted for reuse in chunk splitting logic
-   */
-  private async sendToAsrProvider(
-    audio: Buffer,
-    buffer: AudioBuffer,
-    seq: number
-  ): Promise<any> {
-    return await this.asrProvider.sendAudioChunk(audio, {
-      interactionId: buffer.interactionId,
-      seq,
-      sampleRate: buffer.sampleRate,
-    });
-  }
-
-  private async processBuffer(buffer: AudioBuffer, isTimeoutRisk: boolean = false): Promise<void> {
+      // Skip if no chunks buffered
     if (buffer.chunks.length === 0) {
       return;
     }
 
     try {
-      // CRITICAL FIX: Aggregation to prevent 20ms chunks with 8-9s gaps
-      // Deepgram requires continuous stream with <500ms gaps
-      // Strategy: Aggregate to minimum 100ms chunks, send after max 200ms wait
-      const MIN_CHUNK_DURATION_MS = 100; // Minimum 100ms for reliable transcription
-      const MAX_WAIT_MS = 200; // Maximum 200ms between sends (prevents gaps)
-      const INITIAL_BURST_MS = 250; // Initial burst 200-300ms for faster first transcript
-      
-      // Calculate total audio in buffer
-      const totalBytes = buffer.chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-      const totalSamples = totalBytes / 2;
-      const totalAudioDurationMs = (totalSamples / buffer.sampleRate) * 1000;
-      
-      // Calculate time since last send
-      const timeSinceLastSend = buffer.lastContinuousSendTime > 0 
-        ? Date.now() - buffer.lastContinuousSendTime 
-        : (buffer.hasSentInitialChunk ? Date.now() - buffer.lastProcessed : 0);
-      
-      // Calculate time since buffer creation (for initial chunk)
-      const timeSinceBufferCreation = Date.now() - buffer.lastProcessed;
-      
-      // Determine required duration based on mode
-      let requiredDuration: number;
-      if (!buffer.hasSentInitialChunk) {
-        // Initial chunk: Require 250ms burst OR send after 1s max wait
-        const MAX_INITIAL_WAIT_MS = 1000;
-        if (timeSinceBufferCreation >= MAX_INITIAL_WAIT_MS && totalAudioDurationMs >= 20) {
-          // Force send if waited too long (prevent timeout)
-          requiredDuration = 20;
-        } else {
-          requiredDuration = INITIAL_BURST_MS;
-        }
-      } else {
-        // Continuous mode: Send if we have 100ms OR if 200ms has passed (prevent gaps)
-        if (timeSinceLastSend >= MAX_WAIT_MS && totalAudioDurationMs >= 20) {
-          // Force send to prevent gap > 200ms (timeout risk)
-          requiredDuration = 20;
-        } else {
-          // Normal case: wait for 100ms minimum
-          requiredDuration = MIN_CHUNK_DURATION_MS;
-        }
-      }
-      
-      // Calculate how many bytes we need
-      const requiredSamples = Math.floor((requiredDuration * buffer.sampleRate) / 1000);
-      const requiredBytes = requiredSamples * 2; // 16-bit = 2 bytes per sample
-      
-      // Check if we have enough audio OR if timeout risk forces send
-      const hasEnoughAudio = totalBytes >= requiredBytes;
-      const isTimeoutRisk = timeSinceLastSend >= MAX_WAIT_MS && totalAudioDurationMs >= 20;
-      
-      if (!hasEnoughAudio && !isTimeoutRisk) {
-        console.debug(`[ASRWorker] ⏳ Buffer too small (${totalAudioDurationMs.toFixed(0)}ms < ${requiredDuration}ms), waiting for more audio`, {
-          interaction_id: buffer.interactionId,
-          chunksCount: buffer.chunks.length,
-          audioDurationMs: totalAudioDurationMs.toFixed(0),
-          minimumRequired: requiredDuration,
-          timeSinceLastSend: timeSinceLastSend > 0 ? timeSinceLastSend + 'ms' : 'never',
-          mode: buffer.hasSentInitialChunk ? 'continuous' : 'initial',
+        // Get all buffered chunks
+        const chunksToProcess = [...buffer.chunks];
+        const numChunks = chunksToProcess.length;
+        
+        // Merge all chunks into a single buffer
+        const mergedAudio = Buffer.concat(chunksToProcess);
+        
+        // Calculate total audio duration
+        const totalAudioMs = (mergedAudio.length / 2 / buffer.sampleRate) * 1000;
+        
+        // Clear the buffer (we're sending everything)
+        buffer.chunks = [];
+        buffer.timestamps = [];
+        buffer.sequences = [];
+        
+        // Create a single sequence number for this merged chunk
+        const seq = Math.floor(Date.now() / 1000);
+        
+        console.info(`[ASRWorker] ⏰ Timer triggered - sending buffered audio`, {
+          interaction_id: interactionId,
+          chunks_found: numChunks,
+          total_audio_ms: totalAudioMs.toFixed(0),
+          merged_size_bytes: mergedAudio.length,
         });
-        return; // Don't process yet - wait for more audio
-      }
-      
-      // CRITICAL: Only send the required amount, keep remaining chunks in buffer
-      // This allows chunks to accumulate while we wait for transcript
-      let bytesToSend = 0;
-      let chunksToSend: Buffer[] = [];
-      let timestampsToSend: number[] = [];
-      
-      // Collect chunks until we have enough audio
-      for (let i = 0; i < buffer.chunks.length; i++) {
-        const chunk = buffer.chunks[i];
-        if (bytesToSend + chunk.length <= requiredBytes || chunksToSend.length === 0) {
-          // Include this chunk (or first chunk even if it exceeds limit)
-          chunksToSend.push(chunk);
-          timestampsToSend.push(buffer.timestamps[i]);
-          bytesToSend += chunk.length;
-        } else {
-          break; // Keep remaining chunks in buffer
-        }
-      }
-      
-      if (chunksToSend.length === 0) {
-        return;
-      }
-      
-      // Combine chunks to send
-      const audioToSend = Buffer.concat(chunksToSend);
-      const audioDurationToSend = (audioToSend.length / 2 / buffer.sampleRate) * 1000;
-      const seq = chunksToSend.length;
-      
-      // Log audio details before sending
-      console.info(`[ASRWorker] Processing audio buffer:`, {
-        interaction_id: buffer.interactionId,
+        
+        // Dump audio chunk to GCS before sending to ElevenLabs
+      dumpBufferedAudioChunk(
+          interactionId,
         seq,
-        sampleRate: buffer.sampleRate,
-        audioSize: audioToSend.length,
-        audioDurationMs: audioDurationToSend.toFixed(0),
-        chunksToSend: chunksToSend.length,
-        chunksRemaining: buffer.chunks.length - chunksToSend.length,
-        totalChunksInBuffer: buffer.chunks.length,
-        bufferAge: Date.now() - buffer.lastProcessed,
-      });
-
-      // CRITICAL: Send audio and handle transcript asynchronously
-      // Don't wait for transcript - this prevents buffer from being locked
-      // Send audio immediately, then handle transcript response when it arrives
-      this.sendToAsrProvider(audioToSend, buffer, seq).then((transcript) => {
-        // Handle transcript asynchronously (don't block buffer processing)
-        this.handleTranscriptResponse(buffer, transcript, seq);
-      }).catch((error) => {
-        console.error(`[ASRWorker] Error sending audio for ${buffer.interactionId}:`, error);
+          mergedAudio,
+        buffer.sampleRate,
+          totalAudioMs
+      ).catch((err) => {
+          // Non-critical - don't block processing
+        console.debug('[ASRWorker] Audio dump failed (non-critical)', { error: err.message });
       });
       
-      // CRITICAL: Remove sent chunks from buffer immediately (don't wait for transcript)
-      // This allows new chunks to accumulate while we wait for transcript
-      buffer.chunks = buffer.chunks.slice(chunksToSend.length);
-      buffer.timestamps = buffer.timestamps.slice(timestampsToSend.length);
-      
-      // Update last processed time
-      buffer.lastProcessed = Date.now();
-      
-      // CRITICAL: Mark initial chunk sent (for continuous streaming mode)
-      if (!buffer.hasSentInitialChunk) {
-        buffer.hasSentInitialChunk = true;
+        // Send to ElevenLabs in fire-and-forget mode (free flow)
+        // commitImmediately: true enables fire-and-forget - transcripts will arrive asynchronously via event handlers
+        const startTime = Date.now();
+        const transcript = await this.asrProvider.sendAudioChunk(mergedAudio, {
+          interactionId,
+          seq,
+          sampleRate: buffer.sampleRate,
+          commitImmediately: true, // Fire-and-forget mode - transcripts arrive asynchronously
+        });
+        const responseTimeMs = Date.now() - startTime;
+        
+        // Log results (in free flow mode, transcript will be empty as it returns immediately)
+        console.info(`[ASRWORKER] ✅ Audio sent to ElevenLabs (free flow mode)`, {
+          interaction_id: interactionId,
+          chunks_sent: numChunks,
+          audio_duration_ms: totalAudioMs.toFixed(0),
+          response_time_ms: responseTimeMs,
+          note: 'Transcripts will arrive asynchronously via event handlers and be published automatically',
+        });
+        
+        // In free flow mode, transcripts are published via the callback when they arrive
+        // No need to publish here as sendAudioChunk returns immediately with empty transcript
+        
+      } catch (error: any) {
+        console.error(`[ASRWORKER] ❌ Timer processing error for ${interactionId}:`, error);
+        this.metrics.recordError(error.message || String(error));
       }
+    }, TIMER_INTERVAL_MS);
+
+    this.bufferTimers.set(interactionId, timer);
+  }
+
+  /**
+   * Publish transcript to the transcript ingestion topic
+   */
+  private async publishTranscript(interactionId: string, transcript: any, seq: number): Promise<void> {
+    try {
+      const topic = transcriptTopic(interactionId);
+      const type = (transcript.isFinal || transcript.type === 'final') ? 'final' : 'partial';
       
+      const transcriptMsg: TranscriptMessage = {
+        interaction_id: interactionId,
+        tenant_id: 'default',
+        seq: seq,
+        type: type,
+        text: transcript.text,
+        confidence: transcript.confidence || 0.9,
+        timestamp_ms: Date.now(),
+      };
+
+      // POC CHANGE: Push to Redis List instead of publishing to stream
+      // await this.pubsub.publish(topic, transcriptMsg);
+      const listKey = `transcripts:${interactionId}`;
+      await this.redis.rpush(listKey, JSON.stringify(transcriptMsg));
+      
+      console.info(`[ASRWORKER] 📤 Pushed transcript to Redis List ${listKey}`, {
+        interaction_id: interactionId,
+        seq: seq,
+        type: type,
+        textLength: transcript.text?.length || 0
+      });
     } catch (error: any) {
-      console.error(`[ASRWorker] Error processing buffer:`, error);
-      throw error;
+      console.error(`[ASRWORKER] Error publishing transcript:`, error);
+      this.metrics.recordError(error.message || String(error));
     }
   }
   
@@ -936,54 +983,155 @@ class AsrWorker {
         return; // Skip processing if transcript is invalid
       }
       
+      // CRITICAL FIX: Filter empty transcripts before publishing
+      // Empty transcripts create noise and don't provide value
+      const hasText = transcript.text && transcript.text.trim().length > 0;
+      if (!hasText) {
+        console.debug(`[ASRWorker] ⏭️ Skipping empty transcript (not publishing)`, {
+          interaction_id: buffer.interactionId,
+          seq,
+          type: transcript.type,
+          provider: process.env.ASR_PROVIDER || 'mock',
+          note: 'Empty transcripts are filtered to reduce noise and improve performance',
+        });
+        return; // Don't publish empty transcripts
+      }
+
       // Record first partial latency
       if (transcript.type === 'partial' && !transcript.isFinal) {
         this.metrics.recordFirstPartial(buffer.interactionId);
       }
 
-      // Publish transcript message
-      const transcriptMsg: TranscriptMessage = {
-        interaction_id: buffer.interactionId,
-        tenant_id: buffer.tenantId,
-        seq,
-        type: transcript.type,
-        text: transcript.text || '',
-        confidence: transcript.confidence || 0.9,
-        timestamp_ms: Date.now(),
-      };
+      // Use the centralized publishTranscript method
+      await this.publishTranscript(buffer.interactionId, transcript, seq);
 
-      const topic = transcriptTopic(buffer.interactionId);
-      await this.pubsub.publish(topic, transcriptMsg);
-
-      // Enhanced logging to debug empty text issue
-      const textPreview = transcript.text ? transcript.text.substring(0, 50) : '(EMPTY)';
-      console.info(`[ASRWorker] Published ${transcript.type} transcript`, {
-        interaction_id: buffer.interactionId,
-        text: textPreview,
-        textLength: transcript.text?.length || 0,
-        seq,
-        provider: process.env.ASR_PROVIDER || 'mock',
-      });
-      
-      // Warn if text is empty
-      if (!transcript.text || transcript.text.trim().length === 0) {
-        console.warn(`[ASRWorker] ⚠️ WARNING: Published transcript with EMPTY text!`, {
-          interaction_id: buffer.interactionId,
-          seq,
-          type: transcript.type,
-          provider: process.env.ASR_PROVIDER || 'mock',
-        });
-      }
     } catch (error: any) {
       console.error(`[ASRWorker] Error handling transcript response:`, error);
       this.metrics.recordError(error.message || String(error));
     }
   }
 
+  /**
+   * Start background processor for queued transcripts
+   * This processes transcripts that were queued when audio wasn't being sent
+   * (e.g., during silence detection)
+   */
+  private startQueuedTranscriptProcessor(): void {
+    // Only for ElevenLabs provider
+    if (ASR_PROVIDER !== 'elevenlabs') {
+      return;
+    }
+
+    // Check if provider has processQueuedTranscripts method
+    const providerAny = this.asrProvider as any;
+    if (typeof providerAny.processQueuedTranscripts !== 'function') {
+      console.warn('[ASRWorker] Provider does not support queued transcript processing');
+      return;
+    }
+
+    console.info('[ASRWorker] 🔄 Starting background processor for queued transcripts (runs every 500ms)');
+
+    // Process queued transcripts every 500ms
+    this.queuedTranscriptProcessorInterval = setInterval(() => {
+      try {
+        const processedCount = providerAny.processQueuedTranscripts(
+          (transcript: any, interactionId: string) => {
+            // Get or create buffer for this interaction
+            let buffer = this.buffers.get(interactionId);
+            
+            // If buffer doesn't exist, create a minimal one for publishing
+            if (!buffer) {
+              // Create minimal buffer for queued transcripts
+              buffer = {
+                interactionId,
+                tenantId: 'default', // Default tenant if not available
+                chunks: [],
+                timestamps: [],
+                sequences: [],
+                sampleRate: 16000, // Default sample rate
+                lastProcessed: Date.now(),
+                lastChunkReceived: Date.now(),
+              };
+              // Don't add to buffers map - this is temporary for publishing only
+            }
+
+            // Generate a seq number based on timestamp (for queued transcripts)
+            // Use timestamp to ensure uniqueness
+            const seq = Math.floor(Date.now() / 1000); // Use seconds as seq for queued transcripts
+
+            // Publish transcript using existing handler
+            this.handleTranscriptResponse(buffer, transcript, seq).catch((error: any) => {
+              console.error(`[ASRWorker] Error publishing queued transcript for ${interactionId}:`, error);
+            });
+          }
+        );
+
+        if (processedCount > 0) {
+          console.debug(`[ASRWorker] Processed ${processedCount} queued transcript(s) from background processor`);
+        }
+      } catch (error: any) {
+        console.error('[ASRWorker] Error in queued transcript processor:', error);
+      }
+    }, 500); // Run every 500ms as specified in plan
+  }
+
   async stop(): Promise<void> {
+    console.info('[ASRWorker] 🛑 Stopping ASR Worker service...');
+    
+    // Stop background processor
+    if (this.queuedTranscriptProcessorInterval) {
+      clearInterval(this.queuedTranscriptProcessorInterval);
+      this.queuedTranscriptProcessorInterval = null;
+      console.info('[ASRWorker] ✅ Stopped queued transcript processor');
+    }
+
+    // Flush remaining queued transcripts before stopping (ElevenLabs only)
+    if (ASR_PROVIDER === 'elevenlabs') {
+      const providerAny = this.asrProvider as any;
+      if (typeof providerAny.processQueuedTranscripts === 'function') {
+        try {
+          const flushedCount = providerAny.processQueuedTranscripts(
+            (transcript: any, interactionId: string) => {
+              let buffer = this.buffers.get(interactionId);
+              if (!buffer) {
+                buffer = {
+                  interactionId,
+                  tenantId: 'default',
+                  chunks: [],
+                  timestamps: [],
+                  sequences: [],
+                  sampleRate: 16000,
+                  lastProcessed: Date.now(),
+                  lastChunkReceived: Date.now(),
+                };
+              }
+              const seq = Math.floor(Date.now() / 1000);
+              this.handleTranscriptResponse(buffer, transcript, seq).catch((error: any) => {
+                console.error(`[ASRWorker] Error flushing queued transcript for ${interactionId}:`, error);
+              });
+            }
+          );
+          if (flushedCount > 0) {
+            console.info(`[ASRWorker] Flushed ${flushedCount} queued transcript(s) before shutdown`);
+          }
+        } catch (error: any) {
+          console.error('[ASRWorker] Error flushing queued transcripts:', error);
+        }
+      }
+    }
+    
     // Unsubscribe from all topics
     for (const handle of this.subscriptions) {
       await handle.unsubscribe();
+    }
+
+    // Clean up buffer manager, connection health monitor, and circuit breaker
+    try {
+      this.bufferManager.destroy();
+      this.connectionHealthMonitor.destroy();
+      console.info('[ASRWorker] ✅ Cleaned up buffer manager and connection health monitor');
+    } catch (error: any) {
+      console.error('[ASRWorker] Error cleaning up managers:', error);
     }
 
     // Close ASR provider
@@ -1023,4 +1171,5 @@ process.on('SIGINT', async () => {
   await worker.stop();
   process.exit(0);
 });
+
 

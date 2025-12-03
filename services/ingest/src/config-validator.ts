@@ -90,6 +90,22 @@ export function validateConfig(): ValidationResult {
     errors.push('SSL_CERT_PATH is set but SSL_KEY_PATH is missing');
   }
 
+  // Exotel Bridge feature flag validation
+  const exoBridgeEnabled = process.env.EXO_BRIDGE_ENABLED === 'true';
+  if (exoBridgeEnabled) {
+    const exoMaxBufferMs = process.env.EXO_MAX_BUFFER_MS || '500';
+    const exoMaxBufferMsNum = parseInt(exoMaxBufferMs, 10);
+    if (isNaN(exoMaxBufferMsNum) || exoMaxBufferMsNum < 100 || exoMaxBufferMsNum > 10000) {
+      errors.push(`Invalid EXO_MAX_BUFFER_MS: ${exoMaxBufferMs}. Must be between 100 and 10000.`);
+    }
+
+    const exoIdleCloseS = process.env.EXO_IDLE_CLOSE_S || '10';
+    const exoIdleCloseSNum = parseInt(exoIdleCloseS, 10);
+    if (isNaN(exoIdleCloseSNum) || exoIdleCloseSNum < 1 || exoIdleCloseSNum > 300) {
+      errors.push(`Invalid EXO_IDLE_CLOSE_S: ${exoIdleCloseS}. Must be between 1 and 300.`);
+    }
+  }
+
   // Production environment warnings
   if (process.env.NODE_ENV === 'production') {
     if (!sslKeyPath && !sslCertPath) {

@@ -7,6 +7,7 @@
 
 import { createPubSubAdapterFromEnv } from './pubsub';
 import { transcriptTopic, parseTopic } from './pubsub/topics';
+import { ingestTranscriptCore } from './ingest-transcript-core';
 
 // Load environment variables
 require('dotenv').config({ path: require('path').join(__dirname, '../.env.local') });
@@ -29,29 +30,77 @@ interface ActiveSubscription {
   transcriptCount: number;
 }
 
+interface FailedTranscript {
+  interaction_id: string;
+  tenant_id: string;
+  seq: number;
+  type: 'partial' | 'final';
+  text: string;
+  confidence?: number;
+  timestamp_ms: number;
+  callId: string;
+  error: string;
+  failedAt: number;
+  retryCount: number;
+}
+
 class TranscriptConsumer {
   private pubsub: ReturnType<typeof createPubSubAdapterFromEnv>;
   private subscriptions: Map<string, ActiveSubscription> = new Map();
   private isRunning: boolean = false;
   private baseUrl: string;
   private nextJsApiUrl: string;
+  private deadLetterQueue: FailedTranscript[] = []; // In-memory dead-letter queue
+  private maxDeadLetterSize: number = 50; // Max failed transcripts to keep in memory (reduced from 500 for 512MB instances - CRITICAL MEMORY FIX)
+  private retryInterval: NodeJS.Timeout | null = null;
+  
+  // CRITICAL FIX: Track discovery failures for backoff
+  private discoveryFailureCount: number = 0;
+  private lastDiscoveryFailureTime: number = 0;
+  private readonly DISCOVERY_BACKOFF_MS = 30000; // 30 seconds backoff after failures
+  
+  // CRITICAL FIX: Throttle manual discovery triggers to prevent too-frequent calls
+  private lastManualDiscoveryTime: number = 0;
+  private readonly MIN_MANUAL_DISCOVERY_INTERVAL_MS = 2000; // 2 seconds minimum between manual triggers
+  
+  // CRITICAL MEMORY FIX: Rate-limit subscription logging to prevent memory exhaustion
+  private lastSubscriptionLogTime: number = 0;
+  private subscriptionsLoggedSinceLastReport: number = 0;
+  private readonly SUBSCRIPTION_LOG_INTERVAL_MS = 30000; // Log subscription activity every 30 seconds max
 
   constructor() {
     this.pubsub = createPubSubAdapterFromEnv();
     
     // Determine base URL for internal API calls
-    // In production (Render), use the service's own URL
-    // In development, use localhost
+    // CRITICAL FIX: In production (Render), must use the service's own URL
+    // Priority order:
+    // 1. RENDER_SERVICE_URL (Render-specific, most reliable)
+    // 2. RENDER_EXTERNAL_URL (Render external URL)
+    // 3. NEXT_PUBLIC_BASE_URL (explicitly set)
+    // 4. VERCEL_URL (Vercel deployment)
+    // 5. Localhost (development only)
     const port = process.env.PORT || process.env.NEXT_PUBLIC_PORT || '3000';
     
-    // For internal calls, prefer localhost or service URL
-    if (process.env.NEXT_PUBLIC_BASE_URL) {
+    if (process.env.RENDER_SERVICE_URL) {
+      // Render service URL (e.g., https://frontend-8jdd.onrender.com)
+      this.baseUrl = process.env.RENDER_SERVICE_URL;
+      console.info('[TranscriptConsumer] Using RENDER_SERVICE_URL:', this.baseUrl);
+    } else if (process.env.RENDER_EXTERNAL_URL) {
+      // Render external URL (fallback)
+      this.baseUrl = process.env.RENDER_EXTERNAL_URL;
+      console.info('[TranscriptConsumer] Using RENDER_EXTERNAL_URL:', this.baseUrl);
+    } else if (process.env.NEXT_PUBLIC_BASE_URL) {
+      // Explicitly configured base URL
       this.baseUrl = process.env.NEXT_PUBLIC_BASE_URL;
+      console.info('[TranscriptConsumer] Using NEXT_PUBLIC_BASE_URL:', this.baseUrl);
     } else if (process.env.VERCEL_URL) {
+      // Vercel deployment
       this.baseUrl = `https://${process.env.VERCEL_URL}`;
+      console.info('[TranscriptConsumer] Using VERCEL_URL:', this.baseUrl);
     } else {
-      // Default to localhost for development
+      // Development: use localhost
       this.baseUrl = `http://localhost:${port}`;
+      console.warn('[TranscriptConsumer] ⚠️ Using localhost (development mode). Set RENDER_SERVICE_URL for production!');
     }
     
     this.nextJsApiUrl = `${this.baseUrl}/api/calls/ingest-transcript`;
@@ -60,7 +109,8 @@ class TranscriptConsumer {
       baseUrl: this.baseUrl,
       apiUrl: this.nextJsApiUrl,
       pubsubAdapter: process.env.PUBSUB_ADAPTER || 'redis_streams',
-      port,
+      environment: process.env.NODE_ENV || 'development',
+      note: 'Transcripts will be forwarded to this API URL',
     });
   }
 
@@ -70,12 +120,12 @@ class TranscriptConsumer {
    */
   async start(): Promise<void> {
     if (this.isRunning) {
-      console.warn('[TranscriptConsumer] Already running');
+      console.warn('[TranscriptConsumer] Already running, skipping start');
       return;
     }
 
-    this.isRunning = true;
     console.info('[TranscriptConsumer] Starting transcript consumer...');
+    this.isRunning = true;
 
     try {
       // Subscribe to all transcript topics
@@ -90,9 +140,18 @@ class TranscriptConsumer {
       // 3. Or use a single consumer that reads from multiple streams
 
       // Start a background worker that periodically checks for new transcript streams
-      this.startStreamDiscovery();
+      // Note: startStreamDiscovery is async but we don't await it - it runs in background
+      // Errors in discovery are caught internally and don't affect isRunning status
+      this.startStreamDiscovery().catch((error: any) => {
+        // Log error but don't stop the consumer - discovery is best-effort
+        console.error('[TranscriptConsumer] Stream discovery failed during start:', error);
+        // Don't set isRunning = false - consumer can still work with manual subscriptions
+      });
 
-      console.info('[TranscriptConsumer] ✅ Transcript consumer started');
+      console.info('[TranscriptConsumer] ✅ Transcript consumer started', {
+        isRunning: this.isRunning,
+        hasPubsub: !!this.pubsub,
+      });
     } catch (error: any) {
       console.error('[TranscriptConsumer] Failed to start:', error);
       this.isRunning = false;
@@ -107,6 +166,37 @@ class TranscriptConsumer {
     if (this.subscriptions.has(interactionId)) {
       console.debug('[TranscriptConsumer] Already subscribed to', { interactionId });
       return;
+    }
+
+    // CRITICAL FIX: Safety limit to prevent memory issues and 502 errors
+    // If we have too many subscriptions, clean up old ones first
+    // Reduced from 50 to 30 for 512MB Render instances
+    const MAX_SUBSCRIPTIONS = 30; // Limit to 30 active subscriptions
+    if (this.subscriptions.size >= MAX_SUBSCRIPTIONS) {
+      console.warn('[TranscriptConsumer] ⚠️ Subscription limit reached, cleaning up old subscriptions', {
+        currentCount: this.subscriptions.size,
+        maxAllowed: MAX_SUBSCRIPTIONS,
+        newInteractionId: interactionId,
+      });
+      
+      // Try to clean up ended calls first
+      await this.cleanupEndedCallSubscriptions();
+      
+      // If still at limit, remove oldest subscriptions
+      if (this.subscriptions.size >= MAX_SUBSCRIPTIONS) {
+        const subscriptionsArray = Array.from(this.subscriptions.entries())
+          .sort((a, b) => a[1].createdAt.getTime() - b[1].createdAt.getTime()); // Oldest first
+        
+        const toRemove = subscriptionsArray.slice(0, 10); // Remove 10 oldest
+        for (const [id] of toRemove) {
+          try {
+            await this.unsubscribeFromInteraction(id);
+            console.info('[TranscriptConsumer] 🧹 Removed oldest subscription to make room', { interactionId: id });
+          } catch (error: any) {
+            console.warn('[TranscriptConsumer] Failed to remove old subscription', { interactionId: id, error: error.message });
+          }
+        }
+      }
     }
 
     const topic = transcriptTopic(interactionId);
@@ -125,7 +215,23 @@ class TranscriptConsumer {
         transcriptCount: 0,
       });
 
-      console.info('[TranscriptConsumer] ✅ Subscribed to transcript topic', { interactionId, topic });
+      // CRITICAL FIX: Also start reading from Redis List for this interaction
+      // ASR worker writes to Redis Lists (transcripts:${interactionId}), not Streams
+      // This ensures KB articles are surfaced even when using Lists
+      this.startRedisListReader(interactionId);
+
+      // CRITICAL MEMORY FIX: Rate-limit subscription logging
+      const now = Date.now();
+      this.subscriptionsLoggedSinceLastReport++;
+      if (now - this.lastSubscriptionLogTime >= this.SUBSCRIPTION_LOG_INTERVAL_MS) {
+        console.info('[TranscriptConsumer] ✅ Subscription activity (last 30s)', { 
+          newSubscriptions: this.subscriptionsLoggedSinceLastReport,
+          totalSubscriptions: this.subscriptions.size,
+          note: 'Logging rate-limited to prevent memory exhaustion',
+        });
+        this.lastSubscriptionLogTime = now;
+        this.subscriptionsLoggedSinceLastReport = 0;
+      }
     } catch (error: any) {
       console.error('[TranscriptConsumer] Failed to subscribe to transcript topic', {
         interactionId,
@@ -133,6 +239,110 @@ class TranscriptConsumer {
         error: error.message || String(error),
       });
       throw error;
+    }
+  }
+
+  /**
+   * CRITICAL FIX: Start reading from Redis List for this interaction
+   * ASR worker writes transcripts to Redis Lists (transcripts:${interactionId})
+   * This ensures KB articles are surfaced even when using Lists instead of Streams
+   */
+  private listReaders: Map<string, NodeJS.Timeout> = new Map();
+  private processedListSeqs: Map<string, Set<number>> = new Map(); // Track processed seqs to avoid duplicates
+
+  private startRedisListReader(interactionId: string): void {
+    // Clear existing reader if any
+    const existingReader = this.listReaders.get(interactionId);
+    if (existingReader) {
+      clearInterval(existingReader);
+    }
+
+    // Initialize processed seqs tracker
+    if (!this.processedListSeqs.has(interactionId)) {
+      this.processedListSeqs.set(interactionId, new Set());
+    }
+
+    console.info('[TranscriptConsumer] Starting Redis List reader', { interactionId });
+
+    // Read from Redis List every 2 seconds
+    const listKey = `transcripts:${interactionId}`;
+    const reader = setInterval(async () => {
+      try {
+        // Get Redis client from pubsub adapter
+        const redisAdapter = this.pubsub as any;
+        if (!redisAdapter || !redisAdapter.redis) {
+          console.warn('[TranscriptConsumer] Redis not available for List reader', { interactionId });
+          return;
+        }
+
+        const redis = redisAdapter.redis;
+        if (redis.status !== 'ready' && redis.status !== 'connecting') {
+          console.warn('[TranscriptConsumer] Redis not ready for List reader', { 
+            interactionId,
+            status: redis.status 
+          });
+          return;
+        }
+
+        // Read all items from the list
+        const rawTranscripts = await redis.lrange(listKey, 0, -1);
+        
+        if (!rawTranscripts || rawTranscripts.length === 0) {
+          return; // No transcripts yet
+        }
+
+        // Process each transcript
+        for (const rawItem of rawTranscripts) {
+          try {
+            const msg: TranscriptMessage = JSON.parse(rawItem);
+            
+            // Skip if already processed (deduplication)
+            const processedSeqs = this.processedListSeqs.get(interactionId);
+            if (processedSeqs && processedSeqs.has(msg.seq)) {
+              continue; // Already processed
+            }
+
+            // Process the transcript
+            await this.handleTranscriptMessage(msg, interactionId);
+
+            // Mark as processed
+            if (processedSeqs) {
+              processedSeqs.add(msg.seq);
+            }
+
+            console.info('[TranscriptConsumer] ✅ Processed transcript from Redis List', {
+              interactionId,
+              seq: msg.seq,
+              textLength: msg.text?.length || 0,
+            });
+          } catch (parseError: any) {
+            console.error('[TranscriptConsumer] Error parsing transcript from List', {
+              interactionId,
+              error: parseError.message,
+            });
+          }
+        }
+      } catch (error: any) {
+        console.error('[TranscriptConsumer] Error reading from Redis List', {
+          interactionId,
+          error: error.message,
+        });
+      }
+    }, 2000); // Check every 2 seconds
+
+    this.listReaders.set(interactionId, reader);
+  }
+
+  /**
+   * Stop reading from Redis List for this interaction
+   */
+  private stopRedisListReader(interactionId: string): void {
+    const reader = this.listReaders.get(interactionId);
+    if (reader) {
+      clearInterval(reader);
+      this.listReaders.delete(interactionId);
+      this.processedListSeqs.delete(interactionId);
+      console.info('[TranscriptConsumer] Stopped Redis List reader', { interactionId });
     }
   }
 
@@ -166,56 +376,265 @@ class TranscriptConsumer {
       textPreview: msg.text?.substring(0, 50) || '',
     });
 
-    // Map interaction_id to callId
-    // For now, use interaction_id as callId (they should match)
-    // In production, you might have a mapping table
-    const callId = interactionId;
+    // Fix 1.1: Map interaction_id to callId with validation
+    // CRITICAL: Ensure callId = interactionId for consistency
+    // This must match the callId used in Exotel start event (callSid)
+    let callId = interactionId;
+    
+    // Fix 1.1: Validate callId is not empty
+    if (!callId || (typeof callId === 'string' && callId.trim().length === 0)) {
+      console.error('[TranscriptConsumer] ❌ Invalid interactionId/callId detected!', {
+        interactionId,
+        seq: msg.seq,
+        note: 'interactionId cannot be null, undefined, or empty. Skipping transcript.',
+      });
+      return; // Skip processing if callId is invalid
+    }
+    
+    // Fix 1.1: Ensure callId is trimmed and consistent
+    callId = String(callId).trim();
+    
+    // Log callId mapping for debugging
+    if (callId !== interactionId) {
+      console.warn('[TranscriptConsumer] ⚠️ CallId mismatch detected!', {
+        interactionId,
+        callId,
+        note: 'callId should equal interactionId for proper SSE matching. Using interactionId.',
+      });
+      callId = String(interactionId).trim(); // Force consistency
+    }
 
-    // Forward to ingest-transcript API
-    // This will trigger intent detection and SSE broadcast
+    // Forward to ingest-transcript core function
+    // CRITICAL FIX: Use direct function call instead of HTTP fetch to avoid network issues
+    // This is more efficient and reliable when calling from within the same Next.js process
+    const text = msg.text || ''; // Type guard - we know it exists from check above
+    
     try {
-      const response = await fetch(this.nextJsApiUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-tenant-id': msg.tenant_id || 'default',
-        },
-        body: JSON.stringify({
-          callId,
-          seq: msg.seq,
-          ts: new Date(msg.timestamp_ms).toISOString(),
-          text: msg.text,
-        }),
+      // Task 1.3: Enhanced logging for callId flow tracing
+      console.log('[DEBUG] CallId flow trace:', {
+        step: 'transcript-consumer',
+        redisInteractionId: interactionId,
+        extractedCallId: callId,
+        match: interactionId === callId,
+        seq: msg.seq,
+        textLength: text.length,
+        timestamp: new Date().toISOString(),
+      });
+      
+      console.debug('[TranscriptConsumer] Processing transcript via direct function call', {
+        interactionId,
+        callId,
+        seq: msg.seq,
+        textLength: text.length,
+        textPreview: text.substring(0, 50),
+        method: 'direct_function_call',
+        note: 'Using ingestTranscriptCore() directly instead of HTTP fetch for better reliability',
       });
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        console.error('[TranscriptConsumer] Failed to forward transcript', {
-          interaction_id: interactionId,
-          callId,
-          seq: msg.seq,
-          status: response.status,
-          error: errorText,
-        });
-      } else {
-        const result = await response.json();
-        console.info('[TranscriptConsumer] ✅ Forwarded transcript successfully', {
+      // Call the core function directly (no HTTP overhead, more reliable)
+      // Task 1.3: Log callId being passed to core function
+      console.log('[DEBUG] Passing callId to ingestTranscriptCore:', {
+        callId,
+        callIdType: typeof callId,
+        isEmpty: !callId || callId.trim().length === 0,
+        seq: msg.seq,
+      });
+      
+      const result = await ingestTranscriptCore({
+        callId,
+        seq: msg.seq,
+        ts: new Date(msg.timestamp_ms).toISOString(),
+        text: text,
+        tenantId: msg.tenant_id || 'default',
+      });
+
+      if (result.ok) {
+        console.info('[TranscriptConsumer] ✅ Processed transcript successfully', {
           interaction_id: interactionId,
           callId,
           seq: msg.seq,
           intent: result.intent,
           articlesCount: result.articles?.length || 0,
+          method: 'direct_function_call',
+        });
+      } else {
+        console.error('[TranscriptConsumer] ❌ Failed to process transcript', {
+          interaction_id: interactionId,
+          callId,
+          seq: msg.seq,
+          error: result.error,
+          method: 'direct_function_call',
+        });
+        
+        // Add to dead-letter queue for retry
+        this.addToDeadLetterQueue({
+          interaction_id: interactionId,
+          tenant_id: msg.tenant_id,
+          seq: msg.seq,
+          type: msg.type,
+          text: text,
+          confidence: msg.confidence,
+          timestamp_ms: msg.timestamp_ms,
+          callId,
+          error: result.error || 'Unknown error',
+          failedAt: Date.now(),
+          retryCount: 0,
         });
       }
     } catch (error: any) {
-      console.error('[TranscriptConsumer] Error forwarding transcript', {
+      console.error('[TranscriptConsumer] ❌ Error processing transcript', {
         interaction_id: interactionId,
         callId,
         seq: msg.seq,
         error: error.message || String(error),
+        errorName: error.name,
+        method: 'direct_function_call',
       });
-      // Don't throw - continue processing other transcripts
+      
+      // Add to dead-letter queue for retry
+      this.addToDeadLetterQueue({
+        interaction_id: interactionId,
+        tenant_id: msg.tenant_id,
+        seq: msg.seq,
+        type: msg.type,
+        text: text,
+        confidence: msg.confidence,
+        timestamp_ms: msg.timestamp_ms,
+        callId,
+        error: error.message || String(error),
+        failedAt: Date.now(),
+        retryCount: 0,
+      });
     }
+    // Don't throw - continue processing other transcripts
+  }
+
+  /**
+   * P2 FIX: Add failed transcript to dead-letter queue
+   */
+  private addToDeadLetterQueue(failed: FailedTranscript): void {
+    // Prevent queue from growing too large
+    if (this.deadLetterQueue.length >= this.maxDeadLetterSize) {
+      // Remove oldest entries (FIFO)
+      const removed = this.deadLetterQueue.splice(0, 10);
+      console.warn('[TranscriptConsumer] Dead-letter queue full, removed oldest entries', {
+        removedCount: removed.length,
+        queueSize: this.deadLetterQueue.length,
+      });
+    }
+    
+    this.deadLetterQueue.push(failed);
+    console.warn('[TranscriptConsumer] Added to dead-letter queue', {
+      interaction_id: failed.interaction_id,
+      seq: failed.seq,
+      queueSize: this.deadLetterQueue.length,
+      error: failed.error,
+    });
+    
+    // Start retry processor if not already running
+    if (!this.retryInterval) {
+      this.startDeadLetterRetryProcessor();
+    }
+  }
+
+  /**
+   * P2 FIX: Retry failed transcripts from dead-letter queue
+   */
+  private startDeadLetterRetryProcessor(): void {
+    if (this.retryInterval) {
+      return; // Already running
+    }
+    
+    console.info('[TranscriptConsumer] Starting dead-letter queue retry processor');
+    
+    // Retry every 30 seconds
+    this.retryInterval = setInterval(async () => {
+      if (this.deadLetterQueue.length === 0) {
+        // Queue empty, stop retry processor
+        if (this.retryInterval) {
+          clearInterval(this.retryInterval);
+          this.retryInterval = null;
+        }
+        return;
+      }
+      
+      // Process up to 10 failed transcripts per retry cycle
+      const toRetry = this.deadLetterQueue.splice(0, 10);
+      console.info('[TranscriptConsumer] Retrying failed transcripts', {
+        count: toRetry.length,
+        remainingInQueue: this.deadLetterQueue.length,
+      });
+      
+      for (const failed of toRetry) {
+        // CRITICAL FIX: Remove permanently failed items instead of keeping them in memory
+        // Only retry if retry count is below threshold (max 5 retries total)
+        if (failed.retryCount >= 5) {
+          console.error('[TranscriptConsumer] Max retries exceeded, removing permanently failed transcript', {
+            interaction_id: failed.interaction_id,
+            seq: failed.seq,
+            retryCount: failed.retryCount,
+            note: 'Removed from memory to prevent dead-letter queue growth',
+          });
+          // CRITICAL: Don't add back to queue - remove permanently to prevent memory leak
+          continue; // Skip this one, it's permanently failed
+        }
+        
+        try {
+          // Try to process again using direct function call
+          const result = await ingestTranscriptCore({
+            callId: failed.callId,
+            seq: failed.seq,
+            ts: new Date(failed.timestamp_ms).toISOString(),
+            text: failed.text,
+            tenantId: failed.tenant_id || 'default',
+          });
+          
+          if (result.ok) {
+            console.info('[TranscriptConsumer] ✅ Successfully retried dead-letter transcript', {
+              interaction_id: failed.interaction_id,
+              seq: failed.seq,
+              intent: result.intent,
+              articlesCount: result.articles?.length || 0,
+            });
+            // Success - don't add back to queue
+          } else {
+            // Still failing - add back with incremented retry count
+            failed.retryCount++;
+            this.deadLetterQueue.push(failed);
+            console.warn('[TranscriptConsumer] Dead-letter retry failed, will retry again', {
+              interaction_id: failed.interaction_id,
+              seq: failed.seq,
+              retryCount: failed.retryCount,
+              error: result.error,
+            });
+          }
+        } catch (error: any) {
+          // Error - add back with incremented retry count
+          failed.retryCount++;
+          this.deadLetterQueue.push(failed);
+          console.warn('[TranscriptConsumer] Dead-letter retry error, will retry again', {
+            interaction_id: failed.interaction_id,
+            seq: failed.seq,
+            retryCount: failed.retryCount,
+            error: error.message || String(error),
+          });
+        }
+      }
+    }, 30000); // Retry every 30 seconds
+  }
+
+  /**
+   * P2 FIX: Get dead-letter queue status
+   */
+  getDeadLetterQueueStatus(): { size: number; oldestFailedAt: number | null } {
+    const oldest = this.deadLetterQueue.length > 0 
+      ? Math.min(...this.deadLetterQueue.map(f => f.failedAt))
+      : null;
+    
+    return {
+      size: this.deadLetterQueue.length,
+      oldestFailedAt: oldest,
+    };
   }
 
   /**
@@ -228,11 +647,14 @@ class TranscriptConsumer {
   private discoveryInterval: NodeJS.Timeout | null = null;
 
   private async startStreamDiscovery(): Promise<void> {
-    // Run discovery immediately
-    await this.discoverAndSubscribeToNewStreams();
-
-    // Start periodic discovery (every 30 seconds to reduce log spam)
-    this.discoveryInterval = setInterval(async () => {
+    // DISABLED: Blind auto-discovery causes memory leaks by subscribing to old/test calls
+    // New calls are auto-subscribed when first transcript arrives (see ingestTranscriptCore)
+    // This prevents scanning Redis for old streams while still detecting new calls automatically
+    console.info('[TranscriptConsumer] 🚫 Auto-discovery DISABLED - using smart subscription on first transcript');
+    console.info('[TranscriptConsumer] ✅ New calls will be auto-subscribed when first transcript arrives');
+    
+    // Still run periodic cleanup for ended calls
+    const runCleanup = async () => {
       if (!this.isRunning) {
         if (this.discoveryInterval) {
           clearInterval(this.discoveryInterval);
@@ -242,13 +664,103 @@ class TranscriptConsumer {
       }
 
       try {
-        await this.discoverAndSubscribeToNewStreams();
+        await this.cleanupEndedCallSubscriptions();
+        
+        // Run cleanup every 30 seconds (less frequent than discovery)
+        if (this.discoveryInterval) {
+          clearInterval(this.discoveryInterval);
+        }
+        this.discoveryInterval = setTimeout(runCleanup, 30000);
       } catch (error: any) {
-        console.error('[TranscriptConsumer] Stream discovery error:', error);
+        console.warn('[TranscriptConsumer] Cleanup error:', error.message);
+        
+        if (this.discoveryInterval) {
+          clearInterval(this.discoveryInterval);
+        }
+        this.discoveryInterval = setTimeout(runCleanup, 60000); // Retry in 1 minute
       }
-    }, 30000); // Changed from 5000ms (5s) to 30000ms (30s) to reduce log spam
+    };
+    
+    // Start cleanup loop
+    this.discoveryInterval = setTimeout(runCleanup, 30000); // First run after 30 seconds
+  }
 
-    console.info('[TranscriptConsumer] Stream discovery started (auto-subscribe mode)');
+  /**
+   * CRITICAL FIX: Clean up subscriptions for ended calls
+   * This prevents memory leaks and 502 errors from too many active subscriptions
+   */
+  private async cleanupEndedCallSubscriptions(): Promise<void> {
+    try {
+      // Get call registry to check which calls are ended
+      const { getCallRegistry } = await import('@/lib/call-registry');
+      const callRegistry = getCallRegistry();
+      
+      // CRITICAL FIX: Check if call registry is available before using
+      const health = await callRegistry.checkHealth();
+      if (!health.accessible) {
+        // Registry not available - skip cleanup silently
+        return;
+      }
+      
+      // Get all active calls (only active ones)
+      const activeCalls = await callRegistry.getActiveCalls(1000); // Get up to 1000 to check all
+      const activeCallIds = new Set(activeCalls.map(call => call.interactionId));
+      
+      // Find subscriptions for calls that are no longer active
+      const subscriptionsToCleanup: string[] = [];
+      for (const [interactionId, subscription] of this.subscriptions.entries()) {
+        // Check if call is ended (not in active calls list)
+        if (!activeCallIds.has(interactionId)) {
+          // CRITICAL MEMORY FIX: Reduce age threshold from 1 hour to 10 minutes for faster cleanup
+          const ageMs = Date.now() - subscription.createdAt.getTime();
+          const tenMinutesMs = 10 * 60 * 1000; // 10 minutes (reduced from 1 hour)
+          
+          if (ageMs > tenMinutesMs) {
+            subscriptionsToCleanup.push(interactionId);
+          }
+        }
+      }
+      
+      // Unsubscribe from ended/old calls
+      if (subscriptionsToCleanup.length > 0) {
+        console.info('[TranscriptConsumer] 🧹 Cleaning up subscriptions for ended/old calls', {
+          count: subscriptionsToCleanup.length,
+          interactionIds: subscriptionsToCleanup.slice(0, 5), // Log first 5
+        });
+        
+        for (const interactionId of subscriptionsToCleanup) {
+          try {
+            await this.unsubscribeFromInteraction(interactionId);
+          } catch (error: any) {
+            console.warn('[TranscriptConsumer] Failed to cleanup subscription', {
+              interactionId,
+              error: error.message,
+            });
+          }
+        }
+        
+        console.info('[TranscriptConsumer] ✅ Cleaned up subscriptions', {
+          count: subscriptionsToCleanup.length,
+          remainingSubscriptions: this.subscriptions.size,
+        });
+      }
+    } catch (error: any) {
+      // CRITICAL FIX: Don't log connection errors as warnings
+      const isConnectionError = 
+        error.message?.includes('Connection is closed') ||
+        error.message?.includes('Redis client not initialized') ||
+        error.message?.includes('not accessible');
+      
+      if (isConnectionError) {
+        // Silently skip cleanup when Redis is unavailable
+        return;
+      }
+      
+      // Only log non-connection errors
+      console.warn('[TranscriptConsumer] Cleanup error (non-critical):', {
+        error: error.message || String(error),
+      });
+    }
   }
 
   /**
@@ -263,16 +775,42 @@ class TranscriptConsumer {
       // Access Redis client from adapter
       const redisAdapter = this.pubsub as any;
       
-      // Check if we have direct Redis access
-      if (redisAdapter.redis) {
-        const redis = redisAdapter.redis;
-        
-        // Use SCAN instead of KEYS for better performance (non-blocking)
-        let cursor = '0';
-        const streamPattern = 'transcript.*';
-        const discoveredStreams = new Set<string>();
-        let scanCount = 0;
-        
+      // CRITICAL FIX: Check if Redis is actually connected before using it
+      if (!redisAdapter.redis) {
+        // Redis not initialized - skip discovery
+        this.discoveryFailureCount++;
+        this.lastDiscoveryFailureTime = Date.now();
+        return;
+      }
+      
+      const redis = redisAdapter.redis;
+      
+      // CRITICAL FIX: Check connection status before using
+      if (redis.status !== 'ready' && redis.status !== 'connecting') {
+        // Connection is closed or in error state - skip discovery
+        this.discoveryFailureCount++;
+        this.lastDiscoveryFailureTime = Date.now();
+        return; // Skip this discovery cycle
+      }
+      
+      // CRITICAL FIX: Check if we're in backoff period
+      if (this.discoveryFailureCount > 0) {
+        const timeSinceLastFailure = Date.now() - this.lastDiscoveryFailureTime;
+        if (timeSinceLastFailure < this.DISCOVERY_BACKOFF_MS) {
+          // Still in backoff - skip discovery
+          return;
+        }
+        // Backoff expired - reset counter
+        this.discoveryFailureCount = 0;
+      }
+      
+      // Use SCAN instead of KEYS for better performance (non-blocking)
+      let cursor = '0';
+      const streamPattern = 'transcript.*';
+      const discoveredStreams = new Set<string>();
+      let scanCount = 0;
+      
+      try {
         do {
           const result = await redis.scan(
             cursor,
@@ -305,6 +843,9 @@ class TranscriptConsumer {
           }
         } while (cursor !== '0'); // Redis SCAN always returns string cursor
         
+        // Success - reset failure count
+        this.discoveryFailureCount = 0;
+        
         // Subscribe to discovered streams
         let newSubscriptions = 0;
         for (const key of discoveredStreams) {
@@ -314,10 +855,7 @@ class TranscriptConsumer {
             
             if (!this.subscriptions.has(interactionId)) {
               try {
-                console.info('[TranscriptConsumer] Auto-discovered transcript stream', { 
-                  interactionId,
-                  stream: key,
-                });
+                // CRITICAL MEMORY FIX: Don't log every auto-discovery (already logged in subscription activity summary)
                 await this.subscribeToInteraction(interactionId);
                 newSubscriptions++;
               } catch (subError: any) {
@@ -336,23 +874,36 @@ class TranscriptConsumer {
             totalSubscriptions: this.subscriptions.size,
           });
         }
-      } else {
-        // Fallback: Manual subscription mode
-        // Components should call subscribeToInteraction() when a call starts
-        // This is expected in some configurations where Redis client is not directly accessible
-        if (this.subscriptions.size === 0) {
-          console.debug('[TranscriptConsumer] Redis client not accessible, using manual subscription mode');
-          console.debug('[TranscriptConsumer] Use POST /api/transcripts/subscribe with interactionId to subscribe');
-        }
+      } catch (scanError: any) {
+        // Redis operation failed - increment failure count
+        this.discoveryFailureCount++;
+        this.lastDiscoveryFailureTime = Date.now();
+        throw scanError; // Re-throw to be caught by outer catch
       }
     } catch (error: any) {
-      // Don't log as error - discovery is best-effort and may fail in some configurations
-      // Only log if it's a critical error
-      if (error.message && !error.message.includes('not accessible')) {
-        console.warn('[TranscriptConsumer] Stream discovery error', {
-          error: error.message || String(error),
-        });
+      // CRITICAL FIX: Don't spam errors for connection issues
+      const isConnectionError = 
+        error.message?.includes('Connection is closed') ||
+        error.message?.includes('Redis client not initialized') ||
+        error.message?.includes('not accessible');
+      
+      if (isConnectionError) {
+        // Connection errors are expected when Redis is down - log as debug/warn
+        if (this.discoveryFailureCount <= 3) {
+          // Only log first few failures, then silence
+          console.debug('[TranscriptConsumer] Stream discovery skipped (Redis unavailable)', {
+            failureCount: this.discoveryFailureCount,
+            backoff: this.discoveryFailureCount > 0 ? `${this.DISCOVERY_BACKOFF_MS / 1000}s` : 'none',
+          });
+        }
+        // Don't re-throw - just skip this discovery cycle
+        return;
       }
+      
+      // Only log non-connection errors
+      console.warn('[TranscriptConsumer] Stream discovery error', {
+        error: error.message || String(error),
+      });
     }
   }
 
@@ -362,12 +913,18 @@ class TranscriptConsumer {
   async unsubscribeFromInteraction(interactionId: string): Promise<void> {
     const subscription = this.subscriptions.get(interactionId);
     if (!subscription) {
+      // Still stop List reader even if no Stream subscription
+      this.stopRedisListReader(interactionId);
       return;
     }
 
     try {
       await subscription.handle.unsubscribe();
       this.subscriptions.delete(interactionId);
+      
+      // CRITICAL: Also stop Redis List reader
+      this.stopRedisListReader(interactionId);
+      
       console.info('[TranscriptConsumer] Unsubscribed from transcript topic', {
         interactionId,
         transcriptCount: subscription.transcriptCount,
@@ -377,6 +934,8 @@ class TranscriptConsumer {
         interactionId,
         error: error.message || String(error),
       });
+      // Still stop List reader on error
+      this.stopRedisListReader(interactionId);
     }
   }
 
@@ -390,6 +949,13 @@ class TranscriptConsumer {
 
     console.info('[TranscriptConsumer] Stopping transcript consumer...');
     this.isRunning = false;
+
+    // P2 FIX: Stop dead-letter retry processor
+    if (this.retryInterval) {
+      clearInterval(this.retryInterval);
+      this.retryInterval = null;
+      console.info('[TranscriptConsumer] Stopped dead-letter retry processor');
+    }
 
     // Stop discovery interval
     if (this.discoveryInterval) {
@@ -414,25 +980,121 @@ class TranscriptConsumer {
   }
 
   /**
-   * Get status information
+   * P2 FIX: Validate Redis connection
    */
+  async validateRedisConnection(): Promise<{ accessible: boolean; error?: string }> {
+    try {
+      const redisAdapter = this.pubsub as any;
+      if (!redisAdapter.redis) {
+        return { accessible: false, error: 'Redis client not initialized' };
+      }
+      
+      const redis = redisAdapter.redis;
+      
+      // Check if Redis is connected
+      if (redis.status !== 'ready' && redis.status !== 'connecting') {
+        return { accessible: false, error: `Redis status: ${redis.status}` };
+      }
+      
+      // Try a simple PING command
+      const result = await redis.ping();
+      if (result === 'PONG') {
+        return { accessible: true };
+      }
+      
+      return { accessible: false, error: 'PING did not return PONG' };
+    } catch (error: any) {
+      return { accessible: false, error: error.message || String(error) };
+    }
+  }
+
+  /**
+   * P2 FIX: Validate API endpoint is reachable
+   */
+  async validateApiConnection(): Promise<{ accessible: boolean; error?: string; statusCode?: number }> {
+    try {
+      // Try to reach the health endpoint or a simple GET request
+      const healthUrl = `${this.baseUrl}/api/health`;
+      const response = await fetch(healthUrl, {
+        method: 'GET',
+        signal: AbortSignal.timeout(5000), // 5 second timeout
+      });
+      
+      return {
+        accessible: response.ok,
+        statusCode: response.status,
+        error: response.ok ? undefined : `HTTP ${response.status}`,
+      };
+    } catch (error: any) {
+      return {
+        accessible: false,
+        error: error.message || String(error),
+      };
+    }
+  }
+
+  /**
+   * P2 FIX: Get comprehensive health status including connection validation
+   */
+  async getHealthStatus(): Promise<{
+    isRunning: boolean;
+    subscriptionsCount: number;
+    redis: { accessible: boolean; error?: string };
+    api: { accessible: boolean; error?: string; statusCode?: number };
+    deadLetterQueue: { size: number; oldestFailedAt: number | null };
+    baseUrl: string;
+    apiUrl: string;
+  }> {
+    const [redisStatus, apiStatus] = await Promise.all([
+      this.validateRedisConnection(),
+      this.validateApiConnection(),
+    ]);
+    
+    const deadLetterStatus = this.getDeadLetterQueueStatus();
+    
+    return {
+      isRunning: this.isRunning,
+      subscriptionsCount: this.subscriptions.size,
+      redis: redisStatus,
+      api: apiStatus,
+      deadLetterQueue: deadLetterStatus,
+      baseUrl: this.baseUrl,
+      apiUrl: this.nextJsApiUrl,
+    };
+  }
+
   getStatus(): {
     isRunning: boolean;
-    subscriptionCount: number;
+    subscriptionsCount: number;
     subscriptions: Array<{
       interactionId: string;
       transcriptCount: number;
       createdAt: Date;
     }>;
+    hasDiscoveryInterval: boolean;
+    deadLetterQueue: { size: number; oldestFailedAt: number | null };
   } {
+    // Log status check for debugging
+    if (!this.isRunning) {
+      console.debug('[TranscriptConsumer] Status check: consumer is NOT running', {
+        hasPubsub: !!this.pubsub,
+        subscriptionsCount: this.subscriptions.size,
+        hasDiscoveryInterval: !!this.discoveryInterval,
+      });
+    }
+    
+    const deadLetterStatus = this.getDeadLetterQueueStatus();
+    
     return {
       isRunning: this.isRunning,
-      subscriptionCount: this.subscriptions.size,
+      subscriptionsCount: this.subscriptions.size,
       subscriptions: Array.from(this.subscriptions.values()).map((sub) => ({
         interactionId: sub.interactionId,
         transcriptCount: sub.transcriptCount,
         createdAt: sub.createdAt,
       })),
+      hasDiscoveryInterval: !!this.discoveryInterval,
+      deadLetterQueue: deadLetterStatus,
     };
   }
 }
@@ -498,5 +1160,77 @@ export async function unsubscribeFromTranscripts(interactionId: string): Promise
 export function getTranscriptConsumerStatus() {
   const consumer = getTranscriptConsumer();
   return consumer.getStatus();
+}
+
+/**
+ * Trigger stream discovery manually (for health checks and manual triggers)
+ * CRITICAL FIX: Added throttle guard to prevent too-frequent calls
+ */
+// Track throttle logging to reduce memory pressure
+let lastThrottleLogTime = 0;
+const THROTTLE_LOG_INTERVAL_MS = 60000; // Log throttle messages max once per minute
+let throttledCallCount = 0; // Track how many calls were throttled
+
+// CRITICAL MEMORY FIX: Add hard rate limit at function entry to prevent runaway loops
+let discoveryCallCount = 0;
+let discoveryCallResetTime = Date.now();
+const MAX_DISCOVERY_CALLS_PER_MINUTE = 30; // Maximum 30 discovery attempts per minute
+
+export async function triggerStreamDiscovery(): Promise<void> {
+  const now = Date.now();
+  
+  // CRITICAL MEMORY FIX: Hard rate limit at function entry
+  // Reset counter every minute
+  if (now - discoveryCallResetTime >= 60000) {
+    if (discoveryCallCount > MAX_DISCOVERY_CALLS_PER_MINUTE) {
+      console.warn('[TranscriptConsumer] ⚠️ Discovery was rate-limited in last minute', {
+        totalCalls: discoveryCallCount,
+        throttledCalls: throttledCallCount,
+        limit: MAX_DISCOVERY_CALLS_PER_MINUTE,
+        note: 'This indicates excessive discovery triggering - investigate the caller',
+      });
+    }
+    discoveryCallCount = 0;
+    throttledCallCount = 0;
+    discoveryCallResetTime = now;
+  }
+  
+  discoveryCallCount++;
+  
+  // Hard limit: If we've exceeded max calls per minute, immediately return
+  if (discoveryCallCount > MAX_DISCOVERY_CALLS_PER_MINUTE) {
+    throttledCallCount++;
+    // Silent return - no logging to prevent memory exhaustion
+    return;
+  }
+  
+  const consumer = getTranscriptConsumer();
+  if (consumer['isRunning']) {
+    const lastTrigger = consumer['lastManualDiscoveryTime'] || 0;
+    const timeSinceLastTrigger = now - lastTrigger;
+    
+    // Throttle: Don't trigger more than once every 2 seconds
+    if (timeSinceLastTrigger < consumer['MIN_MANUAL_DISCOVERY_INTERVAL_MS']) {
+      throttledCallCount++;
+      // CRITICAL MEMORY FIX: Only log throttle messages once per minute to prevent memory exhaustion
+      // Hundreds of throttle logs per second were creating millions of string objects
+      const timeSinceLastLog = now - lastThrottleLogTime;
+      if (timeSinceLastLog >= THROTTLE_LOG_INTERVAL_MS) {
+        console.debug('[TranscriptConsumer] Discovery throttled (logging once per minute to save memory)', {
+          timeSinceLastTrigger: `${timeSinceLastTrigger}ms`,
+          minInterval: `${consumer['MIN_MANUAL_DISCOVERY_INTERVAL_MS']}ms`,
+          throttledInLastMinute: throttledCallCount,
+          note: 'This message is rate-limited to once per minute to prevent memory leaks',
+        });
+        lastThrottleLogTime = now;
+      }
+      return;
+    }
+    
+    consumer['lastManualDiscoveryTime'] = now;
+    await consumer['discoverAndSubscribeToNewStreams']();
+  } else {
+    console.warn('[TranscriptConsumer] Consumer not running, cannot trigger discovery');
+  }
 }
 
